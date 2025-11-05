@@ -33,6 +33,8 @@ from torch import nn
 from torch.nn.modules.transformer import LayerNorm, Linear, MultiheadAttention
 from torch.utils.data import DataLoader
 
+# -----------------------------------------------------------------------------
+# model
 
 class NanoTabPFNModel(nn.Module):
     def __init__(self, embedding_size: int, num_attention_heads: int, mlp_hidden_size: int, num_layers: int, num_outputs: int):
@@ -303,6 +305,8 @@ class Decoder(nn.Module):
         """
         return self.linear2(F.gelu(self.linear1(x)))
 
+# -----------------------------------------------------------------------------
+# priors
 
 class PriorDataLoader(DataLoader):
     def __init__(self, get_batch_function: Callable[..., Dict[str, Union[torch.Tensor, int]]], num_steps: int, batch_size: int, num_datapoints_max: int, num_features: int, device: torch.device):
@@ -362,6 +366,8 @@ class PriorDumpDataLoader(DataLoader):
     def __len__(self):
         return self.num_steps
 
+# -----------------------------------------------------------------------------
+# utils
 
 def set_randomness_seed(seed):
     random.seed(seed)
@@ -376,6 +382,7 @@ def get_default_device():
     if torch.cuda.is_available():
         device = "cuda"
     return device
+
 
 def make_global_bucket_edges(filename, n_buckets=100, device=get_default_device(), max_y=5_000_000):
     with h5py.File(filename, "r") as f:
@@ -403,6 +410,9 @@ def make_global_bucket_edges(filename, n_buckets=100, device=get_default_device(
     global_bucket_edges = get_bucket_limits(n_buckets, ys=ys_tensor).to(device)
     return global_bucket_edges
 
+
+# -----------------------------------------------------------------------------
+# interface
 
 def init_model_from_state_dict_file(file_path):
     """
@@ -583,6 +593,8 @@ class NanoTabPFNRegressor:
 
         return preds.cpu().numpy()
 
+# -----------------------------------------------------------------------------
+# callbacks
 
 class Callback(ABC):
     """Abstract base class for callbacks."""
@@ -675,6 +687,8 @@ class WandbLoggerCallback(BaseLoggerCallback):
     def close(self):
         self.wandb.finish()
 
+# -----------------------------------------------------------------------------
+# evaluation
 
 TOY_TASKS_REGRESSION = [
     362443,  # diabetes
@@ -860,6 +874,8 @@ def evaluate_openml_tasks(
         "per_dataset": per_dataset,
     }
 
+# -----------------------------------------------------------------------------
+# train
 
 def train(model: NanoTabPFNModel, prior: DataLoader, criterion: nn.CrossEntropyLoss | FullSupportBarDistribution,
           epochs: int, accumulate_gradients: int = 1, lr: float = 1e-4, device: torch.device = None,
@@ -960,6 +976,8 @@ def train(model: NanoTabPFNModel, prior: DataLoader, criterion: nn.CrossEntropyL
 
     return (model.module if multi_gpu else model), total_loss
 
+# -----------------------------------------------------------------------------
+# main
 
 @dataclass
 class Config:
