@@ -945,7 +945,7 @@ def train(model: NanoTabPFNModel, prior: DataLoader, criterion: nn.CrossEntropyL
                 "model": (model.module if multi_gpu else model).state_dict(),
                 "optimizer": optimizer.state_dict(),
             }
-            torch.save(training_state, "other/checkpoints/latest_checkpoint.pth")
+            torch.save(training_state, "workdir/checkpoints/latest_checkpoint.pth")
 
             for callback in callbacks:
                 if type(criterion) is FullSupportBarDistribution:
@@ -963,16 +963,16 @@ def train(model: NanoTabPFNModel, prior: DataLoader, criterion: nn.CrossEntropyL
 
 @dataclass
 class Config:
-    dumps_dir = "other/dumps"
-    logs_dir = "other/logs"
-    checkpoints_dir = "other/checkpoints"
-    models_dir = "other/models"
-    classification_priordump = "other/dumps/50x3_3_100k_classification.h5"
-    regression_priordump = "other/dumps/50x3_1280k_regression.h5"
-    classifier_ckpt = "other/models/nano_classifier.pth"
-    regressor_ckpt = "other/models/nano_regressor.pth"
-    regressor_buckets = "other/models/nano_regressor_buckets.pth"
-    ckpt = None  # "other/checkpoints/latest_checkpoint.pth"
+    dumps_dir = "workdir/dumps"
+    logs_dir = "workdir/logs"
+    checkpoints_dir = "workdir/checkpoints"
+    models_dir = "workdir/models"
+    classification_priordump = "workdir/dumps/50x3_3_100k_classification.h5"
+    regression_priordump = "workdir/dumps/50x3_1280k_regression.h5"
+    classifier_ckpt = "workdir/models/nano_classifier.pth"
+    regressor_ckpt = "workdir/models/nano_regressor.pth"
+    regressor_buckets = "workdir/models/nano_regressor_buckets.pth"
+    ckpt = None  # "workdir/checkpoints/latest_checkpoint.pth"
     multigpu = False
     seed = 2402
     batch_size = 1
