@@ -40,7 +40,6 @@ from torch.utils.data import DataLoader
 
 class NanoTabPFNModel(nn.Module):
     def __init__(self, embedding_size: int, num_attention_heads: int, mlp_hidden_size: int, num_layers: int, num_outputs: int):
-        """Initializes the feature/target encoder, transformer stack and decoder"""
         super().__init__()
         self.embedding_size = embedding_size
         self.num_attention_heads = num_attention_heads
@@ -53,84 +52,34 @@ class NanoTabPFNModel(nn.Module):
         self.decoder = Decoder(embedding_size, mlp_hidden_size, num_outputs)
 
     def forward(self, *args, **kwargs) -> torch.Tensor:
-        """
-        Provides two interfaces:
-        model(X_train, y_train, X_test)
-            Args:
-                X_train: (torch.Tensor) a tensor of shape (batch_size, num_train_datapoints, num_features)
-                y_train: (torch.Tensor) a tensor of shape (batch_size, num_train_datapoints, 1)
-                X_test: (torch.Tensor) a tensor of shape (batch_size, num_test_datapoints, num_features)
-
-        model((x,y), single_eval_pos)
-            Args:
-                x: (torch.Tensor) a tensor of shape (batch_size, num_datapoints, num_features)
-                y: (torch.Tensor) a tensor of shape (batch_size, num_train_datapoints, 1)
-
-
-        The former is similar to the sklearn interface.
-        In the latter x is the concatenation of X_train and X_test, y is y_train and single_eval_pos is the length of X_train.
-        Our model internally works with the latter representation, so we convert the former into the latter and forward it to
-        _forward.
-
-        Returns:
-            (torch.Tensor) a tensor of shape (batch_size, num_test_datapoints, num_classes),
-                           which represent the predicted logits
-        """
         if len(args) == 3:
-            # case model(train_x, train_y, test_x)
             x = args[0]
             if args[2] is not None:
                 x = torch.cat((x, args[2]), dim=1)
             return self._forward((x, args[1]), single_eval_pos=len(args[0]), **kwargs)
         elif len(args) == 1 and isinstance(args, tuple):
-            # case model((x,y), single_eval_pos=None)
             return self._forward(*args, **kwargs)
 
     def _forward(self, src: Tuple[torch.Tensor, torch.Tensor], single_eval_pos: int, num_mem_chunks: int = 1) -> torch.Tensor:
         x_src, y_src = src
-        # we expect the labels to look like (batches, num_train_datapoints, 1),
-        # so we add the last dimension if it is missing
         if len(y_src.shape) < len(x_src.shape):
             y_src = y_src.unsqueeze(-1)
-        # from here on B=Batches, R=Rows, C=Columns, E=embedding size
-        # converts scalar values to embeddings, so (B,R,C-1) -> (B,R,C-1,E)
         x_src = self.feature_encoder(x_src, single_eval_pos)
         num_rows = x_src.shape[1]
-        # padds the y_train up to y by using the mean,
-        # then converts scalar values to embeddings (B,R,1,E)
         y_src = self.target_encoder(y_src, num_rows)
-        # concatenates the feature embeddings with the target embeddings
-        # to give us the full table of embeddings (B,R,C,E))
         src = torch.cat([x_src, y_src], 2)
-        # repeatedly applies the transformer block on (B,R,C,E)
         output = self.transformer_encoder(src, single_eval_pos, num_mem_chunks=num_mem_chunks)
-        # selects the target embeddings (B,num_targets,1,E)
         output = output[:, single_eval_pos:, -1, :]
-        # runs the embeddings through the decoder to get
-        # the logits of our predictions (B,num_targets,num_classes)
         output = self.decoder(output)
         return output
 
 
-# handle variable number of features in here?
 class FeatureEncoder(nn.Module):
     def __init__(self, embedding_size: int):
-        """Creates the linear layer that we will use to embed our features."""
         super().__init__()
         self.linear_layer = nn.Linear(1, embedding_size)
 
     def forward(self, x: torch.Tensor, single_eval_pos: int) -> torch.Tensor:
-        """
-        Normalizes all the features based on the mean and std of the features of the training data,
-        clips them between -100 and 100, then applies a linear layer to embed the features.
-
-        Args:
-            x: (torch.Tensor) a tensor of shape (batch_size, num_rows, num_features)
-            single_eval_pos: (int) the number of datapoints in X_train
-        Returns:
-            (torch.Tensor) a tensor of shape (batch_size, num_rows, num_features, embedding_size), representing
-                           the embeddings of the features
-        """
         x = x.unsqueeze(-1)
         mean = torch.mean(x[:, :single_eval_pos], dim=1, keepdims=True)
         std = torch.std(x[:, :single_eval_pos], dim=1, keepdims=True) + 1e-8
@@ -141,22 +90,10 @@ class FeatureEncoder(nn.Module):
 
 class TargetEncoder(nn.Module):
     def __init__(self, embedding_size: int):
-        """Creates the linear layer that we will use to embed our targets."""
         super().__init__()
         self.linear_layer = nn.Linear(1, embedding_size)
 
     def forward(self, y_train: torch.Tensor, num_rows: int) -> torch.Tensor:
-        """
-        Pads up y_train to the full length of y using the mean per dataset and then embeds it using a linear layer
-
-        Args:
-            y_train: (torch.Tensor) a tensor of shape (batch_size, num_train_datapoints, 1)
-            num_rows: (int) the full length of y
-        Returns:
-            (torch.Tensor) a tensor of shape (batch_size, num_rows, 1, embedding_size), representing
-                           the embeddings of the targets
-        """
-        # nan padding & nan handler instead?
         mean = torch.mean(y_train, axis=1, keepdim=True)
         padding = mean.repeat(1, num_rows - y_train.shape[1], 1)
         y = torch.cat([y_train, padding], dim=1)
@@ -166,36 +103,18 @@ class TargetEncoder(nn.Module):
 
 class TransformerEncoderStack(nn.Module):
     def __init__(self, num_layers: int, embedding_size: int, num_attention_heads: int, mlp_hidden_size: int):
-        """Instantiates num_layers many Transformer Blocks and stores them in a list so we can use them in the forward."""
         super().__init__()
         self.transformer_blocks = nn.ModuleList()
         for _ in range(num_layers):
             self.transformer_blocks.append(TransformerEncoderLayer(embedding_size, num_attention_heads, mlp_hidden_size))
 
     def forward(self, x: torch.Tensor, single_eval_position: int, num_mem_chunks: int = 1) -> torch.Tensor:
-        """
-        Takes the embeddings of all the cells of the table as input and applies num_layers many Transformer blocks.
-
-        Args:
-            x: (torch.Tensor) a tensor of shape (batch_size, num_rows, num_features, embedding_size) that contains all the embeddings
-                              for all the cells in the table
-            single_eval_position: (int) the length of X_train
-            num_mem_chunks: (int) Number of chunks that memory-intense operations will be split into. Higher values use less memory but are slower.
-                                  Needs to be set to 1 during training to get correct gradients.
-
-        Returns
-            (torch.Tensor) a tensor of shape (batch_size, num_rows, num_features, embedding_size)
-        """
         for block in self.transformer_blocks:
             x = block(x, single_eval_position=single_eval_position, num_mem_chunks=num_mem_chunks)
         return x
 
 
 class TransformerEncoderLayer(nn.Module):
-    """
-    Modified version of older version of https://github.com/pytorch/pytorch/blob/v2.6.0/torch/nn/modules/transformer.py#L630
-    """
-
     def __init__(self, embedding_size: int, nhead: int, mlp_hidden_size: int,
                  layer_norm_eps: float = 1e-5, batch_first: bool = True,
                  device=None, dtype=None):
@@ -211,21 +130,7 @@ class TransformerEncoderLayer(nn.Module):
         self.norm3 = LayerNorm(embedding_size, eps=layer_norm_eps, device=device, dtype=dtype)
 
     def forward(self, src: torch.Tensor, single_eval_position: int, num_mem_chunks: int = 1) -> torch.Tensor:
-        """
-        Takes the embeddings of the table as input and applies self-attention between features and self-attention between datapoints
-        followed by a simple 2 layer MLP.
-
-        Args:
-            src: (torch.Tensor) a tensor of shape (batch_size, num_rows, num_features, embedding_size) that contains all the embeddings
-                                for all the cells in the table
-            single_eval_position: (int) the length of X_train
-            num_mem_chunks: (int) Number of chunks that memory-intense operations will be split into. Higher values use less memory but are slower.
-                                  Needs to be set to 1 during training to get correct gradients.
-        Returns
-            (torch.Tensor) a tensor of shape (batch_size, num_rows, num_features, embedding_size)
-        """
         batch_size, rows_size, col_size, embedding_size = src.shape
-        # attention between features
         src = src.reshape(batch_size * rows_size, col_size, embedding_size)
 
         @memory_chunking(num_mem_chunks)
@@ -235,14 +140,12 @@ class TransformerEncoderLayer(nn.Module):
         src = feature_attention(src)
         src = src.reshape(batch_size, rows_size, col_size, embedding_size)
         src = self.norm1(src)
-        # attention between datapoints
         src = src.transpose(1, 2)
         src = src.reshape(batch_size * col_size, rows_size, embedding_size)
 
         @memory_chunking(num_mem_chunks)
         def datapoint_attention(x):
             x_left = self.self_attention_between_datapoints(x[:, :single_eval_position], x[:, :single_eval_position], x[:, :single_eval_position])[0]
-            # test data attends to the training data
             x_right = self.self_attention_between_datapoints(x[:, single_eval_position:], x[:, :single_eval_position], x[:, :single_eval_position])[0]
             return torch.cat([x_left, x_right], dim=1) + x
 
@@ -250,7 +153,6 @@ class TransformerEncoderLayer(nn.Module):
         src = src.reshape(batch_size, col_size, rows_size, embedding_size)
         src = src.transpose(2, 1)
         src = self.norm2(src)
-        # MLP after attention
         src = src.reshape(-1, embedding_size)
 
         @memory_chunking(num_mem_chunks)
@@ -264,13 +166,6 @@ class TransformerEncoderLayer(nn.Module):
 
 
 def memory_chunking(num_mem_chunks: int) -> callable:
-    """
-    This decorator will split the first dimension of the input into chunks and apply the wrapped function
-    to each chunk separately.
-    Args:
-        num_mem_chunks: (int) Number of chunks to split the input into, higher values use less memory but are slower.
-                          Needs to be set to 1 during training to disable chunking and get correct gradients.
-    """
     def decorator(func: Callable[[torch.Tensor], torch.Tensor]) -> Callable[[torch.Tensor], torch.Tensor]:
         def wrapper(x: torch.Tensor) -> torch.Tensor:
             if num_mem_chunks <= 1 or x.shape[0] == 0:
@@ -283,7 +178,7 @@ def memory_chunking(num_mem_chunks: int) -> callable:
                 return func(x)
             chunk_size = max(1, math.ceil(x.shape[0] / num_mem_chunks))
             for x_split in torch.split(x, split_size_or_sections=chunk_size, dim=0):
-                x_split[:] = func(x_split) # in-place modification to save memory, will cause wrong gradients if used during training
+                x_split[:] = func(x_split)
             return x
 
         return wrapper
@@ -293,20 +188,11 @@ def memory_chunking(num_mem_chunks: int) -> callable:
 
 class Decoder(nn.Module):
     def __init__(self, embedding_size: int, mlp_hidden_size: int, num_outputs: int):
-        """Initializes the linear layers for use in the forward"""
         super().__init__()
         self.linear1 = nn.Linear(embedding_size, mlp_hidden_size)
         self.linear2 = nn.Linear(mlp_hidden_size, num_outputs)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Applies an MLP to the embeddings to get the logits
-
-        Args:
-            x: (torch.Tensor) a tensor of shape (batch_size, num_rows, embedding_size)
-        Returns:
-            (torch.Tensor) a tensor of shape (batch_size, num_rows, num_outputs)
-        """
         return self.linear2(F.gelu(self.linear1(x)))
 
 
@@ -419,9 +305,6 @@ def make_global_bucket_edges(filename, n_buckets=100, device=get_default_device(
 
 
 def init_model_from_state_dict_file(file_path):
-    """
-    reads model architecture from state dict, instantiates the architecture and loads the weights
-    """
     state_dict = torch.load(file_path, map_location=torch.device("cpu"))
     model = NanoTabPFNModel(
         num_attention_heads=state_dict["architecture"]["num_attention_heads"],
@@ -434,8 +317,6 @@ def init_model_from_state_dict_file(file_path):
     return model
 
 
-# doing these as lambdas would cause NanoTabPFNClassifier to not be pickle-able,
-# which would cause issues if we want to run it inside the tabarena codebase
 def to_pandas(x):
     return pd.DataFrame(x) if not isinstance(x, pd.DataFrame) else x
 
@@ -445,9 +326,6 @@ def to_numeric(x):
 
 
 def get_feature_preprocessor(X: np.ndarray | pd.DataFrame) -> ColumnTransformer:
-    """
-    fits a preprocessor that imputes NaNs, encodes categorical features and removes constant features
-    """
     X = pd.DataFrame(X)
     num_mask = []
     cat_mask = []
@@ -458,18 +336,17 @@ def get_feature_preprocessor(X: np.ndarray | pd.DataFrame) -> ColumnTransformer:
             cat_mask.append(False)
             continue
         non_nan_entries = X[col].notna().sum()
-        numeric_entries = pd.to_numeric(X[col], errors="coerce").notna().sum()  # in case numeric columns are stored as strings
+        numeric_entries = pd.to_numeric(X[col], errors="coerce").notna().sum() 
         num_mask.append(non_nan_entries == numeric_entries)
         cat_mask.append(non_nan_entries != numeric_entries)
-        # num_mask.append(is_numeric_dtype(X[col]))  # Assumes pandas dtype is correct
 
     num_mask = np.array(num_mask)
     cat_mask = np.array(cat_mask)
 
     num_transformer = Pipeline([
-        ("to_pandas", FunctionTransformer(to_pandas)), # to apply pd.to_numeric of pandas
-        ("to_numeric", FunctionTransformer(to_numeric)), # in case numeric columns are stored as strings
-        ("imputer", SimpleImputer(strategy="mean")), # median might be better because of outliers
+        ("to_pandas", FunctionTransformer(to_pandas)), 
+        ("to_numeric", FunctionTransformer(to_numeric)), 
+        ("imputer", SimpleImputer(strategy="mean")),
     ])
     cat_transformer = Pipeline([
         ("encoder", OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=np.nan)),
@@ -486,8 +363,6 @@ def get_feature_preprocessor(X: np.ndarray | pd.DataFrame) -> ColumnTransformer:
 
 
 class NanoTabPFNClassifier:
-    """scikit-learn like interface"""
-
     def __init__(
         self,
         model: NanoTabPFNModel | str | None = None,
@@ -511,38 +386,28 @@ class NanoTabPFNClassifier:
         self.num_mem_chunks = num_mem_chunks
 
     def fit(self, X_train: np.ndarray, y_train: np.ndarray):
-        """stores X_train and y_train for later use, also computes the highest class number occuring in num_classes"""
         self.feature_preprocessor = get_feature_preprocessor(X_train)
         self.X_train = self.feature_preprocessor.fit_transform(X_train)
         self.y_train = y_train
         self.num_classes = max(set(y_train)) + 1
 
     def predict(self, X_test: np.ndarray) -> np.ndarray:
-        """calls predit_proba and picks the class with the highest probability for each datapoint"""
         predicted_probabilities = self.predict_proba(X_test)
         return predicted_probabilities.argmax(axis=1)
 
     def predict_proba(self, X_test: np.ndarray) -> np.ndarray:
-        """
-        creates (x,y), runs it through our PyTorch Model, cuts off the classes that didn't appear in the training data
-        and applies softmax to get the probabilities
-        """
         x = np.concatenate((self.X_train, self.feature_preprocessor.transform(X_test)))
         y = self.y_train
         with torch.no_grad():
-            x = torch.from_numpy(x).unsqueeze(0).to(torch.float).to(self.device)  # introduce batch size 1
+            x = torch.from_numpy(x).unsqueeze(0).to(torch.float).to(self.device)
             y = torch.from_numpy(y).unsqueeze(0).to(torch.float).to(self.device)
-            out = self.model((x, y), single_eval_pos=len(self.X_train), num_mem_chunks=self.num_mem_chunks).squeeze(0)  # remove batch size 1
-            # our pretrained classifier supports up to num_outputs classes, if the dataset has less we cut off the rest
+            out = self.model((x, y), single_eval_pos=len(self.X_train), num_mem_chunks=self.num_mem_chunks).squeeze(0)
             out = out[:, : self.num_classes]
-            # apply softmax to get a probability distribution
             probabilities = F.softmax(out, dim=1)
             return probabilities.to("cpu").numpy()
 
 
 class NanoTabPFNRegressor:
-    """scikit-learn like interface"""
-
     def __init__(
         self,
         model: NanoTabPFNModel | str | None = None,
@@ -579,10 +444,6 @@ class NanoTabPFNRegressor:
         self.num_mem_chunks = num_mem_chunks
 
     def fit(self, X_train: np.ndarray, y_train: np.ndarray):
-        """
-        Stores X_train and y_train for later use.
-        Computes target normalization.
-        """
         self.feature_preprocessor = get_feature_preprocessor(X_train)
         self.X_train = self.feature_preprocessor.fit_transform(X_train)
         self.y_train = y_train
@@ -592,11 +453,6 @@ class NanoTabPFNRegressor:
         self.y_train_n = (self.y_train - self.y_train_mean) / self.y_train_std
 
     def predict(self, X_test: np.ndarray) -> np.ndarray:
-        """
-        Performs in-context learning using X_train and y_train.
-        Predicts the means of the output distributions for X_test.
-        Renormalizes the predictions back to the original target scale.
-        """
         X = np.concatenate((self.X_train, self.feature_preprocessor.transform(X_test)))
         y = self.y_train_n
 
@@ -616,39 +472,20 @@ class NanoTabPFNRegressor:
 
 
 class Callback(ABC):
-    """Abstract base class for callbacks."""
-
     @abstractmethod
     def on_epoch_end(self, epoch: int, epoch_time: float, loss: float, model, **kwargs):
-        """
-        Called at the end of each epoch.
-
-        Args:
-            epoch (int): The current epoch number.
-            epoch_time (float): Time of the epoch in seconds.
-            loss (float): Mean loss for the epoch.
-            model: The model being trained.
-            **kwargs: Additional arguments.
-        """
         pass
 
     @abstractmethod
     def close(self):
-        """
-        Called to release any resources or perform cleanup.
-        """
         pass
 
 
 class BaseLoggerCallback(Callback):
-    """Abstract base class for logger callbacks."""
-
     pass
 
 
 class ConsoleLoggerCallback(BaseLoggerCallback):
-    """Logger callback that prints epoch information to the console."""
-
     def on_epoch_end(self, epoch: int, epoch_time: float, loss: float, model, **kwargs):
         print(
             f"Epoch {epoch:5d} | Time {epoch_time:5.2f}s | Mean Loss {loss:5.2f}",
@@ -656,13 +493,10 @@ class ConsoleLoggerCallback(BaseLoggerCallback):
         )
 
     def close(self):
-        """Nothing to clean up for print logger."""
         pass
 
 
 class TensorboardLoggerCallback(BaseLoggerCallback):
-    """Logger callback that logs epoch information to TensorBoard."""
-
     def __init__(self, log_dir: str):
         from torch.utils.tensorboard import SummaryWriter
 
@@ -677,22 +511,11 @@ class TensorboardLoggerCallback(BaseLoggerCallback):
 
 
 class WandbLoggerCallback(BaseLoggerCallback):
-    """Logger callback that logs epoch information to Weights & Biases."""
-
     def __init__(self, project: str, name: str = None, config: dict = None, log_dir: str = None):
-        """
-        Initializes a WandbLoggerCallback.
-
-        Args:
-            project (str): The name of the wandb project.
-            name (str, optional): The name of the run. Defaults to None.
-            config (dict, optional): Configuration dictionary for the run. Defaults to None.
-            log_dir (str, optional): Directory to save wandb logs. Defaults to None.
-        """
         try:
             import wandb
 
-            self.wandb = wandb  # store wandb module to avoid import if not used
+            self.wandb = wandb 
             wandb.init(
                 project=project,
                 name=name,
@@ -715,6 +538,7 @@ class WandbLoggerCallback(BaseLoggerCallback):
 # -----------------------------------------------------------------------------
 # evaluation
 
+
 TOY_TASKS_REGRESSION = [
     362443,  # diabetes
 ]
@@ -725,8 +549,6 @@ TOY_TASKS_CLASSIFICATION = [
     9946,  # breast_cancer
 ]
 
-# we hardcode the list here because even if the tasks are cached
-# openml.study.get_suite("tabarena-v0.1") might fail if there are connection issues
 TABARENA_TASKS = [
     363612, 363613, 363614, 363615, 363616, 363618, 363619, 363620, 363621, 363623, 363624, 363625, 363626, 363627, 
     363628, 363629, 363630, 363631, 363632, 363671, 363672, 363673, 363674, 363675, 363676, 363677, 363678, 363679, 
@@ -745,22 +567,6 @@ def get_openml_predictions(
     classification: bool | None = None,
     cache_directory: str | None = None,
 ):
-    """
-    Evaluates a model on a set of OpenML tasks and returns predictions.
-
-    Retrieves datasets from OpenML, applies preprocessing, and evaluates the given model on each task.
-    Returns true targets, predicted labels, and predicted probabilities for each dataset.
-
-    Args:
-        model (NanoTabPFNRegressor | NanoTabPFNClassifier): A scikit-learn compatible model or classifier to be evaluated.
-        tasks (list[int] | str, optional): A list of OpenML task IDs or the name of a benchmark suite.
-        max_n_features (int, optional): Maximum number of features allowed for a task. Tasks exceeding this limit are skipped.
-        max_n_samples (int, optional): Maximum number of instances allowed for a task. Tasks exceeding this limit are skipped.
-        classification (bool | None, optional): Whether the model is a classifier (True) or regressor (False). If None, it is inferred from the model type.
-        cache_directory (str | None, optional): Directory to save OpenML data. If None, default cache path is used.
-    Returns:
-        dict: A dictionary where keys are dataset names and values are tuples of (true targets, predicted labels, predicted probabilities).
-    """
     if classification is None:
         classification = isinstance(model, NanoTabPFNClassifier)
 
@@ -779,22 +585,22 @@ def get_openml_predictions(
         task = openml.tasks.get_task(task_id, download_splits=False)
 
         if classification and task.task_type_id != TaskType.SUPERVISED_CLASSIFICATION:
-            continue  # skip task, only classification
+            continue
         if not classification and task.task_type_id != TaskType.SUPERVISED_REGRESSION:
-            continue  # skip task, only regression
+            continue
 
         dataset = task.get_dataset(download_data=False)
 
         n_features = dataset.qualities["NumberOfFeatures"]
         n_samples = dataset.qualities["NumberOfInstances"]
         if n_features > max_n_features or n_samples > max_n_samples:
-            continue  # skip task, too big
+            continue
 
         _, folds, _ = task.get_split_dimensions()
         tabarena_light = True
         if tabarena_light:
-            folds = 1  # code supports multiple folds but tabarena_light only has one
-        repeat = 0  # code only supports one repeat
+            folds = 1 
+        repeat = 0
         targets = []
         predictions = []
         probabilities = []
@@ -817,7 +623,7 @@ def get_openml_predictions(
             predictions.append(y_pred)
             if classification:
                 y_proba = model.predict_proba(X_test)
-                if y_proba.shape[1] == 2:  # binary classification
+                if y_proba.shape[1] == 2: 
                     y_proba = y_proba[:, 1]
                 probabilities.append(y_proba)
 
@@ -839,9 +645,6 @@ def evaluate_openml_tasks(
     max_n_samples: int = 10_000,
     num_mem_chunks: int = 8,
 ):
-    """
-    Run the OpenML evaluation previously done in the CLI block, but as a callable function.
-    """
     if model_type not in {"classification", "regression"}:
         raise ValueError("model_type must be 'classification' or 'regression'")
 
@@ -900,24 +703,6 @@ def train(
     multi_gpu: bool = False,
     run_name: str = "nanoTFM",
 ):
-    """
-    Trains our model on the given prior using the given criterion.
-
-    Args:
-        model: (NanoTabPFNModel) our PyTorch model
-        prior: (DataLoader) torch-compatible dataloader
-        criterion: (nn.CrossEntropyLoss | FullSupportBarDistribution) our loss criterion
-        epochs: (int) the number of epochs we train for, the number of steps that constitute an epoch are decided by the prior
-        accumulate_gradients: (int) the number of gradients to accumulate before updating the weights
-        device: (torch.device) the device we are using
-        callbacks: A list of callback instances to execute at the end of each epoch. These can be used for
-            logging, validation, or other custom actions.
-        ckpt (Dict[str, torch.Tensor], optional): A checkpoint dictionary containing the model and optimizer states,
-            as well as the last completed epoch. If provided, training resumes from this checkpoint.
-
-    Returns:
-        (torch.Tensor) a tensor of shape (num_rows, batch_size, num_features, embedding_size)
-    """
     if multi_gpu:
         model = nn.DataParallel(model)
     if callbacks is None:
@@ -936,7 +721,7 @@ def train(
     try:
         for epoch in range(ckpt["epoch"] + 1 if ckpt else 1, epochs + 1):
             epoch_start_time = time.time()
-            model.train()  # Turn on the train mode
+            model.train()
             optimizer.train()
             total_loss = 0.0
             for i, full_data in enumerate(prior):
