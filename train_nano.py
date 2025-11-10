@@ -33,8 +33,10 @@ from torch import nn
 from torch.nn.modules.transformer import LayerNorm, Linear, MultiheadAttention
 from torch.utils.data import DataLoader
 
+
 # -----------------------------------------------------------------------------
 # model
+
 
 class NanoTabPFNModel(nn.Module):
     def __init__(self, embedding_size: int, num_attention_heads: int, mlp_hidden_size: int, num_layers: int, num_outputs: int):
@@ -130,8 +132,8 @@ class FeatureEncoder(nn.Module):
                            the embeddings of the features
         """
         x = x.unsqueeze(-1)
-        mean = torch.mean(x[:, :single_eval_pos], axis=1, keepdims=True)
-        std = torch.std(x[:, :single_eval_pos], axis=1, keepdims=True) + 1e-20
+        mean = torch.mean(x[:, :single_eval_pos], dim=1, keepdims=True)
+        std = torch.std(x[:, :single_eval_pos], dim=1, keepdims=True) + 1e-8
         x = (x - mean) / std
         x = torch.clip(x, min=-100, max=100)
         return self.linear_layer(x)
@@ -274,8 +276,10 @@ def memory_chunking(num_mem_chunks: int) -> callable:
             if num_mem_chunks <= 1 or x.shape[0] == 0:
                 return func(x)
             elif torch.is_grad_enabled():
-                warnings.warn("Memory chunking is disabled since gradient computation is enabled to avoid incorrect gradients. "
-                              "Please use `with torch.no_grad():` during inference to enable chunking.")
+                warnings.warn(
+                    "Memory chunking is disabled since gradient computation is enabled to avoid incorrect gradients. "
+                    "Please use `with torch.no_grad():` during inference to enable chunking.",
+                )
                 return func(x)
             chunk_size = max(1, math.ceil(x.shape[0] / num_mem_chunks))
             for x_split in torch.split(x, split_size_or_sections=chunk_size, dim=0):
@@ -305,8 +309,10 @@ class Decoder(nn.Module):
         """
         return self.linear2(F.gelu(self.linear1(x)))
 
+
 # -----------------------------------------------------------------------------
 # priors
+
 
 class PriorDataLoader(DataLoader):
     def __init__(self, get_batch_function: Callable[..., Dict[str, Union[torch.Tensor, int]]], num_steps: int, batch_size: int, num_datapoints_max: int, num_features: int, device: torch.device):
@@ -352,8 +358,10 @@ class PriorDumpDataLoader(DataLoader):
 
                 self.pointer += self.batch_size
                 if self.pointer >= self.data["X"].shape[0]:
-                    print("""Finished iteration over all stored datasets! """
-                          """Will start reusing the same data with different splits now.""")
+                    print(
+                        """Finished iteration over all stored datasets! """
+                        """Will start reusing the same data with different splits now.""",
+                    )
                     self.pointer = 0
 
                 yield dict(
@@ -366,8 +374,10 @@ class PriorDumpDataLoader(DataLoader):
     def __len__(self):
         return self.num_steps
 
+
 # -----------------------------------------------------------------------------
 # utils
+
 
 def set_randomness_seed(seed):
     random.seed(seed)
@@ -388,20 +398,13 @@ def make_global_bucket_edges(filename, n_buckets=100, device=get_default_device(
     with h5py.File(filename, "r") as f:
         y = f["y"]
         num_tables, num_datapoints = y.shape
-        total = num_tables * num_datapoints
 
-        if max_y >= total:
-            ys_concat = y[...].reshape(-1)
-        else:
-            full_rows = max_y // num_datapoints
-            rem =  max_y % num_datapoints
+        num_tables_to_use = min(num_tables, max_y // num_datapoints)
 
-            parts = []
-            if full_rows > 0:
-                parts.append(y[:full_rows, :].reshape(-1))
-            if rem > 0:
-                parts.append(y[full_rows, :rem].reshape(-1))
-            ys_concat = np.concatenate(parts, axis=0) if parts else np.empty((0,), dtype=y.dtype)
+        y_subset = np.array(y[:num_tables_to_use, :], dtype=np.float32)
+        y_means = y_subset.mean(axis=1, keepdims=True)
+        y_stds = y_subset.std(axis=1, keepdims=True, ddof=1) + 1e-8
+        ys_concat = ((y_subset - y_means) / y_stds).ravel()
 
     if ys_concat.size < n_buckets:
         raise ValueError(f"Too few target samples ({ys_concat.size}) to compute {n_buckets} buckets.")
@@ -413,6 +416,7 @@ def make_global_bucket_edges(filename, n_buckets=100, device=get_default_device(
 
 # -----------------------------------------------------------------------------
 # interface
+
 
 def init_model_from_state_dict_file(file_path):
     """
@@ -454,7 +458,7 @@ def get_feature_preprocessor(X: np.ndarray | pd.DataFrame) -> ColumnTransformer:
             cat_mask.append(False)
             continue
         non_nan_entries = X[col].notna().sum()
-        numeric_entries = pd.to_numeric(X[col], errors='coerce').notna().sum() # in case numeric columns are stored as strings
+        numeric_entries = pd.to_numeric(X[col], errors="coerce").notna().sum()  # in case numeric columns are stored as strings
         num_mask.append(non_nan_entries == numeric_entries)
         cat_mask.append(non_nan_entries != numeric_entries)
         # num_mask.append(is_numeric_dtype(X[col]))  # Assumes pandas dtype is correct
@@ -465,33 +469,40 @@ def get_feature_preprocessor(X: np.ndarray | pd.DataFrame) -> ColumnTransformer:
     num_transformer = Pipeline([
         ("to_pandas", FunctionTransformer(to_pandas)), # to apply pd.to_numeric of pandas
         ("to_numeric", FunctionTransformer(to_numeric)), # in case numeric columns are stored as strings
-        ('imputer', SimpleImputer(strategy='mean')) # median might be better because of outliers
+        ("imputer", SimpleImputer(strategy="mean")), # median might be better because of outliers
     ])
     cat_transformer = Pipeline([
-        ('encoder', OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=np.nan)),
-        ('imputer', SimpleImputer(strategy='most_frequent')),
+        ("encoder", OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=np.nan)),
+        ("imputer", SimpleImputer(strategy="most_frequent")),
     ])
 
     preprocessor = ColumnTransformer(
         transformers=[
             ("num", num_transformer, num_mask),
             ("cat", cat_transformer, cat_mask),
-        ]
+        ],
     )
     return preprocessor
 
 
 class NanoTabPFNClassifier:
     """scikit-learn like interface"""
-    def __init__(self, model: NanoTabPFNModel|str|None = None, device: None|str|torch.device = None, num_mem_chunks: int = 8):
+
+    def __init__(
+        self,
+        model: NanoTabPFNModel | str | None = None,
+        device: None | str | torch.device = None,
+        num_mem_chunks: int = 8,
+    ):
         if device is None:
             device = get_default_device()
         if model is None:
-            model = "nanotabpfn.pth"
+            model = "checkpoints/nanotabpfn.pth"
             if not os.path.isfile(model):
-                print('No cached model found, downloading model checkpoint.')
-                response = requests.get('https://ml.informatik.uni-freiburg.de/research-artifacts/pfefferle/nanoTabPFN/nanotabpfn_classifier.pth')
-                with open(model, 'wb') as f:
+                os.makedirs("checkpoints", exist_ok=True)
+                print("No cached model found, downloading model checkpoint.")
+                response = requests.get("https://ml.informatik.uni-freiburg.de/research-artifacts/pfefferle/TFM-Playground/nanotabpfn_classifier.pth")
+                with open(model, "wb") as f:
                     f.write(response.content)
         if isinstance(model, str):
             model = init_model_from_state_dict_file(model)
@@ -531,21 +542,29 @@ class NanoTabPFNClassifier:
 
 class NanoTabPFNRegressor:
     """scikit-learn like interface"""
-    def __init__(self, model: NanoTabPFNModel|str|None = None, dist: FullSupportBarDistribution|str|None = None, device: str|torch.device|None = None, num_mem_chunks: int = 8):
+
+    def __init__(
+        self,
+        model: NanoTabPFNModel | str | None = None,
+        dist: FullSupportBarDistribution | str | None = None,
+        device: str | torch.device | None = None,
+        num_mem_chunks: int = 8,
+    ):
         if device is None:
             device = get_default_device()
         if model is None:
-            model = "nanotabpfn_regressor.pth"
-            dist = "nanotabpfn_regressor_buckets.pth"
+            os.makedirs("checkpoints", exist_ok=True)
+            model = "checkpoints/nanotabpfn_regressor.pth"
+            dist = "checkpoints/nanotabpfn_regressor_buckets.pth"
             if not os.path.isfile(model):
-                print('No cached model found, downloading model checkpoint.')
-                response = requests.get('https://ml.informatik.uni-freiburg.de/research-artifacts/pfefferle/nanoTabPFN/nanotabpfn_regressor.pth')
-                with open(model, 'wb') as f:
+                print("No cached model found, downloading model checkpoint.")
+                response = requests.get("https://ml.informatik.uni-freiburg.de/research-artifacts/pfefferle/TFM-Playground/nanotabpfn_regressor.pth")
+                with open(model, "wb") as f:
                     f.write(response.content)
             if not os.path.isfile(dist):
-                print('No cached bucket edges found, downloading bucket edges.')
-                response = requests.get('https://ml.informatik.uni-freiburg.de/research-artifacts/pfefferle/nanoTabPFN/nanotabpfn_regressor_buckets.pth')
-                with open(dist, 'wb') as f:
+                print("No cached bucket edges found, downloading bucket edges.")
+                response = requests.get("https://ml.informatik.uni-freiburg.de/research-artifacts/pfefferle/TFM-Playground/nanotabpfn_regressor_buckets.pth")
+                with open(dist, "wb") as f:
                     f.write(response.content)
         if isinstance(model, str):
             model = init_model_from_state_dict_file(model)
@@ -557,29 +576,26 @@ class NanoTabPFNRegressor:
         self.model = model.to(device)
         self.device = device
         self.dist = dist
-        self.normalized_dist = None  # Used after fit()
         self.num_mem_chunks = num_mem_chunks
 
     def fit(self, X_train: np.ndarray, y_train: np.ndarray):
         """
-        Stores X_train and y_train for later use. Computes target normalization. Builds normalized bar distribution from existing self.dist.
+        Stores X_train and y_train for later use.
+        Computes target normalization.
         """
         self.feature_preprocessor = get_feature_preprocessor(X_train)
         self.X_train = self.feature_preprocessor.fit_transform(X_train)
         self.y_train = y_train
 
         self.y_train_mean = np.mean(self.y_train)
-        self.y_train_std = np.std(self.y_train) + 1e-8
+        self.y_train_std = np.std(self.y_train, ddof=1) + 1e-8
         self.y_train_n = (self.y_train - self.y_train_mean) / self.y_train_std
-
-        # Convert base distribution to original scale for output
-        bucket_edges = self.dist.borders
-        bucket_edges_denorm = bucket_edges * self.y_train_std + self.y_train_mean
-        self.normalized_dist = FullSupportBarDistribution(bucket_edges_denorm).float()
 
     def predict(self, X_test: np.ndarray) -> np.ndarray:
         """
-        Performs in-context learning using X_train and y_train. Predicts the means of the output distributions for X_test.
+        Performs in-context learning using X_train and y_train.
+        Predicts the means of the output distributions for X_test.
+        Renormalizes the predictions back to the original target scale.
         """
         X = np.concatenate((self.X_train, self.feature_preprocessor.transform(X_test)))
         y = self.y_train_n
@@ -589,12 +605,15 @@ class NanoTabPFNRegressor:
             y_tensor = torch.tensor(y, dtype=torch.float32, device=self.device).unsqueeze(0)
 
             logits = self.model((X_tensor, y_tensor), single_eval_pos=len(self.X_train), num_mem_chunks=self.num_mem_chunks).squeeze(0)
-            preds = self.normalized_dist.mean(logits)
+            preds_n = self.dist.mean(logits)
+            preds = preds_n * self.y_train_std + self.y_train_mean
 
         return preds.cpu().numpy()
 
+
 # -----------------------------------------------------------------------------
 # callbacks
+
 
 class Callback(ABC):
     """Abstract base class for callbacks."""
@@ -631,7 +650,10 @@ class ConsoleLoggerCallback(BaseLoggerCallback):
     """Logger callback that prints epoch information to the console."""
 
     def on_epoch_end(self, epoch: int, epoch_time: float, loss: float, model, **kwargs):
-        print(f'Epoch {epoch:5d} | Time {epoch_time:5.2f}s | Mean Loss {loss:5.2f}', flush=True)
+        print(
+            f"Epoch {epoch:5d} | Time {epoch_time:5.2f}s | Mean Loss {loss:5.2f}",
+            flush=True,
+        )
 
     def close(self):
         """Nothing to clean up for print logger."""
@@ -674,8 +696,10 @@ class WandbLoggerCallback(BaseLoggerCallback):
             wandb.init(
                 project=project,
                 name=name,
+                id=name,
                 config=config,
                 dir=log_dir,
+                resume="allow",
             )
         except ImportError as e:
             raise ImportError("wandb is not installed. Install it with: pip install wandb") from e
@@ -686,6 +710,7 @@ class WandbLoggerCallback(BaseLoggerCallback):
 
     def close(self):
         self.wandb.finish()
+
 
 # -----------------------------------------------------------------------------
 # evaluation
@@ -706,7 +731,7 @@ TABARENA_TASKS = [
     363612, 363613, 363614, 363615, 363616, 363618, 363619, 363620, 363621, 363623, 363624, 363625, 363626, 363627, 
     363628, 363629, 363630, 363631, 363632, 363671, 363672, 363673, 363674, 363675, 363676, 363677, 363678, 363679, 
     363681, 363682, 363683, 363684, 363685, 363686, 363689, 363691, 363693, 363694, 363696, 363697, 363698, 363699, 
-    363700, 363702, 363704, 363705, 363706, 363707, 363708, 363711, 363712
+    363700, 363702, 363704, 363705, 363706, 363707, 363708, 363711, 363712,
 ]
 
 
@@ -774,12 +799,8 @@ def get_openml_predictions(
         predictions = []
         probabilities = []
         for fold in range(folds):
-            X, y, categorical_indicator, attribute_names = dataset.get_data(
-                target=task.target_name, dataset_format="dataframe"
-            )
-            train_indices, test_indices = task.get_train_test_split_indices(
-                fold=fold, repeat=repeat
-            )
+            X, y, categorical_indicator, attribute_names = dataset.get_data(target=task.target_name, dataset_format="dataframe")
+            train_indices, test_indices = task.get_train_test_split_indices(fold=fold, repeat=repeat)
             X_train = X.iloc[train_indices].to_numpy()
             y_train = y.iloc[train_indices].to_numpy()
             X_test = X.iloc[test_indices].to_numpy()
@@ -817,11 +838,9 @@ def evaluate_openml_tasks(
     max_n_features: int = 500,
     max_n_samples: int = 10_000,
     num_mem_chunks: int = 8,
-) -> dict:
+):
     """
     Run the OpenML evaluation previously done in the CLI block, but as a callable function.
-
-    Returns a metrics summary dict with per-dataset scores and the overall average.
     """
     if model_type not in {"classification", "regression"}:
         raise ValueError("model_type must be 'classification' or 'regression'")
@@ -833,53 +852,54 @@ def evaluate_openml_tasks(
     model.model.eval()
 
     if tasks == "toy_tasks" and model_type == "regression":
-        resolved_tasks = TOY_TASKS_REGRESSION
+        tasks = TOY_TASKS_REGRESSION
     elif tasks == "toy_tasks" and model_type == "classification":
-        resolved_tasks = TOY_TASKS_CLASSIFICATION
+        tasks = TOY_TASKS_CLASSIFICATION
     else:
-        resolved_tasks = tasks
+        tasks = tasks
 
     predictions = get_openml_predictions(
         model=model,
-        tasks=resolved_tasks,
+        tasks=tasks,
         max_n_features=max_n_features,
         max_n_samples=max_n_samples,
         classification=(model_type == "classification"),
         cache_directory=cache_directory,
     )
 
-    per_dataset = {}
     average_score = 0.0
     for dataset_name, (y_true, y_pred, y_proba) in predictions.items():
         if model_type == "classification":
             acc = balanced_accuracy_score(y_true, y_pred)
             auc = roc_auc_score(y_true, y_proba, multi_class="ovr")
             average_score += auc
-            per_dataset[dataset_name] = {
-                "roc_auc": float(auc),
-                "balanced_accuracy": float(acc),
-            }
+            print(f"Dataset: {dataset_name} | ROC AUC: {auc:.4f} | Balanced Accuracy: {acc:.4f}")
         else:
             r2 = r2_score(y_true, y_pred)
             average_score += r2
-            per_dataset[dataset_name] = {
-                "r2": float(r2),
-            }
+            print(f"Dataset: {dataset_name} | R2: {r2:.4f}")
 
-    metric_name = "ROC AUC" if model_type == "classification" else "R2"
-    average_score = float(average_score / max(1, len(per_dataset)))
-    return {
-        "metric_name": metric_name,
-        "average_score": average_score,
-        "per_dataset": per_dataset,
-    }
+    average_score /= len(predictions)
+    print(f"Average {'ROC AUC' if model_type == 'classification' else 'R2'}: {average_score:.4f}")
+
 
 # -----------------------------------------------------------------------------
 # train
 
-def train(model: NanoTabPFNModel, prior: DataLoader, criterion: nn.CrossEntropyLoss | FullSupportBarDistribution,
-          epochs: int, accumulate_gradients: int = 1, lr: float = 1e-4, device: torch.device = None,
-          callbacks: list[Callback]=None, ckpt: Dict[str, torch.Tensor] = None, multi_gpu: bool = False):
+
+def train(
+    model: NanoTabPFNModel,
+    prior: DataLoader,
+    criterion: nn.CrossEntropyLoss | FullSupportBarDistribution,
+    epochs: int,
+    accumulate_gradients: int = 1,
+    lr: float = 1e-4,
+    device: torch.device = None,
+    callbacks: list[Callback] = None,
+    ckpt: Dict[str, torch.Tensor] = None,
+    multi_gpu: bool = False,
+    run_name: str = "nanoTFM",
+):
     """
     Trains our model on the given prior using the given criterion.
 
@@ -909,8 +929,9 @@ def train(model: NanoTabPFNModel, prior: DataLoader, criterion: nn.CrossEntropyL
     if ckpt:
         optimizer.load_state_dict(ckpt["optimizer"])
     classification_task = isinstance(criterion, nn.CrossEntropyLoss)
+    regression_task = not classification_task
 
-    assert prior.num_steps % accumulate_gradients == 0, 'num_steps must be divisible by accumulate_gradients'
+    assert prior.num_steps % accumulate_gradients == 0, "num_steps must be divisible by accumulate_gradients"
 
     try:
         for epoch in range(ckpt["epoch"] + 1 if ckpt else 1, epochs + 1):
@@ -928,8 +949,16 @@ def train(model: NanoTabPFNModel, prior: DataLoader, criterion: nn.CrossEntropyL
                     continue
                 targets = full_data["target_y"].to(device)
 
+                if regression_task:
+                    y_mean = data[1].mean(dim=1, keepdim=True)
+                    y_std = data[1].std(dim=1, keepdim=True) + 1e-8
+                    y_norm = (data[1] - y_mean) / y_std
+                    data = (data[0], y_norm)
+
                 output = model(data, single_eval_pos=single_eval_pos)
                 targets = targets[:, single_eval_pos:]
+                if regression_task:
+                    targets = (targets - y_mean) / y_std
                 if classification_task:
                     targets = targets.reshape((-1,)).to(torch.long)
                     output = output.view(-1, output.shape[-1])
@@ -950,13 +979,13 @@ def train(model: NanoTabPFNModel, prior: DataLoader, criterion: nn.CrossEntropyL
             optimizer.eval()
 
             training_state = {
-                'epoch': epoch,
-                'architecture': {
-                    'num_layers': int((model.module if multi_gpu else model).num_layers),
-                    'embedding_size': int((model.module if multi_gpu else model).embedding_size),
-                    'num_attention_heads': int((model.module if multi_gpu else model).num_attention_heads),
-                    'mlp_hidden_size': int((model.module if multi_gpu else model).mlp_hidden_size),
-                    'num_outputs': int((model.module if multi_gpu else model).num_outputs)
+                "epoch": epoch,
+                "architecture": {
+                    "num_layers": int((model.module if multi_gpu else model).num_layers),
+                    "embedding_size": int((model.module if multi_gpu else model).embedding_size),
+                    "num_attention_heads": int((model.module if multi_gpu else model).num_attention_heads),
+                    "mlp_hidden_size": int((model.module if multi_gpu else model).mlp_hidden_size),
+                    "num_outputs": int((model.module if multi_gpu else model).num_outputs),
                 },
                 "model": (model.module if multi_gpu else model).state_dict(),
                 "optimizer": optimizer.state_dict(),
@@ -976,8 +1005,10 @@ def train(model: NanoTabPFNModel, prior: DataLoader, criterion: nn.CrossEntropyL
 
     return (model.module if multi_gpu else model), total_loss
 
+
 # -----------------------------------------------------------------------------
 # main
+
 
 @dataclass
 class Config:
@@ -1055,8 +1086,10 @@ def main():
                 for dataset_name, (y_true, y_pred, y_proba) in predictions.items():
                     scores.append(accuracy_score(y_true, y_pred))
                 avg_score = sum(scores) / len(scores)
-                print(f'epoch {epoch:5d} | time {epoch_time:5.2f}s | mean loss {loss:5.2f} | avg accuracy {avg_score:.3f}',
-                    flush=True)
+                print(
+                    f"epoch {epoch:5d} | time {epoch_time:5.2f}s | mean loss {loss:5.2f} | avg accuracy {avg_score:.3f}",
+                    flush=True,
+                )
 
         class ProductionEvaluationLoggerCallback(WandbLoggerCallback):
             def __init__(self, project: str, name: str = None, config: dict = None, log_dir: str = None):
@@ -1069,14 +1102,18 @@ def main():
                 for dataset_name, (y_true, y_pred, y_proba) in predictions.items():
                     scores.append(roc_auc_score(y_true, y_proba, multi_class="ovr"))
                 avg_score = sum(scores) / len(scores)
-                self.wandb.log({
-                    'epoch': epoch,
-                    'epoch_time': epoch_time,
-                    'mean_loss': loss,
-                    'tabarena_avg_roc_auc': avg_score
-                })
-                print(f'epoch {epoch:5d} | time {epoch_time:5.2f}s | mean loss {loss:5.2f} | avg roc auc {avg_score:.3f}',
-                    flush=True)
+                self.wandb.log(
+                    {
+                        "epoch": epoch,
+                        "epoch_time": epoch_time,
+                        "mean_loss": loss,
+                        "tabarena_avg_roc_auc": avg_score,
+                    }
+                )
+                print(
+                    f"epoch {epoch:5d} | time {epoch_time:5.2f}s | mean loss {loss:5.2f} | avg roc auc {avg_score:.3f}",
+                    flush=True,
+                )
 
         # callbacks = [ProductionEvaluationLoggerCallback('nanoTFM', 'nanoTabPFN-1')]
         callbacks = [ToyEvaluationLoggerCallback(TOY_TASKS_CLASSIFICATION)]
@@ -1109,9 +1146,10 @@ def main():
                 for dataset_name, (y_true, y_pred, _) in predictions.items():
                     scores.append(r2_score(y_true, y_pred))
                 avg_score = sum(scores) / len(scores)
-                print(f'epoch {epoch:5d} | time {epoch_time:5.2f}s | mean loss {loss:5.2f} | avg r2 score {avg_score:.3f}',
-                    flush=True)
-
+                print(
+                    f"epoch {epoch:5d} | time {epoch_time:5.2f}s | mean loss {loss:5.2f} | avg r2 score {avg_score:.3f}",
+                    flush=True,
+                )
 
         callbacks = [EvaluationLoggerCallback(TOY_TASKS_REGRESSION)]
 
