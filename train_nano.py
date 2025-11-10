@@ -81,8 +81,8 @@ class FeatureEncoder(nn.Module):
 
     def forward(self, x: torch.Tensor, single_eval_pos: int) -> torch.Tensor:
         x = x.unsqueeze(-1)
-        mean = torch.mean(x[:, :single_eval_pos], dim=1, keepdims=True)
-        std = torch.std(x[:, :single_eval_pos], dim=1, keepdims=True) + 1e-8
+        mean = x[:, :single_eval_pos].mean(dim=1, keepdim=True)
+        std = x[:, :single_eval_pos].std(dim=1, keepdim=True) + 1e-8
         x = (x - mean) / std
         x = torch.clip(x, min=-100, max=100)
         return self.linear_layer(x)
@@ -94,7 +94,7 @@ class TargetEncoder(nn.Module):
         self.linear_layer = nn.Linear(1, embedding_size)
 
     def forward(self, y_train: torch.Tensor, num_rows: int) -> torch.Tensor:
-        mean = torch.mean(y_train, axis=1, keepdim=True)
+        mean = y_train.mean(dim=1, keepdim=True)
         padding = mean.repeat(1, num_rows - y_train.shape[1], 1)
         y = torch.cat([y_train, padding], dim=1)
         y = y.unsqueeze(-1)
