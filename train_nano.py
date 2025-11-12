@@ -4,7 +4,6 @@ import os
 import random
 import time
 import warnings
-from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Callable, Dict, Iterator, Tuple, Union
 
@@ -471,21 +470,7 @@ class NanoTabPFNRegressor:
 # callbacks
 
 
-class Callback(ABC):
-    @abstractmethod
-    def on_epoch_end(self, epoch: int, epoch_time: float, loss: float, model, **kwargs):
-        pass
-
-    @abstractmethod
-    def close(self):
-        pass
-
-
-class BaseLoggerCallback(Callback):
-    pass
-
-
-class ConsoleLoggerCallback(BaseLoggerCallback):
+class ConsoleLoggerCallback:
     def on_epoch_end(self, epoch: int, epoch_time: float, loss: float, model, **kwargs):
         print(
             f"Epoch {epoch:5d} | Time {epoch_time:5.2f}s | Mean Loss {loss:5.2f}",
@@ -495,44 +480,6 @@ class ConsoleLoggerCallback(BaseLoggerCallback):
     def close(self):
         pass
 
-
-class TensorboardLoggerCallback(BaseLoggerCallback):
-    def __init__(self, log_dir: str):
-        from torch.utils.tensorboard import SummaryWriter
-
-        self.writer = SummaryWriter(log_dir=log_dir)
-
-    def on_epoch_end(self, epoch: int, epoch_time: float, loss: float, model, **kwargs):
-        self.writer.add_scalar("Loss/train", loss, epoch)
-        self.writer.add_scalar("Time/epoch", epoch_time, epoch)
-
-    def close(self):
-        self.writer.close()
-
-
-class WandbLoggerCallback(BaseLoggerCallback):
-    def __init__(self, project: str, name: str = None, config: dict = None, log_dir: str = None):
-        try:
-            import wandb
-
-            self.wandb = wandb 
-            wandb.init(
-                project=project,
-                name=name,
-                id=name,
-                config=config,
-                dir=log_dir,
-                resume="allow",
-            )
-        except ImportError as e:
-            raise ImportError("wandb is not installed. Install it with: pip install wandb") from e
-
-    def on_epoch_end(self, epoch: int, epoch_time: float, loss: float, model, **kwargs):
-        log_dict = {"epoch": epoch, "loss": loss, " epoch_time": epoch_time}
-        self.wandb.log(log_dict)
-
-    def close(self):
-        self.wandb.finish()
 
 
 # -----------------------------------------------------------------------------
@@ -698,7 +645,7 @@ def train(
     accumulate_gradients: int = 1,
     lr: float = 1e-4,
     device: torch.device = None,
-    callbacks: list[Callback] = None,
+    callbacks: list = None,
     ckpt: Dict[str, torch.Tensor] = None,
     multi_gpu: bool = False,
     run_name: str = "nanoTFM",
@@ -860,7 +807,7 @@ def main():
         criterion = nn.CrossEntropyLoss()
         savepath = c.classifier_ckpt
 
-        class ToyEvaluationLoggerCallback(ConsoleLoggerCallback):
+        class ClassificationEvaluationLoggerCallback(ConsoleLoggerCallback):
             def __init__(self, tasks):
                 self.tasks = tasks
 
@@ -876,32 +823,7 @@ def main():
                     flush=True,
                 )
 
-        class ProductionEvaluationLoggerCallback(WandbLoggerCallback):
-            def __init__(self, project: str, name: str = None, config: dict = None, log_dir: str = None):
-                super().__init__(project, name, config, log_dir)
-
-            def on_epoch_end(self, epoch: int, epoch_time: float, loss: float, model, **kwargs):
-                classifier = NanoTabPFNClassifier(model, device)
-                predictions = get_openml_predictions(model=classifier, classification=True)
-                scores = []
-                for dataset_name, (y_true, y_pred, y_proba) in predictions.items():
-                    scores.append(roc_auc_score(y_true, y_proba, multi_class="ovr"))
-                avg_score = sum(scores) / len(scores)
-                self.wandb.log(
-                    {
-                        "epoch": epoch,
-                        "epoch_time": epoch_time,
-                        "mean_loss": loss,
-                        "tabarena_avg_roc_auc": avg_score,
-                    }
-                )
-                print(
-                    f"epoch {epoch:5d} | time {epoch_time:5.2f}s | mean loss {loss:5.2f} | avg roc auc {avg_score:.3f}",
-                    flush=True,
-                )
-
-        # callbacks = [ProductionEvaluationLoggerCallback('nanoTFM', 'nanoTabPFN-1')]
-        callbacks = [ToyEvaluationLoggerCallback(TOY_TASKS_CLASSIFICATION)]
+        callbacks = [ClassificationEvaluationLoggerCallback(TOY_TASKS_CLASSIFICATION)]
     elif args.type == "regression":
         prior = PriorDumpDataLoader(
             filename=c.regression_priordump,
@@ -920,7 +842,7 @@ def main():
         criterion = FullSupportBarDistribution(bucket_edges)
         savepath = c.regressor_ckpt
 
-        class EvaluationLoggerCallback(ConsoleLoggerCallback):
+        class RegressionEvaluationLoggerCallback(ConsoleLoggerCallback):
             def __init__(self, tasks):
                 self.tasks = tasks
 
@@ -936,7 +858,7 @@ def main():
                     flush=True,
                 )
 
-        callbacks = [EvaluationLoggerCallback(TOY_TASKS_REGRESSION)]
+        callbacks = [RegressionEvaluationLoggerCallback(TOY_TASKS_REGRESSION)]
 
     model = NanoTabPFNModel(
         num_attention_heads=c.num_attention_heads,
