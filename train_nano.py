@@ -634,111 +634,6 @@ def evaluate_openml_tasks(
 
 
 # -----------------------------------------------------------------------------
-# train
-
-
-def train(
-    model: NanoTabPFNModel,
-    prior: DataLoader,
-    criterion: nn.CrossEntropyLoss | FullSupportBarDistribution,
-    epochs: int,
-    accumulate_gradients: int = 1,
-    lr: float = 1e-4,
-    device: torch.device = None,
-    callbacks: list = None,
-    ckpt: Dict[str, torch.Tensor] = None,
-    multi_gpu: bool = False,
-    run_name: str = "nanoTFM",
-):
-    if multi_gpu:
-        model = nn.DataParallel(model)
-    if callbacks is None:
-        callbacks = []
-    if not device:
-        device = get_default_device()
-    model.to(device)
-    optimizer = schedulefree.AdamWScheduleFree(model.parameters(), lr=lr, weight_decay=0.0)
-    if ckpt:
-        optimizer.load_state_dict(ckpt["optimizer"])
-    classification_task = isinstance(criterion, nn.CrossEntropyLoss)
-    regression_task = not classification_task
-
-    assert prior.num_steps % accumulate_gradients == 0, "num_steps must be divisible by accumulate_gradients"
-
-    try:
-        for epoch in range(ckpt["epoch"] + 1 if ckpt else 1, epochs + 1):
-            epoch_start_time = time.time()
-            model.train()
-            optimizer.train()
-            total_loss = 0.0
-            for i, full_data in enumerate(prior):
-                single_eval_pos = full_data["single_eval_pos"]
-                data = (
-                    full_data["x"].to(device),
-                    full_data["y"][:, :single_eval_pos].to(device),
-                )
-                if torch.isnan(data[0]).any() or torch.isnan(data[1]).any():
-                    continue
-                targets = full_data["target_y"].to(device)
-
-                if regression_task:
-                    y_mean = data[1].mean(dim=1, keepdim=True)
-                    y_std = data[1].std(dim=1, keepdim=True) + 1e-8
-                    y_norm = (data[1] - y_mean) / y_std
-                    data = (data[0], y_norm)
-
-                output = model(data, single_eval_pos=single_eval_pos)
-                targets = targets[:, single_eval_pos:]
-                if regression_task:
-                    targets = (targets - y_mean) / y_std
-                if classification_task:
-                    targets = targets.reshape((-1,)).to(torch.long)
-                    output = output.view(-1, output.shape[-1])
-
-                losses = criterion(output, targets)
-                loss = losses.mean() / accumulate_gradients
-                loss.backward()
-                total_loss += loss.cpu().detach().item() * accumulate_gradients
-
-                if (i + 1) % accumulate_gradients == 0:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                    optimizer.step()
-                    optimizer.zero_grad()
-
-            end_time = time.time()
-            mean_loss = total_loss / len(prior)
-            model.eval()
-            optimizer.eval()
-
-            training_state = {
-                "epoch": epoch,
-                "architecture": {
-                    "num_layers": int((model.module if multi_gpu else model).num_layers),
-                    "embedding_size": int((model.module if multi_gpu else model).embedding_size),
-                    "num_attention_heads": int((model.module if multi_gpu else model).num_attention_heads),
-                    "mlp_hidden_size": int((model.module if multi_gpu else model).mlp_hidden_size),
-                    "num_outputs": int((model.module if multi_gpu else model).num_outputs),
-                },
-                "model": (model.module if multi_gpu else model).state_dict(),
-                "optimizer": optimizer.state_dict(),
-            }
-            torch.save(training_state, "workdir/checkpoints/latest_checkpoint.pth")
-
-            for callback in callbacks:
-                if type(criterion) is FullSupportBarDistribution:
-                    callback.on_epoch_end(epoch, end_time - epoch_start_time, mean_loss, (model.module if multi_gpu else model), dist=criterion)
-                else:
-                    callback.on_epoch_end(epoch, end_time - epoch_start_time, mean_loss, (model.module if multi_gpu else model))
-    except KeyboardInterrupt:
-        pass
-    finally:
-        for callback in callbacks:
-            callback.close()
-
-    return (model.module if multi_gpu else model), total_loss
-
-
-# -----------------------------------------------------------------------------
 # main
 
 
@@ -870,19 +765,93 @@ def main():
 
     if ckpt:
         model.load_state_dict(ckpt["model"])
+    if c.multigpu:
+        model = nn.DataParallel(model)
+    if callbacks is None:
+        callbacks = []
+    if not device:
+        device = get_default_device()
+    model.to(device)
+    optimizer = schedulefree.AdamWScheduleFree(model.parameters(), lr=c.lr, weight_decay=0.0)
+    if ckpt:
+        optimizer.load_state_dict(ckpt["optimizer"])
+    classification_task = isinstance(criterion, nn.CrossEntropyLoss)
+    regression_task = not classification_task
 
-    trained_model, loss = train(
-        model=model,
-        prior=prior,
-        criterion=criterion,
-        epochs=c.epochs,
-        accumulate_gradients=c.accumulate,
-        lr=c.lr,
-        device=device,
-        callbacks=callbacks,
-        ckpt=ckpt,
-        multi_gpu=c.multigpu,
-    )
+    assert prior.num_steps % c.accumulate == 0, "num_steps must be divisible by accumulate_gradients"
+
+    total_loss = 0.0
+    try:
+        for epoch in range(ckpt["epoch"] + 1 if ckpt else 1, c.epochs + 1):
+            epoch_start_time = time.time()
+            model.train()
+            optimizer.train()
+            total_loss = 0.0
+            for i, full_data in enumerate(prior):
+                single_eval_pos = full_data["single_eval_pos"]
+                data = (
+                    full_data["x"].to(device),
+                    full_data["y"][:, :single_eval_pos].to(device),
+                )
+                if torch.isnan(data[0]).any() or torch.isnan(data[1]).any():
+                    continue
+                targets = full_data["target_y"].to(device)
+
+                if regression_task:
+                    y_mean = data[1].mean(dim=1, keepdim=True)
+                    y_std = data[1].std(dim=1, keepdim=True) + 1e-8
+                    y_norm = (data[1] - y_mean) / y_std
+                    data = (data[0], y_norm)
+
+                output = model(data, single_eval_pos=single_eval_pos)
+                targets = targets[:, single_eval_pos:]
+                if regression_task:
+                    targets = (targets - y_mean) / y_std
+                if classification_task:
+                    targets = targets.reshape((-1,)).to(torch.long)
+                    output = output.view(-1, output.shape[-1])
+
+                losses = criterion(output, targets)
+                loss = losses.mean() / c.accumulate
+                loss.backward()
+                total_loss += loss.cpu().detach().item() * c.accumulate
+
+                if (i + 1) % c.accumulate == 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    optimizer.step()
+                    optimizer.zero_grad()
+
+            end_time = time.time()
+            mean_loss = total_loss / len(prior)
+            model.eval()
+            optimizer.eval()
+
+            training_state = {
+                "epoch": epoch,
+                "architecture": {
+                    "num_layers": int((model.module if c.multigpu else model).num_layers),
+                    "embedding_size": int((model.module if c.multigpu else model).embedding_size),
+                    "num_attention_heads": int((model.module if c.multigpu else model).num_attention_heads),
+                    "mlp_hidden_size": int((model.module if c.multigpu else model).mlp_hidden_size),
+                    "num_outputs": int((model.module if c.multigpu else model).num_outputs),
+                },
+                "model": (model.module if c.multigpu else model).state_dict(),
+                "optimizer": optimizer.state_dict(),
+            }
+            torch.save(training_state, "workdir/checkpoints/latest_checkpoint.pth")
+
+            for callback in callbacks:
+                if type(criterion) is FullSupportBarDistribution:
+                    callback.on_epoch_end(epoch, end_time - epoch_start_time, mean_loss, (model.module if c.multigpu else model), dist=criterion)
+                else:
+                    callback.on_epoch_end(epoch, end_time - epoch_start_time, mean_loss, (model.module if c.multigpu else model))
+    except KeyboardInterrupt:
+        pass
+    finally:
+        for callback in callbacks:
+            callback.close()
+
+    final_model = (model.module if c.multigpu else model)
 
     artifact = {
         "architecture": {
@@ -892,7 +861,7 @@ def main():
             "mlp_hidden_size": c.mlp_hidden_size,
             "num_outputs": c.num_outputs,
         },
-        "model": trained_model.state_dict(),
+        "model": final_model.state_dict(),
     }
 
     torch.save(artifact, savepath)
