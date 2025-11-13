@@ -29,6 +29,7 @@ from sklearn.preprocessing import FunctionTransformer, LabelEncoder, OrdinalEnco
 from torch import nn
 from torch.utils.data import DataLoader
 
+
 # -----------------------------------------------------------------------------
 # model
 
@@ -640,13 +641,44 @@ class NanoTabPFNRegressor:
 # callbacks
 
 
-class ConsoleLoggerCallback:
+class ClassificationEvaluationLoggerCallback:
+    def __init__(self, tasks, device=None):
+        self.tasks = tasks
+        self.device = device or get_default_device()
+
     def on_epoch_end(self, epoch: int, epoch_time: float, loss: float, model, **kwargs):
+        classifier = NanoTabPFNClassifier(model, self.device)
+        predictions = get_openml_predictions(model=classifier, tasks=self.tasks)
+        scores = []
+        for _, (y_true, y_pred, _y_proba) in predictions.items():
+            scores.append(accuracy_score(y_true, y_pred))
+        avg_score = (sum(scores) / len(scores)) if len(scores) > 0 else float("nan")
         print(
-            f"Epoch {epoch:5d} | Time {epoch_time:5.2f}s | Mean Loss {loss:5.2f}",
+            f"epoch {epoch:5d} | time {epoch_time:5.2f}s | mean loss {loss:5.2f} | avg accuracy {avg_score:.3f}",
             flush=True,
         )
 
+    def close(self):
+        pass
+
+
+class RegressionEvaluationLoggerCallback:
+    def __init__(self, tasks, device=None):
+        self.tasks = tasks
+        self.device = device or get_default_device()
+
+    def on_epoch_end(self, epoch: int, epoch_time: float, loss: float, model, **kwargs):
+        regressor = NanoTabPFNRegressor(model, self.device)
+        predictions = get_openml_predictions(model=regressor, tasks=self.tasks)
+        scores = []
+        for _, (y_true, y_pred, _proba) in predictions.items():
+            scores.append(r2_score(y_true, y_pred))
+        avg_score = (sum(scores) / len(scores)) if len(scores) > 0 else float("nan")
+        print(
+            f"epoch {epoch:5d} | time {epoch_time:5.2f}s | mean loss {loss:5.2f} | avg r2 score {avg_score:.3f}",
+            flush=True,
+        )
+  
     def close(self):
         pass
 
@@ -881,24 +913,7 @@ def main():
         c.num_outputs = prior.max_num_classes
         criterion = nn.CrossEntropyLoss()
         savepath = c.classifier_ckpt
-
-        class ClassificationEvaluationLoggerCallback(ConsoleLoggerCallback):
-            def __init__(self, tasks):
-                self.tasks = tasks
-
-            def on_epoch_end(self, epoch: int, epoch_time: float, loss: float, model, **kwargs):
-                classifier = NanoTabPFNClassifier(model, device)
-                predictions = get_openml_predictions(model=classifier, tasks=self.tasks)
-                scores = []
-                for dataset_name, (y_true, y_pred, y_proba) in predictions.items():
-                    scores.append(accuracy_score(y_true, y_pred))
-                avg_score = sum(scores) / len(scores)
-                print(
-                    f"epoch {epoch:5d} | time {epoch_time:5.2f}s | mean loss {loss:5.2f} | avg accuracy {avg_score:.3f}",
-                    flush=True,
-                )
-
-        callbacks = [ClassificationEvaluationLoggerCallback(TOY_TASKS_CLASSIFICATION)]
+        callbacks = [ClassificationEvaluationLoggerCallback(TOY_TASKS_CLASSIFICATION, device=device)]
     elif args.type == "regression":
         prior = PriorDumpDataLoader(
             filename=c.regression_priordump,
@@ -918,24 +933,7 @@ def main():
             )
         criterion = FullSupportBarDistribution(borders)
         savepath = c.regressor_ckpt
-
-        class RegressionEvaluationLoggerCallback(ConsoleLoggerCallback):
-            def __init__(self, tasks):
-                self.tasks = tasks
-
-            def on_epoch_end(self, epoch: int, epoch_time: float, loss: float, model, **kwargs):
-                regressor = NanoTabPFNRegressor(model, device)
-                predictions = get_openml_predictions(model=regressor, tasks=self.tasks)
-                scores = []
-                for dataset_name, (y_true, y_pred, _) in predictions.items():
-                    scores.append(r2_score(y_true, y_pred))
-                avg_score = sum(scores) / len(scores)
-                print(
-                    f"epoch {epoch:5d} | time {epoch_time:5.2f}s | mean loss {loss:5.2f} | avg r2 score {avg_score:.3f}",
-                    flush=True,
-                )
-
-        callbacks = [RegressionEvaluationLoggerCallback(TOY_TASKS_REGRESSION)]
+        callbacks = [RegressionEvaluationLoggerCallback(TOY_TASKS_REGRESSION, device=device)]
 
     model = NanoTabPFNModel(
         num_attention_heads=c.num_attention_heads,
