@@ -27,7 +27,6 @@ from sklearn.metrics import (
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer, LabelEncoder, OrdinalEncoder
 from torch import nn
-from torch.nn.modules.transformer import LayerNorm, Linear, MultiheadAttention
 from torch.utils.data import DataLoader
 
 
@@ -118,15 +117,15 @@ class TransformerEncoderLayer(nn.Module):
                  layer_norm_eps: float = 1e-5, batch_first: bool = True,
                  device=None, dtype=None):
         super().__init__()
-        self.self_attention_between_datapoints = MultiheadAttention(embedding_size, nhead, batch_first=batch_first, device=device, dtype=dtype)
-        self.self_attention_between_features = MultiheadAttention(embedding_size, nhead, batch_first=batch_first, device=device, dtype=dtype)
+        self.self_attention_between_datapoints = nn.MultiheadAttention(embedding_size, nhead, batch_first=batch_first, device=device, dtype=dtype)
+        self.self_attention_between_features = nn.MultiheadAttention(embedding_size, nhead, batch_first=batch_first, device=device, dtype=dtype)
 
-        self.linear1 = Linear(embedding_size, mlp_hidden_size, device=device, dtype=dtype)
-        self.linear2 = Linear(mlp_hidden_size, embedding_size, device=device, dtype=dtype)
+        self.linear1 = nn.Linear(embedding_size, mlp_hidden_size, device=device, dtype=dtype)
+        self.linear2 = nn.Linear(mlp_hidden_size, embedding_size, device=device, dtype=dtype)
 
-        self.norm1 = LayerNorm(embedding_size, eps=layer_norm_eps, device=device, dtype=dtype)
-        self.norm2 = LayerNorm(embedding_size, eps=layer_norm_eps, device=device, dtype=dtype)
-        self.norm3 = LayerNorm(embedding_size, eps=layer_norm_eps, device=device, dtype=dtype)
+        self.norm1 = nn.LayerNorm(embedding_size, eps=layer_norm_eps, device=device, dtype=dtype)
+        self.norm2 = nn.LayerNorm(embedding_size, eps=layer_norm_eps, device=device, dtype=dtype)
+        self.norm3 = nn.LayerNorm(embedding_size, eps=layer_norm_eps, device=device, dtype=dtype)
 
     def forward(self, src: torch.Tensor, single_eval_position: int, num_mem_chunks: int = 1) -> torch.Tensor:
         batch_size, rows_size, col_size, embedding_size = src.shape
