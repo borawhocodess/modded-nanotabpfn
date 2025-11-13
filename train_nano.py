@@ -11,13 +11,11 @@ import h5py
 import numpy as np
 import openml
 import pandas as pd
-import requests
 import schedulefree
 import torch
 import torch.nn.functional as F
 from openml.config import set_root_cache_directory
 from openml.tasks import TaskType
-from pfns.bar_distribution import FullSupportBarDistribution, get_bucket_limits
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import (
@@ -49,6 +47,8 @@ class NanoTabPFNModel(nn.Module):
         self.target_encoder = TargetEncoder(embedding_size)
         self.transformer_encoder = TransformerEncoderStack(num_layers, embedding_size, num_attention_heads, mlp_hidden_size)
         self.decoder = Decoder(embedding_size, mlp_hidden_size, num_outputs)
+
+        self.register_buffer("borders", None, persistent=True)
 
     def forward(self, *args, **kwargs) -> torch.Tensor:
         if len(args) == 3:
@@ -279,7 +279,44 @@ def get_default_device():
     return device
 
 
-def make_global_bucket_edges(filename, n_buckets=100, device=get_default_device(), max_y=5_000_000):
+def compute_bucket_borders(num_buckets: int, ys: torch.Tensor) -> torch.Tensor:
+    """
+    decides equal mass bucket borders from ys
+    inspired by pfns.model.bar_distribution get_bucket_borders
+    """
+    ys = torch.as_tensor(ys)
+    if not torch.is_floating_point(ys):
+        ys = ys.to(torch.float32)
+    ys = ys.flatten()
+    ys = ys[torch.isfinite(ys)]
+
+    if ys.numel() <= num_buckets:
+        raise ValueError(f"ys numel ({ys.numel()}) <= num buckets ({num_buckets})")
+
+    n = (ys.numel() // num_buckets) * num_buckets
+    ys = ys[:n]
+    ys_per_bucket = n // num_buckets
+
+    ys_sorted, _ = torch.sort(ys)
+
+    chunks = ys_sorted.reshape(num_buckets, ys_per_bucket)
+    interiors = (chunks[:-1, -1] + chunks[1:, 0]) / 2
+
+    min_outer = ys_sorted[0].unsqueeze(0)
+    max_outer = ys_sorted[-1].unsqueeze(0)
+
+    borders = torch.cat((min_outer, interiors, max_outer))
+
+    if borders.numel() - 1 != num_buckets:
+        raise ValueError("num borders - 1 != num buckets")
+
+    if torch.unique_consecutive(borders).numel() != borders.numel():
+        raise ValueError("duplicate borders detected")
+
+    return borders
+
+
+def make_global_bucket_borders(filename, n_buckets=100, device=get_default_device(), max_y=5_000_000):
     with h5py.File(filename, "r") as f:
         y = f["y"]
         num_tables, num_datapoints = y.shape
@@ -295,24 +332,171 @@ def make_global_bucket_edges(filename, n_buckets=100, device=get_default_device(
         raise ValueError(f"Too few target samples ({ys_concat.size}) to compute {n_buckets} buckets.")
 
     ys_tensor = torch.tensor(ys_concat, dtype=torch.float32, device=device)
-    global_bucket_edges = get_bucket_limits(n_buckets, ys=ys_tensor).to(device)
-    return global_bucket_edges
+    global_bucket_borders = compute_bucket_borders(n_buckets, ys=ys_tensor).to(device)
+    return global_bucket_borders
+
+
+class BarDistribution(nn.Module):
+    """
+    bar distribution defined by borders with nan target ignoring option
+    inspired by pfns.model.bar_distribution BarDistribution
+    """
+
+    def __init__(self, borders: torch.Tensor, *, ignore_nan_targets: bool = True):
+        super().__init__()
+
+        borders = torch.as_tensor(borders)
+        if borders.ndim != 1:
+            raise ValueError("borders != 1d")
+        if not torch.is_floating_point(borders):
+            borders = borders.to(torch.get_default_dtype())
+        borders = borders.contiguous()
+        self.register_buffer("borders", borders)
+        if torch.any(self.bar_widths <= 0):
+            raise ValueError("borders must be strictly increasing)")
+
+        self.ignore_nan_targets = ignore_nan_targets
+
+    @property
+    def bar_widths(self) -> torch.Tensor:
+        return self.borders[1:] - self.borders[:-1]
+
+    @property
+    def num_bars(self) -> int:
+        return self.borders.numel() - 1
+
+    def ignore_init(self, y: torch.Tensor) -> torch.Tensor:
+        """
+        makes ignore mask for nan targets and alters y (will be ignored later)
+        """
+        ignore_mask = torch.isnan(y)
+        if ignore_mask.any():
+            if not self.ignore_nan_targets:
+                raise ValueError("nan in y while ignore_nan_targets=False")
+            y[ignore_mask] = self.borders[0]
+        return ignore_mask
+
+    def map_to_bar_indices(self, y: torch.Tensor) -> torch.Tensor:
+        """
+        maps each y to its corresponding bar index
+        """
+        indices = torch.searchsorted(self.borders, y, right=False) - 1
+        indices = indices.clamp(0, self.num_bars - 1)
+        return indices
+
+    def compute_scaled_log_probs(self, logits: torch.Tensor) -> torch.Tensor:
+        """
+        log prob density
+        """
+        widths = self.bar_widths.to(logits.device, logits.dtype)
+        log_probs = torch.log_softmax(logits, dim=-1)
+        log_widths = torch.log(widths)
+        scaled_log_probs = log_probs - log_widths
+        return scaled_log_probs
+
+
+class FullSupportBarDistribution(BarDistribution):
+    """
+    extends BarDistribution with half normal tails on both sides for full support
+    inspired by pfns.model.bar_distribution FullSupportBarDistribution
+    """
+
+    def __init__(self, borders: torch.Tensor, *, ignore_nan_targets: bool = True):
+        super().__init__(borders, ignore_nan_targets=ignore_nan_targets)
+        if torch.any(self.bar_widths[[0, -1]] <= 0):
+            raise ValueError("half normal tails need first and last bar widths > 0")
+
+    @staticmethod
+    def halfnormal_with_p_weight_before(desired_quantile_value_at_p: torch.Tensor, p: float = 0.5) -> torch.distributions.HalfNormal:
+        """
+        scales the half normal distribution so that the p weight is before the desired value
+        """
+        device = desired_quantile_value_at_p.device
+        dtype = desired_quantile_value_at_p.dtype
+        standard_halfnormal = torch.distributions.HalfNormal(torch.tensor(1.0, device=device, dtype=dtype))
+        quantile_value_at_p = standard_halfnormal.icdf(torch.tensor(p, device=device, dtype=dtype))
+        scale = desired_quantile_value_at_p / quantile_value_at_p
+        scaled_halfnormal = torch.distributions.HalfNormal(scale)
+        return scaled_halfnormal
+
+    def forward(self, logits: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        """
+        negative log likelihood of y given logits
+        """
+        if logits.shape[-1] != self.num_bars:
+            raise ValueError("logits last dimension shape != num bars")
+
+        y = torch.as_tensor(y, device=logits.device, dtype=logits.dtype)
+        y = y.clone().reshape(*logits.shape[:-1])
+
+        ignore_mask = self.ignore_init(y)  # alters y
+
+        y_bar_indices = self.map_to_bar_indices(y)
+
+        scaled_log_probs = self.compute_scaled_log_probs(logits)
+        gathered_scaled_log_probs = scaled_log_probs.gather(-1, y_bar_indices.unsqueeze(-1)).squeeze(-1)
+
+        bar_widths = self.bar_widths.to(logits.device, logits.dtype)
+        borders = self.borders.to(logits.device, logits.dtype)
+        left_tail = self.halfnormal_with_p_weight_before(bar_widths[0])
+        right_tail = self.halfnormal_with_p_weight_before(bar_widths[-1])
+
+        left_mask = y_bar_indices == 0
+        if left_mask.any():
+            distances = (borders[1] - y[left_mask]).clamp(min=1e-8)
+            gathered_scaled_log_probs[left_mask] += left_tail.log_prob(distances) + torch.log(bar_widths[0])
+
+        right_mask = y_bar_indices == self.num_bars - 1
+        if right_mask.any():
+            distances = (y[right_mask] - borders[-2]).clamp(min=1e-8)
+            gathered_scaled_log_probs[right_mask] += right_tail.log_prob(distances) + torch.log(bar_widths[-1])
+
+        nll = -gathered_scaled_log_probs
+
+        if ignore_mask.any():
+            nll[ignore_mask] = 0.0
+
+        return nll
+
+    def mean(self, logits: torch.Tensor) -> torch.Tensor:
+        """
+        calculates the expected value of the distribution given logits
+        """
+        if logits.shape[-1] != self.num_bars:
+            raise ValueError("logits last dimension shape != num bars")
+
+        probs = torch.softmax(logits.to(torch.float32), dim=-1).to(logits.dtype)
+
+        bar_widths = self.bar_widths.to(logits.device, logits.dtype)
+        borders = self.borders.to(logits.device, logits.dtype)
+        left_tail = self.halfnormal_with_p_weight_before(bar_widths[0])
+        right_tail = self.halfnormal_with_p_weight_before(bar_widths[-1])
+
+        bar_means = borders[:-1] + bar_widths / 2
+        bar_means = bar_means.clone()
+        bar_means[0] = borders[1] - left_tail.mean.to(logits.dtype)
+        bar_means[-1] = borders[-2] + right_tail.mean.to(logits.dtype)
+        bar_means = bar_means.to(logits.device, logits.dtype)
+
+        return probs @ bar_means
 
 
 # -----------------------------------------------------------------------------
 # interface
 
 
-def init_model_from_state_dict_file(file_path):
-    state_dict = torch.load(file_path, map_location=torch.device("cpu"))
+def init_model_from_checkpoint_file(file_path):
+    ckpt = torch.load(file_path, map_location="cpu")
     model = NanoTabPFNModel(
-        num_attention_heads=state_dict["architecture"]["num_attention_heads"],
-        embedding_size=state_dict["architecture"]["embedding_size"],
-        mlp_hidden_size=state_dict["architecture"]["mlp_hidden_size"],
-        num_layers=state_dict["architecture"]["num_layers"],
-        num_outputs=state_dict["architecture"]["num_outputs"],
+        num_attention_heads=ckpt["architecture"]["num_attention_heads"],
+        embedding_size=ckpt["architecture"]["embedding_size"],
+        mlp_hidden_size=ckpt["architecture"]["mlp_hidden_size"],
+        num_layers=ckpt["architecture"]["num_layers"],
+        num_outputs=ckpt["architecture"]["num_outputs"],
     )
-    model.load_state_dict(state_dict["model"])
+    if "borders" in ckpt["model"]:
+        model.borders = ckpt["model"]["borders"]
+    model.load_state_dict(ckpt["model"])
     return model
 
 
@@ -371,15 +555,9 @@ class NanoTabPFNClassifier:
         if device is None:
             device = get_default_device()
         if model is None:
-            model = "checkpoints/nanotabpfn.pth"
-            if not os.path.isfile(model):
-                os.makedirs("checkpoints", exist_ok=True)
-                print("No cached model found, downloading model checkpoint.")
-                response = requests.get("https://ml.informatik.uni-freiburg.de/research-artifacts/pfefferle/TFM-Playground/nanotabpfn_classifier.pth")
-                with open(model, "wb") as f:
-                    f.write(response.content)
+            raise ValueError("model is None")
         if isinstance(model, str):
-            model = init_model_from_state_dict_file(model)
+            model = init_model_from_checkpoint_file(model)
         self.model = model.to(device)
         self.device = device
         self.num_mem_chunks = num_mem_chunks
@@ -410,33 +588,19 @@ class NanoTabPFNRegressor:
     def __init__(
         self,
         model: NanoTabPFNModel | str | None = None,
-        dist: FullSupportBarDistribution | str | None = None,
         device: str | torch.device | None = None,
         num_mem_chunks: int = 8,
     ):
         if device is None:
             device = get_default_device()
         if model is None:
-            os.makedirs("checkpoints", exist_ok=True)
-            model = "checkpoints/nanotabpfn_regressor.pth"
-            dist = "checkpoints/nanotabpfn_regressor_buckets.pth"
-            if not os.path.isfile(model):
-                print("No cached model found, downloading model checkpoint.")
-                response = requests.get("https://ml.informatik.uni-freiburg.de/research-artifacts/pfefferle/TFM-Playground/nanotabpfn_regressor.pth")
-                with open(model, "wb") as f:
-                    f.write(response.content)
-            if not os.path.isfile(dist):
-                print("No cached bucket edges found, downloading bucket edges.")
-                response = requests.get("https://ml.informatik.uni-freiburg.de/research-artifacts/pfefferle/TFM-Playground/nanotabpfn_regressor_buckets.pth")
-                with open(dist, "wb") as f:
-                    f.write(response.content)
+            raise ValueError("model is None")
         if isinstance(model, str):
-            model = init_model_from_state_dict_file(model)
+            model = init_model_from_checkpoint_file(model)
+        if getattr(model, "borders", None) is None:
+            raise ValueError("no borders")
 
-        if isinstance(dist, str):
-            bucket_edges = torch.load(dist, map_location=device)
-            dist = FullSupportBarDistribution(bucket_edges).float()
-
+        dist = FullSupportBarDistribution(model.borders).float()
         self.model = model.to(device)
         self.device = device
         self.dist = dist
@@ -585,7 +749,6 @@ def evaluate_openml_tasks(
     *,
     model_type: str,
     checkpoint: str | None = None,
-    dist_path: str | None = None,
     tasks: list[int] | str = "tabarena-v0.1",
     cache_directory: str | None = None,
     max_n_features: int = 500,
@@ -598,7 +761,7 @@ def evaluate_openml_tasks(
     if model_type == "classification":
         model = NanoTabPFNClassifier(model=checkpoint, num_mem_chunks=num_mem_chunks)
     else:
-        model = NanoTabPFNRegressor(model=checkpoint, dist=dist_path, num_mem_chunks=num_mem_chunks)
+        model = NanoTabPFNRegressor(model=checkpoint, num_mem_chunks=num_mem_chunks)
     model.model.eval()
 
     if tasks == "toy_tasks" and model_type == "regression":
@@ -640,15 +803,12 @@ def evaluate_openml_tasks(
 @dataclass
 class Config:
     dumps_dir = "workdir/dumps"
-    logs_dir = "workdir/logs"
     checkpoints_dir = "workdir/checkpoints"
-    models_dir = "workdir/models"
     classification_priordump = "workdir/dumps/50x3_3_100k_classification.h5"
     regression_priordump = "workdir/dumps/50x3_1280k_regression.h5"
-    classifier_ckpt = "workdir/models/nano_classifier.pth"
-    regressor_ckpt = "workdir/models/nano_regressor.pth"
-    regressor_buckets = "workdir/models/nano_regressor_buckets.pth"
-    ckpt = None  # "workdir/checkpoints/latest_checkpoint.pth"
+    classifier_ckpt = "workdir/checkpoints/nano_classifier.pth"
+    regressor_ckpt = "workdir/checkpoints/nano_regressor.pth"
+    resume_ckpt = None
     multigpu = False
     seed = 2402
     batch_size = 1
@@ -672,14 +832,22 @@ def main():
         choices=["classification", "regression"],
         default="classification",
     )
+    p.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+    )
+    p.add_argument(
+        "--epochs",
+        type=int,
+        default=None,
+    )
     args = p.parse_args()
 
     c = Config()
 
     os.makedirs(c.dumps_dir, exist_ok=True)
-    os.makedirs(c.logs_dir, exist_ok=True)
     os.makedirs(c.checkpoints_dir, exist_ok=True)
-    os.makedirs(c.models_dir, exist_ok=True)
 
     set_randomness_seed(c.seed)
 
@@ -687,8 +855,15 @@ def main():
 
     ckpt = None
 
-    if c.ckpt:
-        ckpt = torch.load(c.ckpt)
+    if args.resume:
+        c.resume_ckpt = args.resume
+    if args.epochs:
+        c.epochs = args.epochs
+
+    if c.resume_ckpt:
+        ckpt = torch.load(c.resume_ckpt)
+        if ckpt["type"] != args.type:
+            raise ValueError("checkpoint type != script argument type")
 
     if args.type == "classification":
         prior = PriorDumpDataLoader(
@@ -728,13 +903,15 @@ def main():
             starting_index=c.steps * (ckpt["epoch"] if ckpt else 0),
         )
         c.num_outputs = c.n_buckets
-        bucket_edges = make_global_bucket_edges(
-            filename=c.regression_priordump,
-            n_buckets=c.n_buckets,
-            device=device,
-        )
-        torch.save(bucket_edges, c.regressor_buckets)
-        criterion = FullSupportBarDistribution(bucket_edges)
+        if ckpt and "borders" in ckpt["model"]:
+            borders = ckpt["model"]["borders"]
+        else:
+            borders = make_global_bucket_borders(
+                filename=c.regression_priordump,
+                n_buckets=c.n_buckets,
+                device=device,
+            )
+        criterion = FullSupportBarDistribution(borders)
         savepath = c.regressor_ckpt
 
         class RegressionEvaluationLoggerCallback(ConsoleLoggerCallback):
@@ -742,7 +919,7 @@ def main():
                 self.tasks = tasks
 
             def on_epoch_end(self, epoch: int, epoch_time: float, loss: float, model, **kwargs):
-                regressor = NanoTabPFNRegressor(model, criterion, device)
+                regressor = NanoTabPFNRegressor(model, device)
                 predictions = get_openml_predictions(model=regressor, tasks=self.tasks)
                 scores = []
                 for dataset_name, (y_true, y_pred, _) in predictions.items():
@@ -762,7 +939,8 @@ def main():
         num_layers=c.num_layers,
         num_outputs=c.num_outputs,
     )
-
+    if args.type == "regression":
+        model.borders = borders
     if ckpt:
         model.load_state_dict(ckpt["model"])
     if c.multigpu:
@@ -826,7 +1004,8 @@ def main():
             model.eval()
             optimizer.eval()
 
-            training_state = {
+            checkpoint = {
+                "type": args.type,
                 "epoch": epoch,
                 "architecture": {
                     "num_layers": int((model.module if c.multigpu else model).num_layers),
@@ -838,33 +1017,16 @@ def main():
                 "model": (model.module if c.multigpu else model).state_dict(),
                 "optimizer": optimizer.state_dict(),
             }
-            torch.save(training_state, "workdir/checkpoints/latest_checkpoint.pth")
+
+            torch.save(checkpoint, savepath)
 
             for callback in callbacks:
-                if type(criterion) is FullSupportBarDistribution:
-                    callback.on_epoch_end(epoch, end_time - epoch_start_time, mean_loss, (model.module if c.multigpu else model), dist=criterion)
-                else:
                     callback.on_epoch_end(epoch, end_time - epoch_start_time, mean_loss, (model.module if c.multigpu else model))
     except KeyboardInterrupt:
         pass
     finally:
         for callback in callbacks:
             callback.close()
-
-    final_model = (model.module if c.multigpu else model)
-
-    artifact = {
-        "architecture": {
-            "num_layers": c.num_layers,
-            "embedding_size": c.embedding_size,
-            "num_attention_heads": c.num_attention_heads,
-            "mlp_hidden_size": c.mlp_hidden_size,
-            "num_outputs": c.num_outputs,
-        },
-        "model": final_model.state_dict(),
-    }
-
-    torch.save(artifact, savepath)
 
 
 if __name__ == "__main__":
