@@ -29,7 +29,6 @@ from sklearn.preprocessing import FunctionTransformer, LabelEncoder, OrdinalEnco
 from torch import nn
 from torch.utils.data import DataLoader
 
-
 # -----------------------------------------------------------------------------
 # model
 
@@ -199,7 +198,15 @@ class Decoder(nn.Module):
 
 
 class PriorDataLoader(DataLoader):
-    def __init__(self, get_batch_function: Callable[..., Dict[str, Union[torch.Tensor, int]]], num_steps: int, batch_size: int, num_datapoints_max: int, num_features: int, device: torch.device):
+    def __init__(
+        self,
+        get_batch_function: Callable[..., Dict[str, Union[torch.Tensor, int]]],
+        num_steps: int,
+        batch_size: int,
+        num_datapoints_max: int,
+        num_features: int,
+        device: torch.device,
+    ):
         self.get_batch_function = get_batch_function
         self.num_steps = num_steps
         self.batch_size = batch_size
@@ -518,7 +525,7 @@ def get_feature_preprocessor(X: np.ndarray | pd.DataFrame) -> ColumnTransformer:
             cat_mask.append(False)
             continue
         non_nan_entries = X[col].notna().sum()
-        numeric_entries = pd.to_numeric(X[col], errors="coerce").notna().sum() 
+        numeric_entries = pd.to_numeric(X[col], errors="coerce").notna().sum()
         num_mask.append(non_nan_entries == numeric_entries)
         cat_mask.append(non_nan_entries != numeric_entries)
 
@@ -644,7 +651,6 @@ class ConsoleLoggerCallback:
         pass
 
 
-
 # -----------------------------------------------------------------------------
 # evaluation
 
@@ -709,7 +715,7 @@ def get_openml_predictions(
         _, folds, _ = task.get_split_dimensions()
         tabarena_light = True
         if tabarena_light:
-            folds = 1 
+            folds = 1
         repeat = 0
         targets = []
         predictions = []
@@ -733,7 +739,7 @@ def get_openml_predictions(
             predictions.append(y_pred)
             if classification:
                 y_proba = model.predict_proba(X_test)
-                if y_proba.shape[1] == 2: 
+                if y_proba.shape[1] == 2:
                     y_proba = y_proba[:, 1]
                 probabilities.append(y_proba)
 
