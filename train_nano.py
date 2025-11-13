@@ -495,11 +495,11 @@ class FullSupportBarDistribution(BarDistribution):
 def init_model_from_checkpoint_file(file_path):
     ckpt = torch.load(file_path, map_location="cpu")
     model = NanoTabPFNModel(
-        num_attention_heads=ckpt["architecture"]["num_attention_heads"],
-        embedding_size=ckpt["architecture"]["embedding_size"],
-        mlp_hidden_size=ckpt["architecture"]["mlp_hidden_size"],
-        num_layers=ckpt["architecture"]["num_layers"],
-        num_outputs=ckpt["architecture"]["num_outputs"],
+        embedding_size=ckpt["arch"]["embedding_size"],
+        num_attention_heads=ckpt["arch"]["num_attention_heads"],
+        mlp_hidden_size=ckpt["arch"]["mlp_hidden_size"],
+        num_layers=ckpt["arch"]["num_layers"],
+        num_outputs=ckpt["arch"]["num_outputs"],
     )
     if "borders" in ckpt["model"]:
         model.borders = ckpt["model"]["borders"]
@@ -839,10 +839,11 @@ def evaluate_openml_tasks(
 
 @dataclass
 class Config:
+    type = None
     dumps_dir = "workdir/dumps"
     checkpoints_dir = "workdir/checkpoints"
-    classification_priordump = "workdir/dumps/50x3_3_100k_classification.h5"
-    regression_priordump = "workdir/dumps/50x3_1280k_regression.h5"
+    classification_dump = "workdir/dumps/50x3_3_100k_classification.h5"
+    regression_dump = "workdir/dumps/50x3_1280k_regression.h5"
     classifier_ckpt = "workdir/checkpoints/nano_classifier.pth"
     regressor_ckpt = "workdir/checkpoints/nano_regressor.pth"
     resume_ckpt = None
@@ -859,29 +860,23 @@ class Config:
     num_layers = 6
     num_outputs = None
     n_buckets = 100
+    borders = None
+    prior_starting_index = 0
+    start_epoch = 1
 
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument(
-        "--type",
-        type=str,
-        choices=["classification", "regression"],
-        default="classification",
-    )
-    p.add_argument(
-        "--resume",
-        type=str,
-        default=None,
-    )
-    p.add_argument(
-        "--epochs",
-        type=int,
-        default=None,
-    )
+    p.add_argument("--type", type=str, choices=["classification", "regression"], default="classification")
+    p.add_argument("--resume", type=str, default=None)
+    p.add_argument("--epochs", type=int, default=None)
     args = p.parse_args()
 
     c = Config()
+
+    c.type = args.type
+    c.resume_ckpt = args.resume if args.resume else c.resume_ckpt
+    c.epochs = args.epochs if args.epochs else c.epochs
 
     os.makedirs(c.dumps_dir, exist_ok=True)
     os.makedirs(c.checkpoints_dir, exist_ok=True)
@@ -892,78 +887,79 @@ def main():
 
     ckpt = None
 
-    if args.resume:
-        c.resume_ckpt = args.resume
-    if args.epochs:
-        c.epochs = args.epochs
-
     if c.resume_ckpt:
         ckpt = torch.load(c.resume_ckpt)
-        if ckpt["type"] != args.type:
-            raise ValueError("checkpoint type != script argument type")
+        c.start_epoch = ckpt["epoch"] + 1
+        c.prior_starting_index = c.steps * ckpt["epoch"]
+        if ckpt["type"] != c.type:
+            print(f"ckpt type overrides: {c.type} -> ckpt:{ckpt['type']}")
+            c.type = ckpt["type"]
 
-    if args.type == "classification":
-        prior = PriorDumpDataLoader(
-            filename=c.classification_priordump,
-            num_steps=c.steps,
-            batch_size=c.batch_size,
-            device=device,
-            starting_index=c.steps * (ckpt["epoch"] if ckpt else 0),
-        )
-        c.num_outputs = prior.max_num_classes
-        criterion = nn.CrossEntropyLoss()
-        savepath = c.classifier_ckpt
-        callbacks = [ClassificationEvaluationLoggerCallback(TOY_TASKS_CLASSIFICATION, device=device)]
-    elif args.type == "regression":
-        prior = PriorDumpDataLoader(
-            filename=c.regression_priordump,
-            num_steps=c.steps,
-            batch_size=c.batch_size,
-            device=device,
-            starting_index=c.steps * (ckpt["epoch"] if ckpt else 0),
-        )
-        c.num_outputs = c.n_buckets
-        if ckpt and "borders" in ckpt["model"]:
-            borders = ckpt["model"]["borders"]
-        else:
-            borders = make_global_bucket_borders(
-                filename=c.regression_priordump,
-                n_buckets=c.n_buckets,
-                device=device,
-            )
-        criterion = FullSupportBarDistribution(borders)
-        savepath = c.regressor_ckpt
-        callbacks = [RegressionEvaluationLoggerCallback(TOY_TASKS_REGRESSION, device=device)]
+    prior = PriorDumpDataLoader(
+        filename=c.classification_dump if c.type == "classification" else c.regression_dump,
+        num_steps=c.steps,
+        batch_size=c.batch_size,
+        device=device,
+        starting_index=c.prior_starting_index,
+    )
+    c.num_outputs = prior.max_num_classes if c.type == "classification" else c.n_buckets
+
+    assert prior.num_steps % c.accumulate == 0, "num_steps must be divisible by accumulate_gradients"
+
+    if c.resume_ckpt:
+        if ckpt["arch"]["num_layers"] != c.num_layers:
+            print(f"ckpt num_layers overrides: {c.num_layers} -> ckpt:{ckpt['arch']['num_layers']}")
+            c.num_layers = ckpt["arch"]["num_layers"]
+        if ckpt["arch"]["embedding_size"] != c.embedding_size:
+            print(f"ckpt embedding_size overrides: {c.embedding_size} -> ckpt:{ckpt['arch']['embedding_size']}")
+            c.embedding_size = ckpt["arch"]["embedding_size"]
+        if ckpt["arch"]["num_attention_heads"] != c.num_attention_heads:
+            print(f"ckpt num_attention_heads overrides: {c.num_attention_heads} -> ckpt:{ckpt['arch']['num_attention_heads']}")
+            c.num_attention_heads = ckpt["arch"]["num_attention_heads"]
+        if ckpt["arch"]["mlp_hidden_size"] != c.mlp_hidden_size:
+            print(f"ckpt mlp_hidden_size overrides: {c.mlp_hidden_size} -> ckpt:{ckpt['arch']['mlp_hidden_size']}")
+            c.mlp_hidden_size = ckpt["arch"]["mlp_hidden_size"]
+        if ckpt["arch"]["num_outputs"] != c.num_outputs:
+            print(f"ckpt num_outputs overrides: {c.num_outputs} -> ckpt:{ckpt['arch']['num_outputs']}")
+            c.num_outputs = ckpt["arch"]["num_outputs"]
 
     model = NanoTabPFNModel(
-        num_attention_heads=c.num_attention_heads,
         embedding_size=c.embedding_size,
+        num_attention_heads=c.num_attention_heads,
         mlp_hidden_size=c.mlp_hidden_size,
         num_layers=c.num_layers,
         num_outputs=c.num_outputs,
     )
-    if args.type == "regression":
+    if c.type == "regression":
+        if ckpt and "borders" in ckpt["model"]:
+            borders = ckpt["model"]["borders"]
+        else:
+            borders = make_global_bucket_borders(
+                filename=c.regression_dump,
+                n_buckets=c.n_buckets,
+                device=device,
+            )
         model.borders = borders
     if ckpt:
         model.load_state_dict(ckpt["model"])
     if c.multigpu:
         model = nn.DataParallel(model)
-    if callbacks is None:
-        callbacks = []
-    if not device:
-        device = get_default_device()
     model.to(device)
+
     optimizer = schedulefree.AdamWScheduleFree(model.parameters(), lr=c.lr, weight_decay=0.0)
     if ckpt:
         optimizer.load_state_dict(ckpt["optimizer"])
-    classification_task = isinstance(criterion, nn.CrossEntropyLoss)
-    regression_task = not classification_task
 
-    assert prior.num_steps % c.accumulate == 0, "num_steps must be divisible by accumulate_gradients"
+    if c.type == "classification":
+        criterion = nn.CrossEntropyLoss()
+        callbacks = [ClassificationEvaluationLoggerCallback(TOY_TASKS_CLASSIFICATION, device=device)]
+    elif c.type == "regression":
+        criterion = FullSupportBarDistribution(borders)
+        callbacks = [RegressionEvaluationLoggerCallback(TOY_TASKS_REGRESSION, device=device)]
 
     total_loss = 0.0
     try:
-        for epoch in range(ckpt["epoch"] + 1 if ckpt else 1, c.epochs + 1):
+        for epoch in range(c.start_epoch, c.epochs + 1):
             epoch_start_time = time.time()
             model.train()
             optimizer.train()
@@ -978,7 +974,7 @@ def main():
                     continue
                 targets = full_data["target_y"].to(device)
 
-                if regression_task:
+                if c.type == "regression":
                     y_mean = data[1].mean(dim=1, keepdim=True)
                     y_std = data[1].std(dim=1, keepdim=True) + 1e-8
                     y_norm = (data[1] - y_mean) / y_std
@@ -986,9 +982,9 @@ def main():
 
                 output = model(data, single_eval_pos=single_eval_pos)
                 targets = targets[:, single_eval_pos:]
-                if regression_task:
+                if c.type == "regression":
                     targets = (targets - y_mean) / y_std
-                if classification_task:
+                if c.type == "classification":
                     targets = targets.reshape((-1,)).to(torch.long)
                     output = output.view(-1, output.shape[-1])
 
@@ -1008,20 +1004,20 @@ def main():
             optimizer.eval()
 
             checkpoint = {
-                "type": args.type,
+                "type": c.type,
                 "epoch": epoch,
-                "architecture": {
-                    "num_layers": int((model.module if c.multigpu else model).num_layers),
+                "arch": {
                     "embedding_size": int((model.module if c.multigpu else model).embedding_size),
                     "num_attention_heads": int((model.module if c.multigpu else model).num_attention_heads),
                     "mlp_hidden_size": int((model.module if c.multigpu else model).mlp_hidden_size),
+                    "num_layers": int((model.module if c.multigpu else model).num_layers),
                     "num_outputs": int((model.module if c.multigpu else model).num_outputs),
                 },
                 "model": (model.module if c.multigpu else model).state_dict(),
                 "optimizer": optimizer.state_dict(),
             }
 
-            torch.save(checkpoint, savepath)
+            torch.save(checkpoint, c.classifier_ckpt if c.type == "classification" else c.regressor_ckpt)
 
             for callback in callbacks:
                     callback.on_epoch_end(epoch, end_time - epoch_start_time, mean_loss, (model.module if c.multigpu else model))
