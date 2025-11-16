@@ -821,6 +821,7 @@ class Config:
     borders: torch.Tensor | None = None
     prior_starting_index: int = 0
     start_epoch: int = 1
+    eval_every: int = 1
 
 
 def main():
@@ -1015,24 +1016,25 @@ def main():
 
             torch.save(checkpoint, ckpt_path)
 
-            if c.type == "classification":
-                clf = NanoTabPFNClassifier((model.module if c.multigpu else model), device)
-                preds = get_openml_predictions(model=clf, tasks=TOY_TASKS_CLASSIFICATION)
-                aucs: list[float] = []
-                for dataset_name, (y_true, y_pred, y_proba) in preds.items():
-                    auc = roc_auc_score(y_true, y_proba, multi_class="ovr") if getattr(y_proba, "ndim", 1) > 1 else roc_auc_score(y_true, y_proba)
-                    aucs.append(auc)
-                avg_auc = (sum(aucs) / len(aucs)) if len(aucs) > 0 else float("nan")
-                print0(f"epoch:{epoch}/{c.epochs} avg_roc_auc:{avg_auc:.2f}", console=True)
-            elif c.type == "regression":
-                reg = NanoTabPFNRegressor((model.module if c.multigpu else model), device)
-                preds = get_openml_predictions(model=reg, tasks=TOY_TASKS_REGRESSION)
-                r2s: list[float] = []
-                for dataset_name, (y_true, y_pred, _proba) in preds.items():
-                    r2 = r2_score(y_true, y_pred)
-                    r2s.append(r2)
-                avg_r2 = (sum(r2s) / len(r2s)) if len(r2s) > 0 else float("nan")
-                print0(f"epoch:{epoch}/{c.epochs} avg_r2:{avg_r2:.2f}", console=True)
+            if (epoch == 1) or (epoch == c.epochs) or (epoch % c.eval_every == 0):
+                if c.type == "classification":
+                    clf = NanoTabPFNClassifier((model.module if c.multigpu else model), device)
+                    preds = get_openml_predictions(model=clf, tasks=TOY_TASKS_CLASSIFICATION)
+                    aucs: list[float] = []
+                    for dataset_name, (y_true, y_pred, y_proba) in preds.items():
+                        auc = roc_auc_score(y_true, y_proba, multi_class="ovr") if getattr(y_proba, "ndim", 1) > 1 else roc_auc_score(y_true, y_proba)
+                        aucs.append(auc)
+                    avg_auc = (sum(aucs) / len(aucs)) if len(aucs) > 0 else float("nan")
+                    print0(f"epoch:{epoch}/{c.epochs} avg_roc_auc:{avg_auc:.2f}", console=True)
+                elif c.type == "regression":
+                    reg = NanoTabPFNRegressor((model.module if c.multigpu else model), device)
+                    preds = get_openml_predictions(model=reg, tasks=TOY_TASKS_REGRESSION)
+                    r2s: list[float] = []
+                    for dataset_name, (y_true, y_pred, _proba) in preds.items():
+                        r2 = r2_score(y_true, y_pred)
+                        r2s.append(r2)
+                    avg_r2 = (sum(r2s) / len(r2s)) if len(r2s) > 0 else float("nan")
+                    print0(f"epoch:{epoch}/{c.epochs} avg_r2:{avg_r2:.2f}", console=True)
     except KeyboardInterrupt:
         pass
     finally:
