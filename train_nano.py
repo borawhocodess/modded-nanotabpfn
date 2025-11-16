@@ -647,55 +647,13 @@ class NanoTabPFNRegressor:
 # callbacks
 
 
-class ClassificationEvaluationLoggerCallback:
-    def __init__(self, tasks, device=None):
-        self.tasks = tasks
-        self.device = device or get_default_device()
-
-    def on_epoch_end(self, epoch: int, epoch_time: float, loss: float, model, **kwargs):
-        classifier = NanoTabPFNClassifier(model, self.device)
-        predictions = get_openml_predictions(model=classifier, tasks=self.tasks)
-        scores = []
-        for _, (y_true, y_pred, _y_proba) in predictions.items():
-            scores.append(accuracy_score(y_true, y_pred))
-        avg_score = (sum(scores) / len(scores)) if len(scores) > 0 else float("nan")
-        print(
-            f"epoch {epoch:5d} | time {epoch_time:5.2f}s | mean loss {loss:5.2f} | avg accuracy {avg_score:.3f}",
-            flush=True,
-        )
-
-    def close(self):
-        pass
-
-
-class RegressionEvaluationLoggerCallback:
-    def __init__(self, tasks, device=None):
-        self.tasks = tasks
-        self.device = device or get_default_device()
-
-    def on_epoch_end(self, epoch: int, epoch_time: float, loss: float, model, **kwargs):
-        regressor = NanoTabPFNRegressor(model, self.device)
-        predictions = get_openml_predictions(model=regressor, tasks=self.tasks)
-        scores = []
-        for _, (y_true, y_pred, _proba) in predictions.items():
-            scores.append(r2_score(y_true, y_pred))
-        avg_score = (sum(scores) / len(scores)) if len(scores) > 0 else float("nan")
-        print(
-            f"epoch {epoch:5d} | time {epoch_time:5.2f}s | mean loss {loss:5.2f} | avg r2 score {avg_score:.3f}",
-            flush=True,
-        )
-  
-    def close(self):
-        pass
-
-
 class ClassificationExperimentLoggerCallback:
     def __init__(self, tasks, device, log):
         self.tasks = tasks
         self.device = device
         self.log = log
 
-    def on_epoch_end(self, epoch: int, epoch_time: float, loss: float, model, **kwargs):
+    def on_epoch_end(self, epoch: int, epochs: int, epoch_time: float, loss: float, model, **kwargs):
         classifier = NanoTabPFNClassifier(model, self.device)
         predictions = get_openml_predictions(model=classifier, tasks=self.tasks)
         aucs = []
@@ -705,7 +663,7 @@ class ClassificationExperimentLoggerCallback:
             line = f"eval:{dataset_name} roc_auc:{auc:.2f}"
             self.log(line, console=True)
         avg_auc = (sum(aucs) / len(aucs)) if len(aucs) > 0 else float("nan")
-        overall = f"epoch:{epoch} eval:avg_roc_auc:{avg_auc:.2f}"
+        overall = f"epoch:{epoch}/{epochs} eval:avg_roc_auc:{avg_auc:.2f}"
         self.log(overall, console=True)
 
     def close(self):
@@ -718,7 +676,7 @@ class RegressionExperimentLoggerCallback:
         self.device = device
         self.log = log
 
-    def on_epoch_end(self, epoch: int, epoch_time: float, loss: float, model, **kwargs):
+    def on_epoch_end(self, epoch: int, epochs: int, epoch_time: float, loss: float, model, **kwargs):
         regressor = NanoTabPFNRegressor(model, self.device)
         predictions = get_openml_predictions(model=regressor, tasks=self.tasks)
         r2s = []
@@ -728,7 +686,7 @@ class RegressionExperimentLoggerCallback:
             line = f"eval:{dataset_name} r2:{r2:.2f}"
             self.log(line, console=True)
         avg_r2 = (sum(r2s) / len(r2s)) if len(r2s) > 0 else float("nan")
-        overall = f"epoch:{epoch} eval:avg_r2:{avg_r2:.2f}"
+        overall = f"epoch:{epoch}/{epochs} eval:avg_r2:{avg_r2:.2f}"
         self.log(overall, console=True)
     def close(self):
         pass
@@ -1082,13 +1040,13 @@ def main():
                     optimizer.step()
                     optimizer.zero_grad()
 
-            end_time = time.time()
+            epoch_time = time.time() - epoch_start_time
             mean_loss = total_loss / len(prior)
             model.eval()
             optimizer.eval()
 
             print0(
-                f"epoch:{epoch}/{c.epochs} mean_loss:{mean_loss:.2f} epoch_time:{(end_time - epoch_start_time):.2f}s",
+                f"epoch:{epoch}/{c.epochs} mean_loss:{mean_loss:.2f} epoch_time:{epoch_time:.2f}s",
                 console=True,
             )
 
@@ -1109,7 +1067,13 @@ def main():
             torch.save(checkpoint, ckpt_path)
 
             for callback in callbacks:
-                    callback.on_epoch_end(epoch, end_time - epoch_start_time, mean_loss, (model.module if c.multigpu else model))
+                callback.on_epoch_end(
+                    epoch,
+                    c.epochs,
+                    epoch_time,
+                    mean_loss,
+                    (model.module if c.multigpu else model),
+                )
     except KeyboardInterrupt:
         pass
     finally:
