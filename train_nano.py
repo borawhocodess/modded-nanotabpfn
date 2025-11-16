@@ -1,16 +1,16 @@
 import argparse
 import math
 import os
-import random
-import time
-import warnings
-import sys
-import uuid
 import platform
+import random
 import socket
 import subprocess
-from datetime import datetime
+import sys
+import time
+import uuid
+import warnings
 from dataclasses import dataclass, fields
+from datetime import datetime
 from typing import Callable, Dict, Iterator, Tuple, Union
 
 import h5py
@@ -24,12 +24,7 @@ from openml.config import set_root_cache_directory
 from openml.tasks import TaskType
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
-from sklearn.metrics import (
-    accuracy_score,
-    balanced_accuracy_score,
-    r2_score,
-    roc_auc_score,
-)
+from sklearn.metrics import balanced_accuracy_score, r2_score, roc_auc_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer, LabelEncoder, OrdinalEncoder
 from torch import nn
@@ -824,230 +819,226 @@ class Config:
     eval_every: int = 1
 
 
-def main():
-    p = argparse.ArgumentParser()
-    p.add_argument("--type", type=str, choices=["classification", "regression"], default="classification")
-    p.add_argument("--resume", type=str, default=None)
-    p.add_argument("--epochs", type=int, default=None)
-    args = p.parse_args()
+p = argparse.ArgumentParser()
+p.add_argument("--type", type=str, choices=["classification", "regression"], default="classification")
+p.add_argument("--resume", type=str, default=None)
+p.add_argument("--epochs", type=int, default=None)
+args = p.parse_args()
 
-    c = Config()
+c = Config()
 
-    c.type = args.type
-    c.resume_ckpt = args.resume if args.resume else c.resume_ckpt
-    c.epochs = args.epochs if args.epochs else c.epochs
+c.type = args.type
+c.resume_ckpt = args.resume if args.resume else c.resume_ckpt
+c.epochs = args.epochs if args.epochs else c.epochs
 
-    os.makedirs(c.dumps_dir, exist_ok=True)
-    os.makedirs(c.experiments_dir, exist_ok=True)
-    ts = datetime.now().strftime("%y%m%d-%H%M%S")
-    uid = uuid.uuid4().hex[:8]
-    e_id = f"{ts}-{uid}-{c.type}"
-    e_dir = os.path.join(c.experiments_dir, e_id)
-    os.makedirs(e_dir, exist_ok=True)
-    log_path = os.path.join(e_dir, f"{e_id}-log.txt")
-    ckpt_path = os.path.join(e_dir, f"{e_id}-ckpt.pth")
+os.makedirs(c.dumps_dir, exist_ok=True)
+os.makedirs(c.experiments_dir, exist_ok=True)
+ts = datetime.now().strftime("%y%m%d-%H%M%S")
+uid = uuid.uuid4().hex[:8]
+e_id = f"{ts}-{uid}-{c.type}"
+e_dir = os.path.join(c.experiments_dir, e_id)
+os.makedirs(e_dir, exist_ok=True)
+log_path = os.path.join(e_dir, f"{e_id}-log.txt")
+ckpt_path = os.path.join(e_dir, f"{e_id}-ckpt.pth")
 
-    def print0(s, console = False):
-        with open(log_path, "a") as f:
-            if console:
-                print(s)
-            print(s, file=f)
 
-    with open(sys.argv[0], "r") as f:
-        code = f.read()
+def print0(s, console=False):
+    with open(log_path, "a") as f:
+        if console:
+            print(s)
+        print(s, file=f)
 
-    # print0(code)
-    print0("=" * 100)
-    print0(f"host: {socket.gethostname()}")
-    print0(f"platform: {platform.platform()}")
-    print0(f"python: {sys.version}")
-    print0(f"torch: {torch.version.__version__}")
-    try:
-        print0(f"cuda: {torch.version.cuda}")
-        def nvidia_smi():
-            return subprocess.run(["nvidia-smi"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True).stdout
-        print0(nvidia_smi())
-    except Exception as e:
-        print0(f"no cuda: {e}")
-    print0("=" * 100)
-    print0("config:")
-    for f in fields(Config):
-        print0(f"  {f.name}: {getattr(c, f.name)}")
-    print0("=" * 100)
 
-    set_randomness_seed(c.seed)
+with open(sys.argv[0], "r") as f:
+    code = f.read()
 
-    device = get_default_device()
+# print0(code)
+print0("=" * 100)
+print0(f"host: {socket.gethostname()}")
+print0(f"platform: {platform.platform()}")
+print0(f"python: {sys.version}")
+print0(f"torch: {torch.version.__version__}")
+try:
+    print0(f"cuda: {torch.version.cuda}")
 
-    ckpt = None
+    def nvidia_smi():
+        return subprocess.run(["nvidia-smi"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True).stdout
 
-    if c.resume_ckpt:
-        ckpt = torch.load(c.resume_ckpt)
-        c.start_epoch = ckpt["epoch"] + 1
-        c.prior_starting_index = c.steps * ckpt["epoch"]
-        if ckpt["type"] != c.type:
-            print(f"ckpt type overrides: {c.type} -> ckpt:{ckpt['type']}")
-            c.type = ckpt["type"]
+    print0(nvidia_smi())
+except Exception as e:
+    print0(f"no cuda: {e}")
+print0("=" * 100)
+print0("config:")
+for f in fields(Config):
+    print0(f"  {f.name}: {getattr(c, f.name)}")
+print0("=" * 100)
 
-    prior = PriorDumpDataLoader(
-        filename=c.classification_dump if c.type == "classification" else c.regression_dump,
-        num_steps=c.steps,
-        batch_size=c.batch_size,
-        device=device,
-        starting_index=c.prior_starting_index,
-    )
-    c.num_outputs = prior.max_num_classes if c.type == "classification" else c.n_buckets
+set_randomness_seed(c.seed)
 
-    assert prior.num_steps % c.accumulate == 0, "num_steps must be divisible by accumulate_gradients"
+device = get_default_device()
 
-    if c.resume_ckpt:
-        if ckpt["arch"]["num_layers"] != c.num_layers:
-            print(f"ckpt num_layers overrides: {c.num_layers} -> ckpt:{ckpt['arch']['num_layers']}")
-            c.num_layers = ckpt["arch"]["num_layers"]
-        if ckpt["arch"]["embedding_size"] != c.embedding_size:
-            print(f"ckpt embedding_size overrides: {c.embedding_size} -> ckpt:{ckpt['arch']['embedding_size']}")
-            c.embedding_size = ckpt["arch"]["embedding_size"]
-        if ckpt["arch"]["num_attention_heads"] != c.num_attention_heads:
-            print(f"ckpt num_attention_heads overrides: {c.num_attention_heads} -> ckpt:{ckpt['arch']['num_attention_heads']}")
-            c.num_attention_heads = ckpt["arch"]["num_attention_heads"]
-        if ckpt["arch"]["mlp_hidden_size"] != c.mlp_hidden_size:
-            print(f"ckpt mlp_hidden_size overrides: {c.mlp_hidden_size} -> ckpt:{ckpt['arch']['mlp_hidden_size']}")
-            c.mlp_hidden_size = ckpt["arch"]["mlp_hidden_size"]
-        if ckpt["arch"]["num_outputs"] != c.num_outputs:
-            print(f"ckpt num_outputs overrides: {c.num_outputs} -> ckpt:{ckpt['arch']['num_outputs']}")
-            c.num_outputs = ckpt["arch"]["num_outputs"]
+ckpt = None
 
-    model = NanoTabPFNModel(
-        embedding_size=c.embedding_size,
-        num_attention_heads=c.num_attention_heads,
-        mlp_hidden_size=c.mlp_hidden_size,
-        num_layers=c.num_layers,
-        num_outputs=c.num_outputs,
-    )
-    if c.type == "regression":
-        if ckpt and "borders" in ckpt["model"]:
-            borders = ckpt["model"]["borders"]
-        else:
-            borders = make_global_bucket_borders(
-                filename=c.regression_dump,
-                n_buckets=c.n_buckets,
-                device=device,
-            )
-        model.borders = borders
-    if ckpt:
-        model.load_state_dict(ckpt["model"])
-    if c.multigpu:
-        model = nn.DataParallel(model)
-    model.to(device)
+if c.resume_ckpt:
+    ckpt = torch.load(c.resume_ckpt)
+    c.start_epoch = ckpt["epoch"] + 1
+    c.prior_starting_index = c.steps * ckpt["epoch"]
+    if ckpt["type"] != c.type:
+        print(f"ckpt type overrides: {c.type} -> ckpt:{ckpt['type']}")
+        c.type = ckpt["type"]
 
-    optimizer = schedulefree.AdamWScheduleFree(model.parameters(), lr=c.lr, weight_decay=0.0)
-    if ckpt:
-        optimizer.load_state_dict(ckpt["optimizer"])
+prior = PriorDumpDataLoader(
+    filename=c.classification_dump if c.type == "classification" else c.regression_dump,
+    num_steps=c.steps,
+    batch_size=c.batch_size,
+    device=device,
+    starting_index=c.prior_starting_index,
+)
+c.num_outputs = prior.max_num_classes if c.type == "classification" else c.n_buckets
 
-    if c.type == "classification":
-        criterion = nn.CrossEntropyLoss()
-    elif c.type == "regression":
-        criterion = FullSupportBarDistribution(borders)
+assert prior.num_steps % c.accumulate == 0, "num_steps must be divisible by accumulate_gradients"
 
+if c.resume_ckpt:
+    if ckpt["arch"]["num_layers"] != c.num_layers:
+        print(f"ckpt num_layers overrides: {c.num_layers} -> ckpt:{ckpt['arch']['num_layers']}")
+        c.num_layers = ckpt["arch"]["num_layers"]
+    if ckpt["arch"]["embedding_size"] != c.embedding_size:
+        print(f"ckpt embedding_size overrides: {c.embedding_size} -> ckpt:{ckpt['arch']['embedding_size']}")
+        c.embedding_size = ckpt["arch"]["embedding_size"]
+    if ckpt["arch"]["num_attention_heads"] != c.num_attention_heads:
+        print(f"ckpt num_attention_heads overrides: {c.num_attention_heads} -> ckpt:{ckpt['arch']['num_attention_heads']}")
+        c.num_attention_heads = ckpt["arch"]["num_attention_heads"]
+    if ckpt["arch"]["mlp_hidden_size"] != c.mlp_hidden_size:
+        print(f"ckpt mlp_hidden_size overrides: {c.mlp_hidden_size} -> ckpt:{ckpt['arch']['mlp_hidden_size']}")
+        c.mlp_hidden_size = ckpt["arch"]["mlp_hidden_size"]
+    if ckpt["arch"]["num_outputs"] != c.num_outputs:
+        print(f"ckpt num_outputs overrides: {c.num_outputs} -> ckpt:{ckpt['arch']['num_outputs']}")
+        c.num_outputs = ckpt["arch"]["num_outputs"]
+
+model = NanoTabPFNModel(
+    embedding_size=c.embedding_size,
+    num_attention_heads=c.num_attention_heads,
+    mlp_hidden_size=c.mlp_hidden_size,
+    num_layers=c.num_layers,
+    num_outputs=c.num_outputs,
+)
+if c.type == "regression":
+    if ckpt and "borders" in ckpt["model"]:
+        borders = ckpt["model"]["borders"]
+    else:
+        borders = make_global_bucket_borders(
+            filename=c.regression_dump,
+            n_buckets=c.n_buckets,
+            device=device,
+        )
+    model.borders = borders
+if ckpt:
+    model.load_state_dict(ckpt["model"])
+if c.multigpu:
+    model = nn.DataParallel(model)
+model.to(device)
+
+optimizer = schedulefree.AdamWScheduleFree(model.parameters(), lr=c.lr, weight_decay=0.0)
+if ckpt:
+    optimizer.load_state_dict(ckpt["optimizer"])
+
+if c.type == "classification":
+    criterion = nn.CrossEntropyLoss()
+elif c.type == "regression":
+    criterion = FullSupportBarDistribution(borders)
+
+total_loss = 0.0
+
+for epoch in range(c.start_epoch, c.epochs + 1):
+    epoch_start_time = time.time()
+    model.train()
+    optimizer.train()
     total_loss = 0.0
-    try:
-        for epoch in range(c.start_epoch, c.epochs + 1):
-            epoch_start_time = time.time()
-            model.train()
-            optimizer.train()
-            total_loss = 0.0
-            for i, full_data in enumerate(prior):
-                single_eval_pos = full_data["single_eval_pos"]
-                data = (
-                    full_data["x"].to(device),
-                    full_data["y"][:, :single_eval_pos].to(device),
-                )
-                if torch.isnan(data[0]).any() or torch.isnan(data[1]).any():
-                    continue
-                targets = full_data["target_y"].to(device)
+    for i, full_data in enumerate(prior):
+        single_eval_pos = full_data["single_eval_pos"]
+        data = (
+            full_data["x"].to(device),
+            full_data["y"][:, :single_eval_pos].to(device),
+        )
+        if torch.isnan(data[0]).any() or torch.isnan(data[1]).any():
+            continue
+        targets = full_data["target_y"].to(device)
 
-                if c.type == "regression":
-                    y_mean = data[1].mean(dim=1, keepdim=True)
-                    y_std = data[1].std(dim=1, keepdim=True) + 1e-8
-                    y_norm = (data[1] - y_mean) / y_std
-                    data = (data[0], y_norm)
+        if c.type == "regression":
+            y_mean = data[1].mean(dim=1, keepdim=True)
+            y_std = data[1].std(dim=1, keepdim=True) + 1e-8
+            y_norm = (data[1] - y_mean) / y_std
+            data = (data[0], y_norm)
 
-                output = model(data, single_eval_pos=single_eval_pos)
-                targets = targets[:, single_eval_pos:]
-                if c.type == "regression":
-                    targets = (targets - y_mean) / y_std
-                if c.type == "classification":
-                    targets = targets.reshape((-1,)).to(torch.long)
-                    output = output.view(-1, output.shape[-1])
+        output = model(data, single_eval_pos=single_eval_pos)
+        targets = targets[:, single_eval_pos:]
+        if c.type == "regression":
+            targets = (targets - y_mean) / y_std
+        if c.type == "classification":
+            targets = targets.reshape((-1,)).to(torch.long)
+            output = output.view(-1, output.shape[-1])
 
-                losses = criterion(output, targets)
-                loss = losses.mean() / c.accumulate
-                loss.backward()
-                total_loss += loss.cpu().detach().item() * c.accumulate
+        losses = criterion(output, targets)
+        loss = losses.mean() / c.accumulate
+        loss.backward()
+        total_loss += loss.cpu().detach().item() * c.accumulate
 
-                if (i + 1) % c.accumulate == 0:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                    optimizer.step()
-                    optimizer.zero_grad()
+        if (i + 1) % c.accumulate == 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+            optimizer.zero_grad()
 
-            epoch_time = time.time() - epoch_start_time
-            mean_loss = total_loss / len(prior)
-            model.eval()
-            optimizer.eval()
+    epoch_time = time.time() - epoch_start_time
+    mean_loss = total_loss / len(prior)
+    model.eval()
+    optimizer.eval()
 
-            print0(
-                f"epoch:{epoch}/{c.epochs} mean_loss:{mean_loss:.2f} epoch_time:{epoch_time:.2f}s",
-                console=True,
-            )
+    print0(
+        f"epoch:{epoch}/{c.epochs} mean_loss:{mean_loss:.2f} epoch_time:{epoch_time:.2f}s",
+        console=True,
+    )
 
-            checkpoint = {
-                "type": c.type,
-                "epoch": epoch,
-                "arch": {
-                    "embedding_size": int((model.module if c.multigpu else model).embedding_size),
-                    "num_attention_heads": int((model.module if c.multigpu else model).num_attention_heads),
-                    "mlp_hidden_size": int((model.module if c.multigpu else model).mlp_hidden_size),
-                    "num_layers": int((model.module if c.multigpu else model).num_layers),
-                    "num_outputs": int((model.module if c.multigpu else model).num_outputs),
-                },
-                "model": (model.module if c.multigpu else model).state_dict(),
-                "optimizer": optimizer.state_dict(),
-            }
+    checkpoint = {
+        "type": c.type,
+        "epoch": epoch,
+        "arch": {
+            "embedding_size": int((model.module if c.multigpu else model).embedding_size),
+            "num_attention_heads": int((model.module if c.multigpu else model).num_attention_heads),
+            "mlp_hidden_size": int((model.module if c.multigpu else model).mlp_hidden_size),
+            "num_layers": int((model.module if c.multigpu else model).num_layers),
+            "num_outputs": int((model.module if c.multigpu else model).num_outputs),
+        },
+        "model": (model.module if c.multigpu else model).state_dict(),
+        "optimizer": optimizer.state_dict(),
+    }
 
-            torch.save(checkpoint, ckpt_path)
+    torch.save(checkpoint, ckpt_path)
 
-            if (epoch == 1) or (epoch == c.epochs) or (epoch % c.eval_every == 0):
-                if c.type == "classification":
-                    clf = NanoTabPFNClassifier((model.module if c.multigpu else model), device)
-                    preds = get_openml_predictions(model=clf, tasks=TOY_TASKS_CLASSIFICATION)
-                    aucs: list[float] = []
-                    for dataset_name, (y_true, y_pred, y_proba) in preds.items():
-                        auc = roc_auc_score(y_true, y_proba, multi_class="ovr") if getattr(y_proba, "ndim", 1) > 1 else roc_auc_score(y_true, y_proba)
-                        aucs.append(auc)
-                    avg_auc = (sum(aucs) / len(aucs)) if len(aucs) > 0 else float("nan")
-                    print0(f"epoch:{epoch}/{c.epochs} avg_roc_auc:{avg_auc:.2f}", console=True)
-                elif c.type == "regression":
-                    reg = NanoTabPFNRegressor((model.module if c.multigpu else model), device)
-                    preds = get_openml_predictions(model=reg, tasks=TOY_TASKS_REGRESSION)
-                    r2s: list[float] = []
-                    for dataset_name, (y_true, y_pred, _proba) in preds.items():
-                        r2 = r2_score(y_true, y_pred)
-                        r2s.append(r2)
-                    avg_r2 = (sum(r2s) / len(r2s)) if len(r2s) > 0 else float("nan")
-                    print0(f"epoch:{epoch}/{c.epochs} avg_r2:{avg_r2:.2f}", console=True)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        pass
-
-    print0("=" * 100)
-    try:
-        print0(f"peak memory allocated: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB", console=True)
-        print0(f"peak memory reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB", console=True)
-    except Exception as e:
-        print0(f"no cuda: {e}")
-    print0(f"experiment done: {e_id}", console=True)
+    if (epoch == 1) or (epoch == c.epochs) or (epoch % c.eval_every == 0):
+        if c.type == "classification":
+            clf = NanoTabPFNClassifier((model.module if c.multigpu else model), device)
+            preds = get_openml_predictions(model=clf, tasks=TOY_TASKS_CLASSIFICATION)
+            aucs: list[float] = []
+            for dataset_name, (y_true, y_pred, y_proba) in preds.items():
+                auc = roc_auc_score(y_true, y_proba, multi_class="ovr") if getattr(y_proba, "ndim", 1) > 1 else roc_auc_score(y_true, y_proba)
+                aucs.append(auc)
+            avg_auc = (sum(aucs) / len(aucs)) if len(aucs) > 0 else float("nan")
+            print0(f"epoch:{epoch}/{c.epochs} avg_roc_auc:{avg_auc:.2f}", console=True)
+        elif c.type == "regression":
+            reg = NanoTabPFNRegressor((model.module if c.multigpu else model), device)
+            preds = get_openml_predictions(model=reg, tasks=TOY_TASKS_REGRESSION)
+            r2s: list[float] = []
+            for dataset_name, (y_true, y_pred, _proba) in preds.items():
+                r2 = r2_score(y_true, y_pred)
+                r2s.append(r2)
+            avg_r2 = (sum(r2s) / len(r2s)) if len(r2s) > 0 else float("nan")
+            print0(f"epoch:{epoch}/{c.epochs} avg_r2:{avg_r2:.2f}", console=True)
 
 
-if __name__ == "__main__":
-    main()
+print0("=" * 100)
+try:
+    print0(f"peak memory allocated: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB", console=True)
+    print0(f"peak memory reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB", console=True)
+except Exception as e:
+    print0(f"no cuda: {e}")
+print0(f"experiment done: {e_id}", console=True)
