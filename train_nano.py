@@ -847,12 +847,9 @@ def evaluate_openml_tasks(
 class Config:
     type: str | None = None
     dumps_dir: str = "workdir/dumps"
-    checkpoints_dir: str = "workdir/checkpoints"
     experiments_dir: str = "workdir/experiments"
     classification_dump: str = "workdir/dumps/50x3_3_100k_classification.h5"
     regression_dump: str = "workdir/dumps/50x3_1280k_regression.h5"
-    classifier_ckpt: str = "workdir/checkpoints/nano_classifier.pth"
-    regressor_ckpt: str = "workdir/checkpoints/nano_regressor.pth"
     resume_ckpt: str | None = None
     multigpu: bool = False
     seed: int = 2402
@@ -886,7 +883,6 @@ def main():
     c.epochs = args.epochs if args.epochs else c.epochs
 
     os.makedirs(c.dumps_dir, exist_ok=True)
-    os.makedirs(c.checkpoints_dir, exist_ok=True)
     os.makedirs(c.experiments_dir, exist_ok=True)
     ts = datetime.now().strftime("%y%m%d-%H%M%S")
     uuid4 = uuid.uuid4()
@@ -1065,7 +1061,7 @@ def main():
                 "optimizer": optimizer.state_dict(),
             }
 
-            torch.save(checkpoint, c.classifier_ckpt if c.type == "classification" else c.regressor_ckpt)
+            torch.save(checkpoint, ckpt_path)
 
             for callback in callbacks:
                     callback.on_epoch_end(epoch, end_time - epoch_start_time, mean_loss, (model.module if c.multigpu else model))
