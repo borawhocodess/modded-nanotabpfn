@@ -644,55 +644,6 @@ class NanoTabPFNRegressor:
 
 
 # -----------------------------------------------------------------------------
-# callbacks
-
-
-class ClassificationExperimentLoggerCallback:
-    def __init__(self, tasks, device, log):
-        self.tasks = tasks
-        self.device = device
-        self.log = log
-
-    def on_epoch_end(self, epoch: int, epochs: int, epoch_time: float, loss: float, model, **kwargs):
-        classifier = NanoTabPFNClassifier(model, self.device)
-        predictions = get_openml_predictions(model=classifier, tasks=self.tasks)
-        aucs = []
-        for dataset_name, (y_true, y_pred, y_proba) in predictions.items():
-            auc = roc_auc_score(y_true, y_proba, multi_class="ovr") if y_proba.ndim > 1 else roc_auc_score(y_true, y_proba)
-            aucs.append(auc)
-            line = f"eval:{dataset_name} roc_auc:{auc:.2f}"
-            self.log(line, console=True)
-        avg_auc = (sum(aucs) / len(aucs)) if len(aucs) > 0 else float("nan")
-        overall = f"epoch:{epoch}/{epochs} eval:avg_roc_auc:{avg_auc:.2f}"
-        self.log(overall, console=True)
-
-    def close(self):
-        pass
-
-
-class RegressionExperimentLoggerCallback:
-    def __init__(self, tasks, device, log):
-        self.tasks = tasks
-        self.device = device
-        self.log = log
-
-    def on_epoch_end(self, epoch: int, epochs: int, epoch_time: float, loss: float, model, **kwargs):
-        regressor = NanoTabPFNRegressor(model, self.device)
-        predictions = get_openml_predictions(model=regressor, tasks=self.tasks)
-        r2s = []
-        for dataset_name, (y_true, y_pred, _proba) in predictions.items():
-            r2 = r2_score(y_true, y_pred)
-            r2s.append(r2)
-            line = f"eval:{dataset_name} r2:{r2:.2f}"
-            self.log(line, console=True)
-        avg_r2 = (sum(r2s) / len(r2s)) if len(r2s) > 0 else float("nan")
-        overall = f"epoch:{epoch}/{epochs} eval:avg_r2:{avg_r2:.2f}"
-        self.log(overall, console=True)
-    def close(self):
-        pass
-
-
-# -----------------------------------------------------------------------------
 # evaluation
 
 
@@ -994,10 +945,8 @@ def main():
 
     if c.type == "classification":
         criterion = nn.CrossEntropyLoss()
-        callbacks = [ClassificationExperimentLoggerCallback(TOY_TASKS_CLASSIFICATION, device=device, log=print0)]
     elif c.type == "regression":
         criterion = FullSupportBarDistribution(borders)
-        callbacks = [RegressionExperimentLoggerCallback(TOY_TASKS_REGRESSION, device=device, log=print0)]
 
     total_loss = 0.0
     try:
@@ -1066,19 +1015,28 @@ def main():
 
             torch.save(checkpoint, ckpt_path)
 
-            for callback in callbacks:
-                callback.on_epoch_end(
-                    epoch,
-                    c.epochs,
-                    epoch_time,
-                    mean_loss,
-                    (model.module if c.multigpu else model),
-                )
+            if c.type == "classification":
+                clf = NanoTabPFNClassifier((model.module if c.multigpu else model), device)
+                preds = get_openml_predictions(model=clf, tasks=TOY_TASKS_CLASSIFICATION)
+                aucs: list[float] = []
+                for dataset_name, (y_true, y_pred, y_proba) in preds.items():
+                    auc = roc_auc_score(y_true, y_proba, multi_class="ovr") if getattr(y_proba, "ndim", 1) > 1 else roc_auc_score(y_true, y_proba)
+                    aucs.append(auc)
+                avg_auc = (sum(aucs) / len(aucs)) if len(aucs) > 0 else float("nan")
+                print0(f"epoch:{epoch}/{c.epochs} avg_roc_auc:{avg_auc:.2f}", console=True)
+            elif c.type == "regression":
+                reg = NanoTabPFNRegressor((model.module if c.multigpu else model), device)
+                preds = get_openml_predictions(model=reg, tasks=TOY_TASKS_REGRESSION)
+                r2s: list[float] = []
+                for dataset_name, (y_true, y_pred, _proba) in preds.items():
+                    r2 = r2_score(y_true, y_pred)
+                    r2s.append(r2)
+                avg_r2 = (sum(r2s) / len(r2s)) if len(r2s) > 0 else float("nan")
+                print0(f"epoch:{epoch}/{c.epochs} avg_r2:{avg_r2:.2f}", console=True)
     except KeyboardInterrupt:
         pass
     finally:
-        for callback in callbacks:
-            callback.close()
+        pass
 
     print0("=" * 100)
     try:
