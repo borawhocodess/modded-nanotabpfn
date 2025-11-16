@@ -885,8 +885,8 @@ def main():
     os.makedirs(c.dumps_dir, exist_ok=True)
     os.makedirs(c.experiments_dir, exist_ok=True)
     ts = datetime.now().strftime("%y%m%d-%H%M%S")
-    uuid4 = uuid.uuid4()
-    e_id = f"{ts}-{uuid4}-{c.type}"
+    uid = uuid.uuid4().hex[:8]
+    e_id = f"{ts}-{uid}-{c.type}"
     e_dir = os.path.join(c.experiments_dir, e_id)
     os.makedirs(e_dir, exist_ok=True)
     log_path = os.path.join(e_dir, f"{e_id}-log.txt")
@@ -901,7 +901,7 @@ def main():
     with open(sys.argv[0], "r") as f:
         code = f.read()
 
-    print0(code)
+    # print0(code)
     print0("=" * 100)
     print0(f"host: {socket.gethostname()}")
     print0(f"platform: {platform.platform()}")
