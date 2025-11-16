@@ -10,7 +10,7 @@ import platform
 import socket
 import subprocess
 from datetime import datetime
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import Callable, Dict, Iterator, Tuple, Union
 
 import h5py
@@ -845,31 +845,31 @@ def evaluate_openml_tasks(
 
 @dataclass
 class Config:
-    type = None
-    dumps_dir = "workdir/dumps"
-    checkpoints_dir = "workdir/checkpoints"
-    experiments_dir = "workdir/experiments"
-    classification_dump = "workdir/dumps/50x3_3_100k_classification.h5"
-    regression_dump = "workdir/dumps/50x3_1280k_regression.h5"
-    classifier_ckpt = "workdir/checkpoints/nano_classifier.pth"
-    regressor_ckpt = "workdir/checkpoints/nano_regressor.pth"
-    resume_ckpt = None
-    multigpu = False
-    seed = 2402
-    batch_size = 1
-    accumulate = 1
-    lr = 1e-4
-    steps = 100
-    epochs = 4
-    num_attention_heads = 6
-    embedding_size = 192
-    mlp_hidden_size = 768
-    num_layers = 6
-    num_outputs = None
-    n_buckets = 100
-    borders = None
-    prior_starting_index = 0
-    start_epoch = 1
+    type: str | None = None
+    dumps_dir: str = "workdir/dumps"
+    checkpoints_dir: str = "workdir/checkpoints"
+    experiments_dir: str = "workdir/experiments"
+    classification_dump: str = "workdir/dumps/50x3_3_100k_classification.h5"
+    regression_dump: str = "workdir/dumps/50x3_1280k_regression.h5"
+    classifier_ckpt: str = "workdir/checkpoints/nano_classifier.pth"
+    regressor_ckpt: str = "workdir/checkpoints/nano_regressor.pth"
+    resume_ckpt: str | None = None
+    multigpu: bool = False
+    seed: int = 2402
+    batch_size: int = 1
+    accumulate: int = 1
+    lr: float = 1e-4
+    steps: int = 100
+    epochs: int = 4
+    num_attention_heads: int = 6
+    embedding_size: int = 192
+    mlp_hidden_size: int = 768
+    num_layers: int = 6
+    num_outputs: int | None = None
+    n_buckets: int = 100
+    borders: torch.Tensor | None = None
+    prior_starting_index: int = 0
+    start_epoch: int = 1
 
 
 def main():
@@ -919,7 +919,9 @@ def main():
     except Exception as e:
         print0(f"no cuda: {e}")
     print0("=" * 100)
-    print0(f"config: {vars(c)}")
+    print0("config:")
+    for f in fields(Config):
+        print0(f"  {f.name}: {getattr(c, f.name)}")
     print0("=" * 100)
 
     set_randomness_seed(c.seed)
