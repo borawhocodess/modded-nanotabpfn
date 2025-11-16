@@ -4,6 +4,12 @@ import os
 import random
 import time
 import warnings
+import sys
+import uuid
+import platform
+import socket
+import subprocess
+from datetime import datetime
 from dataclasses import dataclass
 from typing import Callable, Dict, Iterator, Tuple, Union
 
@@ -842,6 +848,7 @@ class Config:
     type = None
     dumps_dir = "workdir/dumps"
     checkpoints_dir = "workdir/checkpoints"
+    experiments_dir = "workdir/experiments"
     classification_dump = "workdir/dumps/50x3_3_100k_classification.h5"
     regression_dump = "workdir/dumps/50x3_1280k_regression.h5"
     classifier_ckpt = "workdir/checkpoints/nano_classifier.pth"
@@ -880,6 +887,40 @@ def main():
 
     os.makedirs(c.dumps_dir, exist_ok=True)
     os.makedirs(c.checkpoints_dir, exist_ok=True)
+    os.makedirs(c.experiments_dir, exist_ok=True)
+    ts = datetime.now().strftime("%y%m%d-%H%M%S")
+    uuid4 = uuid.uuid4()
+    e_id = f"{ts}-{uuid4}-{c.type}"
+    e_dir = os.path.join(c.experiments_dir, e_id)
+    os.makedirs(e_dir, exist_ok=True)
+    log_path = os.path.join(e_dir, f"{e_id}-log.txt")
+    ckpt_path = os.path.join(e_dir, f"{e_id}-ckpt.pth")
+
+    def print0(s, console = False):
+        with open(log_path, "a") as f:
+            if console:
+                print(s)
+            print(s, file=f)
+
+    with open(sys.argv[0], "r") as f:
+        code = f.read()
+
+    print0(code)
+    print0("=" * 100)
+    print0(f"host: {socket.gethostname()}")
+    print0(f"platform: {platform.platform()}")
+    print0(f"python: {sys.version}")
+    print0(f"torch: {torch.version.__version__}")
+    try:
+        print0(f"cuda: {torch.version.cuda}")
+        def nvidia_smi():
+            return subprocess.run(["nvidia-smi"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True).stdout
+        print0(nvidia_smi())
+    except Exception as e:
+        print0(f"no cuda: {e}")
+    print0("=" * 100)
+    print0(f"config: {vars(c)}")
+    print0("=" * 100)
 
     set_randomness_seed(c.seed)
 
@@ -1002,6 +1043,11 @@ def main():
             mean_loss = total_loss / len(prior)
             model.eval()
             optimizer.eval()
+
+            print0(
+                f"epoch:{epoch}/{c.epochs} mean_loss:{mean_loss:.4f} epoch_time:{(end_time - epoch_start_time):.2f}s",
+                console=True,
+            )
 
             checkpoint = {
                 "type": c.type,
