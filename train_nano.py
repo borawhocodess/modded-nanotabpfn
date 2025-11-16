@@ -796,7 +796,6 @@ def evaluate_openml_tasks(
 @dataclass
 class Config:
     type: str | None = None
-    dumps_dir: str = "workdir/dumps"
     experiments_dir: str = "workdir/experiments"
     classification_dump: str = "workdir/dumps/50x3_3_100k_classification.h5"
     regression_dump: str = "workdir/dumps/50x3_1280k_regression.h5"
@@ -814,7 +813,6 @@ class Config:
     num_layers: int = 6
     num_outputs: int | None = None
     n_buckets: int = 100
-    borders: torch.Tensor | None = None
     prior_starting_index: int = 0
     start_epoch: int = 1
     eval_every: int = 1
@@ -831,51 +829,6 @@ c = Config()
 c.type = args.type
 c.resume_ckpt = args.resume if args.resume else c.resume_ckpt
 c.epochs = args.epochs if args.epochs else c.epochs
-
-os.makedirs(c.dumps_dir, exist_ok=True)
-os.makedirs(c.experiments_dir, exist_ok=True)
-ts = datetime.now().strftime("%y%m%d-%H%M%S")
-uid = uuid.uuid4().hex[:8]
-e_id = f"{ts}-{uid}-{c.type}"
-e_dir = os.path.join(c.experiments_dir, e_id)
-os.makedirs(e_dir, exist_ok=True)
-log_path = os.path.join(e_dir, f"{e_id}-log.txt")
-ckpt_path = os.path.join(e_dir, f"{e_id}-ckpt.pth")
-
-
-def print0(s, console=False):
-    with open(log_path, "a") as f:
-        if console:
-            print(s)
-        print(s, file=f)
-
-
-with open("pyproject.toml", "rb") as f:
-    version = tomllib.load(f)["project"]["version"]
-
-with open(sys.argv[0], "r") as f:
-    code = f.read()
-
-# print0(code)
-print0("=" * 100)
-print0(f"host: {socket.gethostname()}")
-print0(f"platform: {platform.platform()}")
-print0(f"python: {sys.version}")
-print0(f"torch: {torch.version.__version__}")
-try:
-    print0(f"cuda: {torch.version.cuda}")
-
-    def nvidia_smi():
-        return subprocess.run(["nvidia-smi"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True).stdout
-
-    print0(nvidia_smi())
-except Exception as e:
-    print0(f"no cuda: {e}")
-print0("=" * 100)
-print0("config:")
-for f in fields(Config):
-    print0(f"  {f.name}: {getattr(c, f.name)}")
-print0("=" * 100)
 
 set_randomness_seed(c.seed)
 
@@ -950,6 +903,49 @@ if c.type == "classification":
     criterion = nn.CrossEntropyLoss()
 elif c.type == "regression":
     criterion = FullSupportBarDistribution(borders)
+
+ts = datetime.now().strftime("%y%m%d-%H%M%S")
+uid = uuid.uuid4().hex[:8]
+e_id = f"{ts}-{uid}-{c.type}"
+e_dir = os.path.join(c.experiments_dir, e_id)
+os.makedirs(e_dir, exist_ok=True)
+log_path = os.path.join(e_dir, f"{e_id}-log.txt")
+ckpt_path = os.path.join(e_dir, f"{e_id}-ckpt.pth")
+
+
+def print0(s, console=False):
+    with open(log_path, "a") as f:
+        if console:
+            print(s)
+        print(s, file=f)
+
+
+with open("pyproject.toml", "rb") as f:
+    version = tomllib.load(f)["project"]["version"]
+
+with open(sys.argv[0], "r") as f:
+    code = f.read()
+
+# print0(code)
+print0("=" * 100)
+print0(f"host: {socket.gethostname()}")
+print0(f"platform: {platform.platform()}")
+print0(f"python: {sys.version}")
+print0(f"torch: {torch.version.__version__}")
+try:
+    print0(f"cuda: {torch.version.cuda}")
+
+    def nvidia_smi():
+        return subprocess.run(["nvidia-smi"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True).stdout
+
+    print0(nvidia_smi())
+except Exception as e:
+    print0(f"no cuda: {e}")
+print0("=" * 100)
+print0("config:")
+for f in fields(Config):
+    print0(f"  {f.name}: {getattr(c, f.name)}")
+print0("=" * 100)
 
 total_loss = 0.0
 
