@@ -1116,6 +1116,14 @@ def main():
         for callback in callbacks:
             callback.close()
 
+    print0("=" * 100)
+    try:
+        print0(f"peak memory allocated: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB", console=True)
+        print0(f"peak memory reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB", console=True)
+    except Exception as e:
+        print0(f"no cuda: {e}")
+    print0(f"experiment done: {e_id}", console=True)
+
 
 if __name__ == "__main__":
     main()
