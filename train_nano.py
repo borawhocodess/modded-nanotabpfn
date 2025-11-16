@@ -689,6 +689,51 @@ class RegressionEvaluationLoggerCallback:
         pass
 
 
+class ClassificationExperimentLoggerCallback:
+    def __init__(self, tasks, device, log):
+        self.tasks = tasks
+        self.device = device
+        self.log = log
+
+    def on_epoch_end(self, epoch: int, epoch_time: float, loss: float, model, **kwargs):
+        classifier = NanoTabPFNClassifier(model, self.device)
+        predictions = get_openml_predictions(model=classifier, tasks=self.tasks)
+        aucs = []
+        for dataset_name, (y_true, y_pred, y_proba) in predictions.items():
+            auc = roc_auc_score(y_true, y_proba, multi_class="ovr") if y_proba.ndim > 1 else roc_auc_score(y_true, y_proba)
+            aucs.append(auc)
+            line = f"eval:{dataset_name} roc_auc:{auc:.2f}"
+            self.log(line, console=True)
+        avg_auc = (sum(aucs) / len(aucs)) if len(aucs) > 0 else float("nan")
+        overall = f"epoch:{epoch} eval:avg_roc_auc:{avg_auc:.2f}"
+        self.log(overall, console=True)
+
+    def close(self):
+        pass
+
+
+class RegressionExperimentLoggerCallback:
+    def __init__(self, tasks, device, log):
+        self.tasks = tasks
+        self.device = device
+        self.log = log
+
+    def on_epoch_end(self, epoch: int, epoch_time: float, loss: float, model, **kwargs):
+        regressor = NanoTabPFNRegressor(model, self.device)
+        predictions = get_openml_predictions(model=regressor, tasks=self.tasks)
+        r2s = []
+        for dataset_name, (y_true, y_pred, _proba) in predictions.items():
+            r2 = r2_score(y_true, y_pred)
+            r2s.append(r2)
+            line = f"eval:{dataset_name} r2:{r2:.2f}"
+            self.log(line, console=True)
+        avg_r2 = (sum(r2s) / len(r2s)) if len(r2s) > 0 else float("nan")
+        overall = f"epoch:{epoch} eval:avg_r2:{avg_r2:.2f}"
+        self.log(overall, console=True)
+    def close(self):
+        pass
+
+
 # -----------------------------------------------------------------------------
 # evaluation
 
@@ -991,10 +1036,10 @@ def main():
 
     if c.type == "classification":
         criterion = nn.CrossEntropyLoss()
-        callbacks = [ClassificationEvaluationLoggerCallback(TOY_TASKS_CLASSIFICATION, device=device)]
+        callbacks = [ClassificationExperimentLoggerCallback(TOY_TASKS_CLASSIFICATION, device=device, log=print0)]
     elif c.type == "regression":
         criterion = FullSupportBarDistribution(borders)
-        callbacks = [RegressionEvaluationLoggerCallback(TOY_TASKS_REGRESSION, device=device)]
+        callbacks = [RegressionExperimentLoggerCallback(TOY_TASKS_REGRESSION, device=device, log=print0)]
 
     total_loss = 0.0
     try:
@@ -1043,7 +1088,7 @@ def main():
             optimizer.eval()
 
             print0(
-                f"epoch:{epoch}/{c.epochs} mean_loss:{mean_loss:.4f} epoch_time:{(end_time - epoch_start_time):.2f}s",
+                f"epoch:{epoch}/{c.epochs} mean_loss:{mean_loss:.2f} epoch_time:{(end_time - epoch_start_time):.2f}s",
                 console=True,
             )
 
