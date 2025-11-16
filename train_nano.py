@@ -7,6 +7,7 @@ import socket
 import subprocess
 import sys
 import time
+import tomllib
 import uuid
 import warnings
 from dataclasses import dataclass, fields
@@ -849,6 +850,9 @@ def print0(s, console=False):
         print(s, file=f)
 
 
+with open("pyproject.toml", "rb") as f:
+    version = tomllib.load(f)["project"]["version"]
+
 with open(sys.argv[0], "r") as f:
     code = f.read()
 
@@ -999,6 +1003,9 @@ for epoch in range(c.start_epoch, c.epochs + 1):
     )
 
     checkpoint = {
+        "version": version,
+        "timestamp": ts,
+        "uid": uid,
         "type": c.type,
         "epoch": epoch,
         "arch": {
