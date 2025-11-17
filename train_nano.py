@@ -37,7 +37,14 @@ from torch.utils.data import DataLoader
 
 
 class NanoTabPFNModel(nn.Module):
-    def __init__(self, embedding_size: int, num_attention_heads: int, mlp_hidden_size: int, num_layers: int, num_outputs: int):
+    def __init__(
+        self,
+        embedding_size: int,
+        num_attention_heads: int,
+        mlp_hidden_size: int,
+        num_layers: int,
+        num_outputs: int,
+    ):
         super().__init__()
         self.embedding_size = embedding_size
         self.num_attention_heads = num_attention_heads
@@ -60,7 +67,12 @@ class NanoTabPFNModel(nn.Module):
         elif len(args) == 1 and isinstance(args, tuple):
             return self._forward(*args, **kwargs)
 
-    def _forward(self, src: Tuple[torch.Tensor, torch.Tensor], single_eval_pos: int, num_mem_chunks: int = 1) -> torch.Tensor:
+    def _forward(
+        self,
+        src: Tuple[torch.Tensor, torch.Tensor],
+        single_eval_pos: int,
+        num_mem_chunks: int = 1,
+    ) -> torch.Tensor:
         x_src, y_src = src
         if len(y_src.shape) < len(x_src.shape):
             y_src = y_src.unsqueeze(-1)
@@ -75,7 +87,10 @@ class NanoTabPFNModel(nn.Module):
 
 
 class FeatureEncoder(nn.Module):
-    def __init__(self, embedding_size: int):
+    def __init__(
+        self,
+        embedding_size: int,
+    ):
         super().__init__()
         self.linear_layer = nn.Linear(1, embedding_size)
 
@@ -89,7 +104,10 @@ class FeatureEncoder(nn.Module):
 
 
 class TargetEncoder(nn.Module):
-    def __init__(self, embedding_size: int):
+    def __init__(
+        self,
+        embedding_size: int,
+    ):
         super().__init__()
         self.linear_layer = nn.Linear(1, embedding_size)
 
@@ -102,22 +120,40 @@ class TargetEncoder(nn.Module):
 
 
 class TransformerEncoderStack(nn.Module):
-    def __init__(self, num_layers: int, embedding_size: int, num_attention_heads: int, mlp_hidden_size: int):
+    def __init__(
+        self,
+        num_layers: int,
+        embedding_size: int,
+        num_attention_heads: int,
+        mlp_hidden_size: int,
+    ):
         super().__init__()
         self.transformer_blocks = nn.ModuleList()
         for _ in range(num_layers):
             self.transformer_blocks.append(TransformerEncoderLayer(embedding_size, num_attention_heads, mlp_hidden_size))
 
-    def forward(self, x: torch.Tensor, single_eval_position: int, num_mem_chunks: int = 1) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        single_eval_position: int,
+        num_mem_chunks: int = 1,
+    ) -> torch.Tensor:
         for block in self.transformer_blocks:
             x = block(x, single_eval_position=single_eval_position, num_mem_chunks=num_mem_chunks)
         return x
 
 
 class TransformerEncoderLayer(nn.Module):
-    def __init__(self, embedding_size: int, nhead: int, mlp_hidden_size: int,
-                 layer_norm_eps: float = 1e-5, batch_first: bool = True,
-                 device=None, dtype=None):
+    def __init__(
+        self,
+        embedding_size: int,
+        nhead: int,
+        mlp_hidden_size: int,
+        layer_norm_eps: float = 1e-5,
+        batch_first: bool = True,
+        device=None,
+        dtype=None,
+    ):
         super().__init__()
         self.self_attention_between_datapoints = nn.MultiheadAttention(embedding_size, nhead, batch_first=batch_first, device=device, dtype=dtype)
         self.self_attention_between_features = nn.MultiheadAttention(embedding_size, nhead, batch_first=batch_first, device=device, dtype=dtype)
@@ -187,7 +223,12 @@ def memory_chunking(num_mem_chunks: int) -> callable:
 
 
 class Decoder(nn.Module):
-    def __init__(self, embedding_size: int, mlp_hidden_size: int, num_outputs: int):
+    def __init__(
+        self,
+        embedding_size: int,
+        mlp_hidden_size: int,
+        num_outputs: int,
+    ):
         super().__init__()
         self.linear1 = nn.Linear(embedding_size, mlp_hidden_size)
         self.linear2 = nn.Linear(mlp_hidden_size, num_outputs)
@@ -225,7 +266,14 @@ class PriorDataLoader(DataLoader):
 
 
 class PriorDumpDataLoader(DataLoader):
-    def __init__(self, filename, num_steps, batch_size, device, starting_index=0):
+    def __init__(
+        self,
+        filename,
+        num_steps,
+        batch_size,
+        device,
+        starting_index=0,
+    ):
         self.filename = filename
         self.num_steps = num_steps
         self.batch_size = batch_size
@@ -351,7 +399,12 @@ class BarDistribution(nn.Module):
     inspired by pfns.model.bar_distribution BarDistribution
     """
 
-    def __init__(self, borders: torch.Tensor, *, ignore_nan_targets: bool = True):
+    def __init__(
+        self,
+        borders: torch.Tensor,
+        *,
+        ignore_nan_targets: bool = True,
+    ):
         super().__init__()
 
         borders = torch.as_tensor(borders)
@@ -410,7 +463,12 @@ class FullSupportBarDistribution(BarDistribution):
     inspired by pfns.model.bar_distribution FullSupportBarDistribution
     """
 
-    def __init__(self, borders: torch.Tensor, *, ignore_nan_targets: bool = True):
+    def __init__(
+        self,
+        borders: torch.Tensor,
+        *,
+        ignore_nan_targets: bool = True,
+    ):
         super().__init__(borders, ignore_nan_targets=ignore_nan_targets)
         if torch.any(self.bar_widths[[0, -1]] <= 0):
             raise ValueError("half normal tails need first and last bar widths > 0")
