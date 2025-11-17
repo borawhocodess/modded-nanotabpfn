@@ -806,7 +806,7 @@ class Config:
     accumulate: int = 1
     lr: float = 1e-4
     steps: int = 100
-    epochs: int = 4
+    epochs: int = 1000
     num_attention_heads: int = 6
     embedding_size: int = 192
     mlp_hidden_size: int = 768
@@ -815,7 +815,7 @@ class Config:
     n_buckets: int = 100
     prior_starting_index: int = 0
     start_epoch: int = 1
-    eval_every: int = 1
+    eval_every: int = 100
 
 
 p = argparse.ArgumentParser()
@@ -926,7 +926,7 @@ with open("pyproject.toml", "rb") as f:
 with open(sys.argv[0], "r") as f:
     code = f.read()
 
-# print0(code)
+print0(code)
 print0("=" * 100)
 print0(f"host: {socket.gethostname()}")
 print0(f"platform: {platform.platform()}")
@@ -1020,20 +1020,22 @@ for epoch in range(c.start_epoch, c.epochs + 1):
     if (epoch == 1) or (epoch == c.epochs) or (epoch % c.eval_every == 0):
         if c.type == "classification":
             clf = NanoTabPFNClassifier((model.module if c.multigpu else model), device)
-            preds = get_openml_predictions(model=clf, tasks=TOY_TASKS_CLASSIFICATION)
+            preds = get_openml_predictions(model=clf, tasks=TABARENA_TASKS, max_n_samples=1000)
             aucs: list[float] = []
             for dataset_name, (y_true, y_pred, y_proba) in preds.items():
                 auc = roc_auc_score(y_true, y_proba, multi_class="ovr") if getattr(y_proba, "ndim", 1) > 1 else roc_auc_score(y_true, y_proba)
                 aucs.append(auc)
+                print0(f"dataset:{dataset_name}_roc_auc:{auc:.2f}", console=True)
             avg_auc = (sum(aucs) / len(aucs)) if len(aucs) > 0 else float("nan")
             print0(f"epoch:{epoch}/{c.epochs} avg_roc_auc:{avg_auc:.2f}", console=True)
         elif c.type == "regression":
             reg = NanoTabPFNRegressor((model.module if c.multigpu else model), device)
-            preds = get_openml_predictions(model=reg, tasks=TOY_TASKS_REGRESSION)
+            preds = get_openml_predictions(model=reg, tasks=TABARENA_TASKS)
             r2s: list[float] = []
             for dataset_name, (y_true, y_pred, _proba) in preds.items():
                 r2 = r2_score(y_true, y_pred)
                 r2s.append(r2)
+                print0(f"dataset:{dataset_name} r2:{r2:.2f}", console=True)
             avg_r2 = (sum(r2s) / len(r2s)) if len(r2s) > 0 else float("nan")
             print0(f"epoch:{epoch}/{c.epochs} avg_r2:{avg_r2:.2f}", console=True)
 
