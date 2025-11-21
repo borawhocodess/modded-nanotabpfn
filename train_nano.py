@@ -577,7 +577,7 @@ class Config:
     accumulate: int = 1
     lr: float = 1e-4
     steps: int = 100
-    epochs: int = 1000
+    epochs: int = 4
     num_attention_heads: int = 6
     embedding_size: int = 192
     mlp_hidden_size: int = 768
@@ -586,13 +586,7 @@ class Config:
     eval_every: int = 100
 
 
-p = argparse.ArgumentParser()
-p.add_argument("--epochs", type=int, default=None)
-args = p.parse_args()
-
 c = Config()
-
-c.epochs = args.epochs if args.epochs else c.epochs
 
 set_randomness_seed(c.seed)
 
