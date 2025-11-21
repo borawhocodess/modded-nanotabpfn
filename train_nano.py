@@ -647,11 +647,7 @@ print0(f"python: {sys.version}")
 print0(f"torch: {torch.version.__version__}")
 try:
     print0(f"cuda: {torch.version.cuda}")
-
-    def nvidia_smi():
-        return subprocess.run(["nvidia-smi"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True).stdout
-
-    print0(nvidia_smi())
+    print0(subprocess.run(["nvidia-smi"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True).stdout)
 except Exception as e:
     print0(f"no cuda: {e}")
 print0("=" * 100)
