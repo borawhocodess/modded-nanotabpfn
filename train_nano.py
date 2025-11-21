@@ -25,7 +25,7 @@ from openml.config import set_root_cache_directory
 from openml.tasks import TaskType
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
-from sklearn.metrics import balanced_accuracy_score, r2_score, roc_auc_score
+from sklearn.metrics import balanced_accuracy_score, roc_auc_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer, LabelEncoder, OrdinalEncoder
 from torch import nn
@@ -335,218 +335,6 @@ def get_default_device():
     return device
 
 
-def compute_bucket_borders(num_buckets: int, ys: torch.Tensor) -> torch.Tensor:
-    """
-    decides equal mass bucket borders from ys
-    inspired by pfns.model.bar_distribution get_bucket_borders
-    """
-    ys = torch.as_tensor(ys)
-    if not torch.is_floating_point(ys):
-        ys = ys.to(torch.float32)
-    ys = ys.flatten()
-    ys = ys[torch.isfinite(ys)]
-
-    if ys.numel() <= num_buckets:
-        raise ValueError(f"ys numel ({ys.numel()}) <= num buckets ({num_buckets})")
-
-    n = (ys.numel() // num_buckets) * num_buckets
-    ys = ys[:n]
-    ys_per_bucket = n // num_buckets
-
-    ys_sorted, _ = torch.sort(ys)
-
-    chunks = ys_sorted.reshape(num_buckets, ys_per_bucket)
-    interiors = (chunks[:-1, -1] + chunks[1:, 0]) / 2
-
-    min_outer = ys_sorted[0].unsqueeze(0)
-    max_outer = ys_sorted[-1].unsqueeze(0)
-
-    borders = torch.cat((min_outer, interiors, max_outer))
-
-    if borders.numel() - 1 != num_buckets:
-        raise ValueError("num borders - 1 != num buckets")
-
-    if torch.unique_consecutive(borders).numel() != borders.numel():
-        raise ValueError("duplicate borders detected")
-
-    return borders
-
-
-def make_global_bucket_borders(filename, n_buckets=100, device=get_default_device(), max_y=5_000_000):
-    with h5py.File(filename, "r") as f:
-        y = f["y"]
-        num_tables, num_datapoints = y.shape
-
-        num_tables_to_use = min(num_tables, max_y // num_datapoints)
-
-        y_subset = np.array(y[:num_tables_to_use, :], dtype=np.float32)
-        y_means = y_subset.mean(axis=1, keepdims=True)
-        y_stds = y_subset.std(axis=1, keepdims=True, ddof=1) + 1e-8
-        ys_concat = ((y_subset - y_means) / y_stds).ravel()
-
-    if ys_concat.size < n_buckets:
-        raise ValueError(f"Too few target samples ({ys_concat.size}) to compute {n_buckets} buckets.")
-
-    ys_tensor = torch.tensor(ys_concat, dtype=torch.float32, device=device)
-    global_bucket_borders = compute_bucket_borders(n_buckets, ys=ys_tensor).to(device)
-    return global_bucket_borders
-
-
-class BarDistribution(nn.Module):
-    """
-    bar distribution defined by borders with nan target ignoring option
-    inspired by pfns.model.bar_distribution BarDistribution
-    """
-
-    def __init__(
-        self,
-        borders: torch.Tensor,
-        *,
-        ignore_nan_targets: bool = True,
-    ):
-        super().__init__()
-
-        borders = torch.as_tensor(borders)
-        if borders.ndim != 1:
-            raise ValueError("borders != 1d")
-        if not torch.is_floating_point(borders):
-            borders = borders.to(torch.get_default_dtype())
-        borders = borders.contiguous()
-        self.register_buffer("borders", borders)
-        if torch.any(self.bar_widths <= 0):
-            raise ValueError("borders must be strictly increasing)")
-
-        self.ignore_nan_targets = ignore_nan_targets
-
-    @property
-    def bar_widths(self) -> torch.Tensor:
-        return self.borders[1:] - self.borders[:-1]
-
-    @property
-    def num_bars(self) -> int:
-        return self.borders.numel() - 1
-
-    def ignore_init(self, y: torch.Tensor) -> torch.Tensor:
-        """
-        makes ignore mask for nan targets and alters y (will be ignored later)
-        """
-        ignore_mask = torch.isnan(y)
-        if ignore_mask.any():
-            if not self.ignore_nan_targets:
-                raise ValueError("nan in y while ignore_nan_targets=False")
-            y[ignore_mask] = self.borders[0]
-        return ignore_mask
-
-    def map_to_bar_indices(self, y: torch.Tensor) -> torch.Tensor:
-        """
-        maps each y to its corresponding bar index
-        """
-        indices = torch.searchsorted(self.borders, y, right=False) - 1
-        indices = indices.clamp(0, self.num_bars - 1)
-        return indices
-
-    def compute_scaled_log_probs(self, logits: torch.Tensor) -> torch.Tensor:
-        """
-        log prob density
-        """
-        widths = self.bar_widths.to(logits.device, logits.dtype)
-        log_probs = torch.log_softmax(logits, dim=-1)
-        log_widths = torch.log(widths)
-        scaled_log_probs = log_probs - log_widths
-        return scaled_log_probs
-
-
-class FullSupportBarDistribution(BarDistribution):
-    """
-    extends BarDistribution with half normal tails on both sides for full support
-    inspired by pfns.model.bar_distribution FullSupportBarDistribution
-    """
-
-    def __init__(
-        self,
-        borders: torch.Tensor,
-        *,
-        ignore_nan_targets: bool = True,
-    ):
-        super().__init__(borders, ignore_nan_targets=ignore_nan_targets)
-        if torch.any(self.bar_widths[[0, -1]] <= 0):
-            raise ValueError("half normal tails need first and last bar widths > 0")
-
-    @staticmethod
-    def halfnormal_with_p_weight_before(desired_quantile_value_at_p: torch.Tensor, p: float = 0.5) -> torch.distributions.HalfNormal:
-        """
-        scales the half normal distribution so that the p weight is before the desired value
-        """
-        device = desired_quantile_value_at_p.device
-        dtype = desired_quantile_value_at_p.dtype
-        standard_halfnormal = torch.distributions.HalfNormal(torch.tensor(1.0, device=device, dtype=dtype))
-        quantile_value_at_p = standard_halfnormal.icdf(torch.tensor(p, device=device, dtype=dtype))
-        scale = desired_quantile_value_at_p / quantile_value_at_p
-        scaled_halfnormal = torch.distributions.HalfNormal(scale)
-        return scaled_halfnormal
-
-    def forward(self, logits: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        """
-        negative log likelihood of y given logits
-        """
-        if logits.shape[-1] != self.num_bars:
-            raise ValueError("logits last dimension shape != num bars")
-
-        y = torch.as_tensor(y, device=logits.device, dtype=logits.dtype)
-        y = y.clone().reshape(*logits.shape[:-1])
-
-        ignore_mask = self.ignore_init(y)  # alters y
-
-        y_bar_indices = self.map_to_bar_indices(y)
-
-        scaled_log_probs = self.compute_scaled_log_probs(logits)
-        gathered_scaled_log_probs = scaled_log_probs.gather(-1, y_bar_indices.unsqueeze(-1)).squeeze(-1)
-
-        bar_widths = self.bar_widths.to(logits.device, logits.dtype)
-        borders = self.borders.to(logits.device, logits.dtype)
-        left_tail = self.halfnormal_with_p_weight_before(bar_widths[0])
-        right_tail = self.halfnormal_with_p_weight_before(bar_widths[-1])
-
-        left_mask = y_bar_indices == 0
-        if left_mask.any():
-            distances = (borders[1] - y[left_mask]).clamp(min=1e-8)
-            gathered_scaled_log_probs[left_mask] += left_tail.log_prob(distances) + torch.log(bar_widths[0])
-
-        right_mask = y_bar_indices == self.num_bars - 1
-        if right_mask.any():
-            distances = (y[right_mask] - borders[-2]).clamp(min=1e-8)
-            gathered_scaled_log_probs[right_mask] += right_tail.log_prob(distances) + torch.log(bar_widths[-1])
-
-        nll = -gathered_scaled_log_probs
-
-        if ignore_mask.any():
-            nll[ignore_mask] = 0.0
-
-        return nll
-
-    def mean(self, logits: torch.Tensor) -> torch.Tensor:
-        """
-        calculates the expected value of the distribution given logits
-        """
-        if logits.shape[-1] != self.num_bars:
-            raise ValueError("logits last dimension shape != num bars")
-
-        probs = torch.softmax(logits.to(torch.float32), dim=-1).to(logits.dtype)
-
-        bar_widths = self.bar_widths.to(logits.device, logits.dtype)
-        borders = self.borders.to(logits.device, logits.dtype)
-        left_tail = self.halfnormal_with_p_weight_before(bar_widths[0])
-        right_tail = self.halfnormal_with_p_weight_before(bar_widths[-1])
-
-        bar_means = borders[:-1] + bar_widths / 2
-        bar_means = bar_means.clone()
-        bar_means[0] = borders[1] - left_tail.mean.to(logits.dtype)
-        bar_means[-1] = borders[-2] + right_tail.mean.to(logits.dtype)
-        bar_means = bar_means.to(logits.device, logits.dtype)
-
-        return probs @ bar_means
-
-
 # -----------------------------------------------------------------------------
 # interface
 
@@ -650,59 +438,9 @@ class NanoTabPFNClassifier:
             return probabilities.to("cpu").numpy()
 
 
-class NanoTabPFNRegressor:
-    def __init__(
-        self,
-        model: NanoTabPFNModel | str | None = None,
-        device: str | torch.device | None = None,
-        num_mem_chunks: int = 8,
-    ):
-        if device is None:
-            device = get_default_device()
-        if model is None:
-            raise ValueError("model is None")
-        if isinstance(model, str):
-            model = init_model_from_checkpoint_file(model)
-        if getattr(model, "borders", None) is None:
-            raise ValueError("no borders")
-
-        dist = FullSupportBarDistribution(model.borders).float()
-        self.model = model.to(device)
-        self.device = device
-        self.dist = dist
-        self.num_mem_chunks = num_mem_chunks
-
-    def fit(self, X_train: np.ndarray, y_train: np.ndarray):
-        self.feature_preprocessor = get_feature_preprocessor(X_train)
-        self.X_train = self.feature_preprocessor.fit_transform(X_train)
-        self.y_train = y_train
-
-        self.y_train_mean = np.mean(self.y_train)
-        self.y_train_std = np.std(self.y_train, ddof=1) + 1e-8
-        self.y_train_n = (self.y_train - self.y_train_mean) / self.y_train_std
-
-    def predict(self, X_test: np.ndarray) -> np.ndarray:
-        X = np.concatenate((self.X_train, self.feature_preprocessor.transform(X_test)))
-        y = self.y_train_n
-
-        with torch.no_grad():
-            X_tensor = torch.tensor(X, dtype=torch.float32, device=self.device).unsqueeze(0)
-            y_tensor = torch.tensor(y, dtype=torch.float32, device=self.device).unsqueeze(0)
-
-            logits = self.model((X_tensor, y_tensor), single_eval_pos=len(self.X_train), num_mem_chunks=self.num_mem_chunks).squeeze(0)
-            preds_n = self.dist.mean(logits)
-            preds = preds_n * self.y_train_std + self.y_train_mean
-
-        return preds.cpu().numpy()
-
-
 # -----------------------------------------------------------------------------
 # evaluation
 
-
-TOY_TASKS_REGRESSION = [
-    362443,  # diabetes
-]
 
 TOY_TASKS_CLASSIFICATION = [
     59,  # iris
@@ -721,18 +459,17 @@ TABARENA_TASKS = [
 @torch.no_grad()
 def get_openml_predictions(
     *,
-    model: NanoTabPFNRegressor | NanoTabPFNClassifier,
+    model: NanoTabPFNClassifier,
     tasks: list[int] | str = "tabarena-v0.1",
     max_n_features: int = 500,
     max_n_samples: int = 10_000,
-    classification: bool | None = None,
     cache_directory: str | None = None,
 ):
-    if classification is None:
-        classification = isinstance(model, NanoTabPFNClassifier)
-
     if cache_directory is not None:
         set_root_cache_directory(cache_directory)
+
+    if tasks == "toy_tasks":
+        tasks = TOY_TASKS_CLASSIFICATION
 
     if isinstance(tasks, str):
         benchmark_suite = openml.study.get_suite(tasks)
@@ -745,9 +482,7 @@ def get_openml_predictions(
     for task_id in task_ids:
         task = openml.tasks.get_task(task_id, download_splits=False)
 
-        if classification and task.task_type_id != TaskType.SUPERVISED_CLASSIFICATION:
-            continue
-        if not classification and task.task_type_id != TaskType.SUPERVISED_REGRESSION:
+        if task.task_type_id != TaskType.SUPERVISED_CLASSIFICATION:
             continue
 
         dataset = task.get_dataset(download_data=False)
@@ -773,20 +508,18 @@ def get_openml_predictions(
             X_test = X.iloc[test_indices].to_numpy()
             y_test = y.iloc[test_indices].to_numpy()
 
-            if classification:
-                label_encoder = LabelEncoder()
-                y_train = label_encoder.fit_transform(y_train)
-                y_test = label_encoder.transform(y_test)
+            label_encoder = LabelEncoder()
+            y_train = label_encoder.fit_transform(y_train)
+            y_test = label_encoder.transform(y_test)
             targets.append(y_test)
 
             model.fit(X_train, y_train)
             y_pred = model.predict(X_test)
             predictions.append(y_pred)
-            if classification:
-                y_proba = model.predict_proba(X_test)
-                if y_proba.shape[1] == 2:
-                    y_proba = y_proba[:, 1]
-                probabilities.append(y_proba)
+            y_proba = model.predict_proba(X_test)
+            if y_proba.shape[1] == 2:
+                y_proba = y_proba[:, 1]
+            probabilities.append(y_proba)
 
         y_pred = np.concatenate(predictions, axis=0)
         targets = np.concatenate(targets, axis=0)
@@ -797,7 +530,6 @@ def get_openml_predictions(
 
 def evaluate_openml_tasks(
     *,
-    model_type: str,
     checkpoint: str | None = None,
     tasks: list[int] | str = "tabarena-v0.1",
     cache_directory: str | None = None,
@@ -805,45 +537,29 @@ def evaluate_openml_tasks(
     max_n_samples: int = 10_000,
     num_mem_chunks: int = 8,
 ):
-    if model_type not in {"classification", "regression"}:
-        raise ValueError("model_type must be 'classification' or 'regression'")
-
-    if model_type == "classification":
-        model = NanoTabPFNClassifier(model=checkpoint, num_mem_chunks=num_mem_chunks)
-    else:
-        model = NanoTabPFNRegressor(model=checkpoint, num_mem_chunks=num_mem_chunks)
+    model = NanoTabPFNClassifier(model=checkpoint, num_mem_chunks=num_mem_chunks)
     model.model.eval()
 
-    if tasks == "toy_tasks" and model_type == "regression":
-        tasks = TOY_TASKS_REGRESSION
-    elif tasks == "toy_tasks" and model_type == "classification":
+    if tasks == "toy_tasks":
         tasks = TOY_TASKS_CLASSIFICATION
-    else:
-        tasks = tasks
 
     predictions = get_openml_predictions(
         model=model,
         tasks=tasks,
         max_n_features=max_n_features,
         max_n_samples=max_n_samples,
-        classification=(model_type == "classification"),
         cache_directory=cache_directory,
     )
 
     average_score = 0.0
     for dataset_name, (y_true, y_pred, y_proba) in predictions.items():
-        if model_type == "classification":
-            acc = balanced_accuracy_score(y_true, y_pred)
-            auc = roc_auc_score(y_true, y_proba, multi_class="ovr")
-            average_score += auc
-            print(f"Dataset: {dataset_name} | ROC AUC: {auc:.4f} | Balanced Accuracy: {acc:.4f}")
-        else:
-            r2 = r2_score(y_true, y_pred)
-            average_score += r2
-            print(f"Dataset: {dataset_name} | R2: {r2:.4f}")
+        acc = balanced_accuracy_score(y_true, y_pred)
+        auc = roc_auc_score(y_true, y_proba, multi_class="ovr")
+        average_score += auc
+        print(f"Dataset: {dataset_name} | ROC AUC: {auc:.4f} | Balanced Accuracy: {acc:.4f}")
 
     average_score /= len(predictions)
-    print(f"Average {'ROC AUC' if model_type == 'classification' else 'R2'}: {average_score:.4f}")
+    print(f"Average ROC AUC: {average_score:.4f}")
 
 
 # -----------------------------------------------------------------------------
@@ -852,10 +568,9 @@ def evaluate_openml_tasks(
 
 @dataclass
 class Config:
-    type: str | None = None
+    type: str = "classification"
     experiments_dir: str = "workdir/experiments"
     classification_dump: str = "workdir/dumps/50x3_3_100k_classification.h5"
-    regression_dump: str = "workdir/dumps/50x3_1280k_regression.h5"
     multigpu: bool = False
     seed: int = 2402
     batch_size: int = 1
@@ -868,18 +583,15 @@ class Config:
     mlp_hidden_size: int = 768
     num_layers: int = 6
     num_outputs: int | None = None
-    n_buckets: int = 100
     eval_every: int = 100
 
 
 p = argparse.ArgumentParser()
-p.add_argument("--type", type=str, choices=["classification", "regression"], default="classification")
 p.add_argument("--epochs", type=int, default=None)
 args = p.parse_args()
 
 c = Config()
 
-c.type = args.type
 c.epochs = args.epochs if args.epochs else c.epochs
 
 set_randomness_seed(c.seed)
@@ -887,12 +599,12 @@ set_randomness_seed(c.seed)
 device = get_default_device()
 
 prior = PriorDumpDataLoader(
-    filename=c.classification_dump if c.type == "classification" else c.regression_dump,
+    filename=c.classification_dump,
     num_steps=c.steps,
     batch_size=c.batch_size,
     device=device,
 )
-c.num_outputs = prior.max_num_classes if c.type == "classification" else c.n_buckets
+c.num_outputs = prior.max_num_classes
 
 assert prior.num_steps % c.accumulate == 0, "num_steps must be divisible by accumulate_gradients"
 
@@ -903,23 +615,13 @@ model = NanoTabPFNModel(
     num_layers=c.num_layers,
     num_outputs=c.num_outputs,
 )
-if c.type == "regression":
-    borders = make_global_bucket_borders(
-        filename=c.regression_dump,
-        n_buckets=c.n_buckets,
-        device=device,
-    )
-    model.borders = borders
 if c.multigpu:
     model = nn.DataParallel(model)
 model.to(device)
 
 optimizer = schedulefree.AdamWScheduleFree(model.parameters(), lr=c.lr, weight_decay=0.0)
 
-if c.type == "classification":
-    criterion = nn.CrossEntropyLoss()
-elif c.type == "regression":
-    criterion = FullSupportBarDistribution(borders)
+criterion = nn.CrossEntropyLoss()
 
 ts = datetime.now().strftime("%y%m%d-%H%M%S")
 uid = uuid.uuid4().hex[:8]
@@ -981,19 +683,10 @@ for epoch in range(1, c.epochs + 1):
             continue
         targets = full_data["target_y"].to(device)
 
-        if c.type == "regression":
-            y_mean = data[1].mean(dim=1, keepdim=True)
-            y_std = data[1].std(dim=1, keepdim=True) + 1e-8
-            y_norm = (data[1] - y_mean) / y_std
-            data = (data[0], y_norm)
-
         output = model(data, single_eval_pos=single_eval_pos)
         targets = targets[:, single_eval_pos:]
-        if c.type == "regression":
-            targets = (targets - y_mean) / y_std
-        if c.type == "classification":
-            targets = targets.reshape((-1,)).to(torch.long)
-            output = output.view(-1, output.shape[-1])
+        targets = targets.reshape((-1,)).to(torch.long)
+        output = output.view(-1, output.shape[-1])
 
         losses = criterion(output, targets)
         loss = losses.mean() / c.accumulate
@@ -1033,26 +726,15 @@ for epoch in range(1, c.epochs + 1):
     torch.save(checkpoint, ckpt_path)
 
     if (epoch == 1) or (epoch == c.epochs) or (epoch % c.eval_every == 0):
-        if c.type == "classification":
-            clf = NanoTabPFNClassifier((model.module if c.multigpu else model), device)
-            preds = get_openml_predictions(model=clf, tasks=TABARENA_TASKS, max_n_samples=1000)
-            aucs: list[float] = []
-            for dataset_name, (y_true, y_pred, y_proba) in preds.items():
-                auc = roc_auc_score(y_true, y_proba, multi_class="ovr") if getattr(y_proba, "ndim", 1) > 1 else roc_auc_score(y_true, y_proba)
-                aucs.append(auc)
-                print0(f"dataset:{dataset_name}_roc_auc:{auc:.2f}", console=True)
-            avg_auc = (sum(aucs) / len(aucs)) if len(aucs) > 0 else float("nan")
-            print0(f"epoch:{epoch}/{c.epochs} avg_roc_auc:{avg_auc:.2f}", console=True)
-        elif c.type == "regression":
-            reg = NanoTabPFNRegressor((model.module if c.multigpu else model), device)
-            preds = get_openml_predictions(model=reg, tasks=TABARENA_TASKS)
-            r2s: list[float] = []
-            for dataset_name, (y_true, y_pred, _proba) in preds.items():
-                r2 = r2_score(y_true, y_pred)
-                r2s.append(r2)
-                print0(f"dataset:{dataset_name} r2:{r2:.2f}", console=True)
-            avg_r2 = (sum(r2s) / len(r2s)) if len(r2s) > 0 else float("nan")
-            print0(f"epoch:{epoch}/{c.epochs} avg_r2:{avg_r2:.2f}", console=True)
+        clf = NanoTabPFNClassifier((model.module if c.multigpu else model), device)
+        preds = get_openml_predictions(model=clf, tasks=TABARENA_TASKS, max_n_samples=1000)
+        aucs: list[float] = []
+        for dataset_name, (y_true, y_pred, y_proba) in preds.items():
+            auc = roc_auc_score(y_true, y_proba, multi_class="ovr") if getattr(y_proba, "ndim", 1) > 1 else roc_auc_score(y_true, y_proba)
+            aucs.append(auc)
+            print0(f"dataset:{dataset_name}_roc_auc:{auc:.2f}", console=True)
+        avg_auc = (sum(aucs) / len(aucs)) if len(aucs) > 0 else float("nan")
+        print0(f"epoch:{epoch}/{c.epochs} avg_roc_auc:{avg_auc:.2f}", console=True)
 
 
 print0("=" * 100)
