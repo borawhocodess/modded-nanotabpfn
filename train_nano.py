@@ -272,7 +272,6 @@ class PriorDumpDataLoader(DataLoader):
         num_steps,
         batch_size,
         device,
-        starting_index=0,
     ):
         self.filename = filename
         self.num_steps = num_steps
@@ -285,7 +284,7 @@ class PriorDumpDataLoader(DataLoader):
                 self.max_num_classes = None
             self.problem_type = f["problem_type"][()].decode("utf-8")
         self.device = device
-        self.pointer = starting_index
+        self.pointer = 0
 
     def __iter__(self):
         with h5py.File(self.filename, "r") as f:
@@ -857,7 +856,6 @@ class Config:
     experiments_dir: str = "workdir/experiments"
     classification_dump: str = "workdir/dumps/50x3_3_100k_classification.h5"
     regression_dump: str = "workdir/dumps/50x3_1280k_regression.h5"
-    resume_ckpt: str | None = None
     multigpu: bool = False
     seed: int = 2402
     batch_size: int = 1
@@ -871,64 +869,32 @@ class Config:
     num_layers: int = 6
     num_outputs: int | None = None
     n_buckets: int = 100
-    prior_starting_index: int = 0
-    start_epoch: int = 1
     eval_every: int = 100
 
 
 p = argparse.ArgumentParser()
 p.add_argument("--type", type=str, choices=["classification", "regression"], default="classification")
-p.add_argument("--resume", type=str, default=None)
 p.add_argument("--epochs", type=int, default=None)
 args = p.parse_args()
 
 c = Config()
 
 c.type = args.type
-c.resume_ckpt = args.resume if args.resume else c.resume_ckpt
 c.epochs = args.epochs if args.epochs else c.epochs
 
 set_randomness_seed(c.seed)
 
 device = get_default_device()
 
-ckpt = None
-
-if c.resume_ckpt:
-    ckpt = torch.load(c.resume_ckpt)
-    c.start_epoch = ckpt["epoch"] + 1
-    c.prior_starting_index = c.steps * ckpt["epoch"]
-    if ckpt["type"] != c.type:
-        print(f"ckpt type overrides: {c.type} -> ckpt:{ckpt['type']}")
-        c.type = ckpt["type"]
-
 prior = PriorDumpDataLoader(
     filename=c.classification_dump if c.type == "classification" else c.regression_dump,
     num_steps=c.steps,
     batch_size=c.batch_size,
     device=device,
-    starting_index=c.prior_starting_index,
 )
 c.num_outputs = prior.max_num_classes if c.type == "classification" else c.n_buckets
 
 assert prior.num_steps % c.accumulate == 0, "num_steps must be divisible by accumulate_gradients"
-
-if c.resume_ckpt:
-    if ckpt["arch"]["num_layers"] != c.num_layers:
-        print(f"ckpt num_layers overrides: {c.num_layers} -> ckpt:{ckpt['arch']['num_layers']}")
-        c.num_layers = ckpt["arch"]["num_layers"]
-    if ckpt["arch"]["embedding_size"] != c.embedding_size:
-        print(f"ckpt embedding_size overrides: {c.embedding_size} -> ckpt:{ckpt['arch']['embedding_size']}")
-        c.embedding_size = ckpt["arch"]["embedding_size"]
-    if ckpt["arch"]["num_attention_heads"] != c.num_attention_heads:
-        print(f"ckpt num_attention_heads overrides: {c.num_attention_heads} -> ckpt:{ckpt['arch']['num_attention_heads']}")
-        c.num_attention_heads = ckpt["arch"]["num_attention_heads"]
-    if ckpt["arch"]["mlp_hidden_size"] != c.mlp_hidden_size:
-        print(f"ckpt mlp_hidden_size overrides: {c.mlp_hidden_size} -> ckpt:{ckpt['arch']['mlp_hidden_size']}")
-        c.mlp_hidden_size = ckpt["arch"]["mlp_hidden_size"]
-    if ckpt["arch"]["num_outputs"] != c.num_outputs:
-        print(f"ckpt num_outputs overrides: {c.num_outputs} -> ckpt:{ckpt['arch']['num_outputs']}")
-        c.num_outputs = ckpt["arch"]["num_outputs"]
 
 model = NanoTabPFNModel(
     embedding_size=c.embedding_size,
@@ -938,24 +904,17 @@ model = NanoTabPFNModel(
     num_outputs=c.num_outputs,
 )
 if c.type == "regression":
-    if ckpt and "borders" in ckpt["model"]:
-        borders = ckpt["model"]["borders"]
-    else:
-        borders = make_global_bucket_borders(
-            filename=c.regression_dump,
-            n_buckets=c.n_buckets,
-            device=device,
-        )
+    borders = make_global_bucket_borders(
+        filename=c.regression_dump,
+        n_buckets=c.n_buckets,
+        device=device,
+    )
     model.borders = borders
-if ckpt:
-    model.load_state_dict(ckpt["model"])
 if c.multigpu:
     model = nn.DataParallel(model)
 model.to(device)
 
 optimizer = schedulefree.AdamWScheduleFree(model.parameters(), lr=c.lr, weight_decay=0.0)
-if ckpt:
-    optimizer.load_state_dict(ckpt["optimizer"])
 
 if c.type == "classification":
     criterion = nn.CrossEntropyLoss()
@@ -1007,7 +966,7 @@ print0("=" * 100)
 
 total_loss = 0.0
 
-for epoch in range(c.start_epoch, c.epochs + 1):
+for epoch in range(1, c.epochs + 1):
     epoch_start_time = time.time()
     model.train()
     optimizer.train()
@@ -1061,7 +1020,6 @@ for epoch in range(c.start_epoch, c.epochs + 1):
         "timestamp": ts,
         "uid": uid,
         "type": c.type,
-        "epoch": epoch,
         "arch": {
             "embedding_size": int((model.module if c.multigpu else model).embedding_size),
             "num_attention_heads": int((model.module if c.multigpu else model).num_attention_heads),
@@ -1070,7 +1028,6 @@ for epoch in range(c.start_epoch, c.epochs + 1):
             "num_outputs": int((model.module if c.multigpu else model).num_outputs),
         },
         "model": (model.module if c.multigpu else model).state_dict(),
-        "optimizer": optimizer.state_dict(),
     }
 
     torch.save(checkpoint, ckpt_path)
