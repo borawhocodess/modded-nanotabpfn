@@ -664,9 +664,11 @@ for f in fields(Config):
 print0("=" * 100)
 
 total_loss = 0.0
+t_t = 0.0
 
 for epoch in range(1, c.epochs + 1):
-    epoch_start_time = time.time()
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
     model.train()
     optimizer.train()
     total_loss = 0.0
@@ -695,13 +697,17 @@ for epoch in range(1, c.epochs + 1):
             optimizer.step()
             optimizer.zero_grad()
 
-    epoch_time = time.time() - epoch_start_time
+    torch.cuda.synchronize()
+    e_t = time.perf_counter() - t0 # epoch time
+    t_t += e_t                     # train time
+    mu_e_t = t_t / epoch           # mean epoch time
+
     mean_loss = total_loss / len(prior)
     model.eval()
     optimizer.eval()
 
     print0(
-        f"epoch:{epoch}/{c.epochs} mean_loss:{mean_loss:.2f} epoch_time:{epoch_time:.2f}s",
+        f"e:{epoch}/{c.epochs} μ_l:{mean_loss:.2f} e_t:{e_t:.2f}s t_t:{t_t:.2f}s μ_e_t:{mu_e_t:.2f}s",
         console=True,
     )
 
