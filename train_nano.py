@@ -641,7 +641,8 @@ for epoch in range(1, c.epochs + 1):
     optimizer.eval()
 
     if (epoch == 1) or (epoch == c.epochs) or (epoch % c.eval_every == 0):
-        clf = NanoTabPFNClassifier((model.module if c.multigpu else model), num_mem_chunks=64)
+        unwrapped_model = model.module if c.multigpu else model
+        clf = NanoTabPFNClassifier(unwrapped_model, num_mem_chunks=64)
         preds = get_openml_predictions(model=clf, tasks=TOY_TASKS_CLASSIFICATION)
         aucs: list[float] = []
         for dataset_name, (y_true, y_pred, y_proba) in preds.items():
@@ -658,13 +659,13 @@ for epoch in range(1, c.epochs + 1):
             "uid": uid,
             "type": c.type,
             "arch": {
-                "embedding_size": int((model.module if c.multigpu else model).embedding_size),
-                "num_attention_heads": int((model.module if c.multigpu else model).num_attention_heads),
-                "mlp_hidden_size": int((model.module if c.multigpu else model).mlp_hidden_size),
-                "num_layers": int((model.module if c.multigpu else model).num_layers),
-                "num_outputs": int((model.module if c.multigpu else model).num_outputs),
+                "embedding_size": unwrapped_model.embedding_size,
+                "num_attention_heads": unwrapped_model.num_attention_heads,
+                "mlp_hidden_size": unwrapped_model.mlp_hidden_size,
+                "num_layers": unwrapped_model.num_layers,
+                "num_outputs": unwrapped_model.num_outputs,
             },
-            "model": (model.module if c.multigpu else model).state_dict(),
+            "model": unwrapped_model.state_dict(),
         }
         torch.save(checkpoint, ckpt_path)
 
