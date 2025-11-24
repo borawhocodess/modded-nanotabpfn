@@ -632,7 +632,7 @@ criterion = nn.CrossEntropyLoss()
 
 ts = datetime.now().strftime("%y%m%d-%H%M%S")
 uid = uuid.uuid4().hex[:8]
-e_id = f"{ts}-{uid}-{c.type}"
+e_id = f"{ts}-{uid}"
 e_dir = os.path.join(c.experiments_dir, e_id)
 os.makedirs(e_dir, exist_ok=True)
 log_path = os.path.join(e_dir, f"{e_id}-log.txt")
