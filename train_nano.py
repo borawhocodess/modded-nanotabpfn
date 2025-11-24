@@ -38,28 +38,28 @@ from torch.utils.data import DataLoader
 class NanoTabPFNModel(nn.Module):
     def __init__(
         self,
-        e: int, 
-        a: int,
-        h: int,
         l: int,
+        a: int,
+        e: int, 
+        h: int,
         o: int,
-):
+    ):
         """
-        e : embedding size
-        a : num attention heads
-        h : mlp hidden size
         l : num layers
+        a : num attention heads
+        e : embedding size
+        h : mlp hidden size
         o : num outputs
         """
         super().__init__()
-        self.e = e
-        self.a = a
-        self.h = h
         self.l = l
+        self.a = a
+        self.e = e
+        self.h = h
         self.o = o
         self.feature_encoder = FeatureEncoder(e)
         self.target_encoder = TargetEncoder(e)
-        self.transformer_encoder = TransformerEncoderStack(l, e, a, h)
+        self.transformer_encoder = TransformerEncoderStack(l, a, e, h)
         self.decoder = Decoder(e, h, o)
 
         self.register_buffer("borders", None, persistent=True)
@@ -129,14 +129,14 @@ class TransformerEncoderStack(nn.Module):
     def __init__(
         self,
         l: int,
-        e: int,
         a: int,
+        e: int,
         h: int,
     ):
         super().__init__()
         self.transformer_blocks = nn.ModuleList()
         for _ in range(l):
-            self.transformer_blocks.append(TransformerEncoderLayer(e, a, h))
+            self.transformer_blocks.append(TransformerEncoderLayer(a, e, h))
 
     def forward(
         self,
@@ -152,8 +152,8 @@ class TransformerEncoderStack(nn.Module):
 class TransformerEncoderLayer(nn.Module):
     def __init__(
         self,
-        e: int,
         a: int,
+        e: int,
         h: int,
         eps: float = 1e-5,
         batch_first: bool = True,
@@ -305,10 +305,10 @@ class PriorDumpDataLoader(DataLoader):
 def init_model_from_checkpoint_file(file_path):
     ckpt = torch.load(file_path, map_location="cpu")
     model = NanoTabPFNModel(
-        e=ckpt["arch"]["e"],
-        a=ckpt["arch"]["a"],
-        h=ckpt["arch"]["h"],
         l=ckpt["arch"]["l"],
+        a=ckpt["arch"]["a"],
+        e=ckpt["arch"]["e"],
+        h=ckpt["arch"]["h"],
         o=ckpt["arch"]["o"],
     )
     if "borders" in ckpt["model"]:
@@ -549,10 +549,10 @@ c.o = prior.max_num_classes
 assert prior.num_steps % c.accumulate == 0, "num_steps must be divisible by accumulate_gradients"
 
 model = NanoTabPFNModel(
-    e=c.e,
-    a=c.a,
-    h=c.h,
     l=c.l,
+    a=c.a,
+    e=c.e,
+    h=c.h,
     o=c.o,
 )
 if c.multigpu:
