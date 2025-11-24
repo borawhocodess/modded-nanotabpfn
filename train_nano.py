@@ -584,6 +584,7 @@ class Config:
     num_layers: int = 6
     num_outputs: int | None = None
     eval_every: int = 100
+    jackpot: float = 0.5
 
 
 c = Config()
@@ -726,6 +727,8 @@ for epoch in range(1, c.epochs + 1):
         avg_auc = (sum(aucs) / len(aucs)) if len(aucs) > 0 else float("nan")
         print0(f"epoch:{epoch}/{c.epochs} avg_roc_auc:{avg_auc:.2f}", console=True)
 
+        if avg_auc >= c.jackpot:
+            break
 
 print0("=" * 100)
 try:
