@@ -317,25 +317,6 @@ class PriorDumpDataLoader(DataLoader):
 
 
 # -----------------------------------------------------------------------------
-# utils
-
-
-def set_randomness_seed(seed):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-
-
-def get_default_device():
-    device = "cpu"
-    if torch.backends.mps.is_available():
-        device = "mps"
-    if torch.cuda.is_available():
-        device = "cuda"
-    return device
-
-
-# -----------------------------------------------------------------------------
 # interface
 
 
@@ -403,11 +384,9 @@ class NanoTabPFNClassifier:
     def __init__(
         self,
         model: NanoTabPFNModel | str | None = None,
-        device: None | str | torch.device = None,
         num_mem_chunks: int = 8,
     ):
-        if device is None:
-            device = get_default_device()
+        device = "cuda"
         if model is None:
             raise ValueError("model is None")
         if isinstance(model, str):
@@ -589,9 +568,13 @@ class Config:
 
 c = Config()
 
-set_randomness_seed(c.seed)
+random.seed(c.seed)
+np.random.seed(c.seed)
+torch.manual_seed(c.seed)
 
-device = get_default_device()
+assert torch.cuda.is_available()
+
+device = "cuda"
 
 prior = PriorDumpDataLoader(
     filename=c.classification_dump,
@@ -717,7 +700,7 @@ for epoch in range(1, c.epochs + 1):
     torch.save(checkpoint, ckpt_path)
 
     if (epoch == 1) or (epoch == c.epochs) or (epoch % c.eval_every == 0):
-        clf = NanoTabPFNClassifier((model.module if c.multigpu else model), device)
+        clf = NanoTabPFNClassifier((model.module if c.multigpu else model))
         preds = get_openml_predictions(model=clf, tasks=TABARENA_TASKS, max_n_samples=1000)
         aucs: list[float] = []
         for dataset_name, (y_true, y_pred, y_proba) in preds.items():
