@@ -38,22 +38,29 @@ from torch.utils.data import DataLoader
 class NanoTabPFNModel(nn.Module):
     def __init__(
         self,
-        embedding_size: int,
-        num_attention_heads: int,
-        mlp_hidden_size: int,
-        num_layers: int,
-        num_outputs: int,
-    ):
+        e: int, 
+        a: int,
+        h: int,
+        l: int,
+        o: int,
+):
+        """
+        e : embedding size
+        a : num attention heads
+        h : mlp hidden size
+        l : num layers
+        o : num outputs
+        """
         super().__init__()
-        self.embedding_size = embedding_size
-        self.num_attention_heads = num_attention_heads
-        self.mlp_hidden_size = mlp_hidden_size
-        self.num_layers = num_layers
-        self.num_outputs = num_outputs
-        self.feature_encoder = FeatureEncoder(embedding_size)
-        self.target_encoder = TargetEncoder(embedding_size)
-        self.transformer_encoder = TransformerEncoderStack(num_layers, embedding_size, num_attention_heads, mlp_hidden_size)
-        self.decoder = Decoder(embedding_size, mlp_hidden_size, num_outputs)
+        self.e = e
+        self.a = a
+        self.h = h
+        self.l = l
+        self.o = o
+        self.feature_encoder = FeatureEncoder(e)
+        self.target_encoder = TargetEncoder(e)
+        self.transformer_encoder = TransformerEncoderStack(l, e, a, h)
+        self.decoder = Decoder(e, h, o)
 
         self.register_buffer("borders", None, persistent=True)
 
@@ -88,10 +95,10 @@ class NanoTabPFNModel(nn.Module):
 class FeatureEncoder(nn.Module):
     def __init__(
         self,
-        embedding_size: int,
+        e: int,
     ):
         super().__init__()
-        self.linear_layer = nn.Linear(1, embedding_size)
+        self.linear_layer = nn.Linear(1, e)
 
     def forward(self, x: torch.Tensor, single_eval_pos: int) -> torch.Tensor:
         x = x.unsqueeze(-1)
@@ -105,10 +112,10 @@ class FeatureEncoder(nn.Module):
 class TargetEncoder(nn.Module):
     def __init__(
         self,
-        embedding_size: int,
+        e: int,
     ):
         super().__init__()
-        self.linear_layer = nn.Linear(1, embedding_size)
+        self.linear_layer = nn.Linear(1, e)
 
     def forward(self, y_train: torch.Tensor, num_rows: int) -> torch.Tensor:
         mean = y_train.mean(dim=1, keepdim=True)
@@ -121,15 +128,15 @@ class TargetEncoder(nn.Module):
 class TransformerEncoderStack(nn.Module):
     def __init__(
         self,
-        num_layers: int,
-        embedding_size: int,
-        num_attention_heads: int,
-        mlp_hidden_size: int,
+        l: int,
+        e: int,
+        a: int,
+        h: int,
     ):
         super().__init__()
         self.transformer_blocks = nn.ModuleList()
-        for _ in range(num_layers):
-            self.transformer_blocks.append(TransformerEncoderLayer(embedding_size, num_attention_heads, mlp_hidden_size))
+        for _ in range(l):
+            self.transformer_blocks.append(TransformerEncoderLayer(e, a, h))
 
     def forward(
         self,
@@ -145,38 +152,38 @@ class TransformerEncoderStack(nn.Module):
 class TransformerEncoderLayer(nn.Module):
     def __init__(
         self,
-        embedding_size: int,
-        nhead: int,
-        mlp_hidden_size: int,
+        e: int,
+        a: int,
+        h: int,
         layer_norm_eps: float = 1e-5,
         batch_first: bool = True,
         device=None,
         dtype=None,
     ):
         super().__init__()
-        self.self_attention_between_datapoints = nn.MultiheadAttention(embedding_size, nhead, batch_first=batch_first, device=device, dtype=dtype)
-        self.self_attention_between_features = nn.MultiheadAttention(embedding_size, nhead, batch_first=batch_first, device=device, dtype=dtype)
+        self.self_attention_between_datapoints = nn.MultiheadAttention(e, a, batch_first=batch_first, device=device, dtype=dtype)
+        self.self_attention_between_features = nn.MultiheadAttention(e, a, batch_first=batch_first, device=device, dtype=dtype)
 
-        self.linear1 = nn.Linear(embedding_size, mlp_hidden_size, device=device, dtype=dtype)
-        self.linear2 = nn.Linear(mlp_hidden_size, embedding_size, device=device, dtype=dtype)
+        self.linear1 = nn.Linear(e, h, device=device, dtype=dtype)
+        self.linear2 = nn.Linear(h, e, device=device, dtype=dtype)
 
-        self.norm1 = nn.LayerNorm(embedding_size, eps=layer_norm_eps, device=device, dtype=dtype)
-        self.norm2 = nn.LayerNorm(embedding_size, eps=layer_norm_eps, device=device, dtype=dtype)
-        self.norm3 = nn.LayerNorm(embedding_size, eps=layer_norm_eps, device=device, dtype=dtype)
+        self.norm1 = nn.LayerNorm(e, eps=layer_norm_eps, device=device, dtype=dtype)
+        self.norm2 = nn.LayerNorm(e, eps=layer_norm_eps, device=device, dtype=dtype)
+        self.norm3 = nn.LayerNorm(e, eps=layer_norm_eps, device=device, dtype=dtype)
 
     def forward(self, src: torch.Tensor, single_eval_position: int, num_mem_chunks: int = 1) -> torch.Tensor:
-        batch_size, rows_size, col_size, embedding_size = src.shape
-        src = src.reshape(batch_size * rows_size, col_size, embedding_size)
+        batch_size, rows_size, col_size, e = src.shape
+        src = src.reshape(batch_size * rows_size, col_size, e)
 
         @memory_chunking(num_mem_chunks)
         def feature_attention(x):
             return self.self_attention_between_features(x, x, x)[0] + x
 
         src = feature_attention(src)
-        src = src.reshape(batch_size, rows_size, col_size, embedding_size)
+        src = src.reshape(batch_size, rows_size, col_size, e)
         src = self.norm1(src)
         src = src.transpose(1, 2)
-        src = src.reshape(batch_size * col_size, rows_size, embedding_size)
+        src = src.reshape(batch_size * col_size, rows_size, e)
 
         @memory_chunking(num_mem_chunks)
         def datapoint_attention(x):
@@ -185,17 +192,17 @@ class TransformerEncoderLayer(nn.Module):
             return torch.cat([x_left, x_right], dim=1) + x
 
         src = datapoint_attention(src)
-        src = src.reshape(batch_size, col_size, rows_size, embedding_size)
+        src = src.reshape(batch_size, col_size, rows_size, e)
         src = src.transpose(2, 1)
         src = self.norm2(src)
-        src = src.reshape(-1, embedding_size)
+        src = src.reshape(-1, e)
 
         @memory_chunking(num_mem_chunks)
         def mlp(x):
             return self.linear2(F.gelu(self.linear1(x))) + x
 
         src = mlp(src)
-        src = src.reshape(batch_size, rows_size, col_size, embedding_size)
+        src = src.reshape(batch_size, rows_size, col_size, e)
         src = self.norm3(src)
         return src
 
@@ -224,13 +231,13 @@ def memory_chunking(num_mem_chunks: int) -> callable:
 class Decoder(nn.Module):
     def __init__(
         self,
-        embedding_size: int,
-        mlp_hidden_size: int,
-        num_outputs: int,
+        e: int,
+        h: int,
+        o: int,
     ):
         super().__init__()
-        self.linear1 = nn.Linear(embedding_size, mlp_hidden_size)
-        self.linear2 = nn.Linear(mlp_hidden_size, num_outputs)
+        self.linear1 = nn.Linear(e, h)
+        self.linear2 = nn.Linear(h, o)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.linear2(F.gelu(self.linear1(x)))
@@ -298,11 +305,11 @@ class PriorDumpDataLoader(DataLoader):
 def init_model_from_checkpoint_file(file_path):
     ckpt = torch.load(file_path, map_location="cpu")
     model = NanoTabPFNModel(
-        embedding_size=ckpt["arch"]["embedding_size"],
-        num_attention_heads=ckpt["arch"]["num_attention_heads"],
-        mlp_hidden_size=ckpt["arch"]["mlp_hidden_size"],
-        num_layers=ckpt["arch"]["num_layers"],
-        num_outputs=ckpt["arch"]["num_outputs"],
+        e=ckpt["arch"]["e"],
+        a=ckpt["arch"]["a"],
+        h=ckpt["arch"]["h"],
+        l=ckpt["arch"]["l"],
+        o=ckpt["arch"]["o"],
     )
     if "borders" in ckpt["model"]:
         model.borders = ckpt["model"]["borders"]
@@ -512,11 +519,11 @@ class Config:
     lr: float = 1e-4
     steps: int = 100
     epochs: int = 4
-    num_attention_heads: int = 6
-    embedding_size: int = 192
-    mlp_hidden_size: int = 768
-    num_layers: int = 6
-    num_outputs: int | None = None
+    a: int = 6
+    e: int = 192
+    h: int = 768
+    l: int = 6
+    o: int | None = None
     eval_every: int = 100
     jackpot: float = 0.5
 
@@ -537,16 +544,16 @@ prior = PriorDumpDataLoader(
     batch_size=c.batch_size,
     device=device,
 )
-c.num_outputs = prior.max_num_classes
+c.o = prior.max_num_classes
 
 assert prior.num_steps % c.accumulate == 0, "num_steps must be divisible by accumulate_gradients"
 
 model = NanoTabPFNModel(
-    embedding_size=c.embedding_size,
-    num_attention_heads=c.num_attention_heads,
-    mlp_hidden_size=c.mlp_hidden_size,
-    num_layers=c.num_layers,
-    num_outputs=c.num_outputs,
+    e=c.e,
+    a=c.a,
+    h=c.h,
+    l=c.l,
+    o=c.o,
 )
 if c.multigpu:
     model = nn.DataParallel(model)
@@ -659,11 +666,11 @@ for epoch in range(1, c.epochs + 1):
             "uid": uid,
             "type": c.type,
             "arch": {
-                "embedding_size": unwrapped_model.embedding_size,
-                "num_attention_heads": unwrapped_model.num_attention_heads,
-                "mlp_hidden_size": unwrapped_model.mlp_hidden_size,
-                "num_layers": unwrapped_model.num_layers,
-                "num_outputs": unwrapped_model.num_outputs,
+                "e": unwrapped_model.e,
+                "a": unwrapped_model.a,
+                "h": unwrapped_model.h,
+                "l": unwrapped_model.l,
+                "o": unwrapped_model.o,
             },
             "model": unwrapped_model.state_dict(),
         }
