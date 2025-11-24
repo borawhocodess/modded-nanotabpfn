@@ -36,14 +36,7 @@ from torch.utils.data import DataLoader
 
 
 class NanoTabPFNModel(nn.Module):
-    def __init__(
-        self,
-        l: int,
-        a: int,
-        e: int, 
-        h: int,
-        o: int,
-    ):
+    def __init__(self, l: int, a: int, e: int, h: int, o: int):
         """
         l : num layers
         a : num attention heads
@@ -73,12 +66,7 @@ class NanoTabPFNModel(nn.Module):
         elif len(args) == 1 and isinstance(args, tuple):
             return self._forward(*args, **kwargs)
 
-    def _forward(
-        self,
-        src: Tuple[torch.Tensor, torch.Tensor],
-        sep: int,
-        chunks: int = 1,
-    ) -> torch.Tensor:
+    def _forward(self, src: Tuple[torch.Tensor, torch.Tensor], sep: int, chunks: int = 1) -> torch.Tensor:
         x_src, y_src = src
         if len(y_src.shape) < len(x_src.shape):
             y_src = y_src.unsqueeze(-1)
@@ -93,10 +81,7 @@ class NanoTabPFNModel(nn.Module):
 
 
 class FeatureEncoder(nn.Module):
-    def __init__(
-        self,
-        e: int,
-    ):
+    def __init__(self, e: int):
         super().__init__()
         self.linear_layer = nn.Linear(1, e)
 
@@ -110,10 +95,7 @@ class FeatureEncoder(nn.Module):
 
 
 class TargetEncoder(nn.Module):
-    def __init__(
-        self,
-        e: int,
-    ):
+    def __init__(self, e: int):
         super().__init__()
         self.linear_layer = nn.Linear(1, e)
 
@@ -126,40 +108,20 @@ class TargetEncoder(nn.Module):
 
 
 class TransformerEncoderStack(nn.Module):
-    def __init__(
-        self,
-        l: int,
-        a: int,
-        e: int,
-        h: int,
-    ):
+    def __init__(self, l: int, a: int, e: int, h: int):
         super().__init__()
         self.transformer_blocks = nn.ModuleList()
         for _ in range(l):
             self.transformer_blocks.append(TransformerEncoderLayer(a, e, h))
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        sep: int,
-        chunks: int = 1,
-    ) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, sep: int, chunks: int = 1) -> torch.Tensor:
         for block in self.transformer_blocks:
             x = block(x, sep=sep, chunks=chunks)
         return x
 
 
 class TransformerEncoderLayer(nn.Module):
-    def __init__(
-        self,
-        a: int,
-        e: int,
-        h: int,
-        eps: float = 1e-5,
-        batch_first: bool = True,
-        device=None,
-        dtype=None,
-    ):
+    def __init__(self, a: int, e: int, h: int, eps: float = 1e-5, batch_first: bool = True, device=None, dtype=None):
         super().__init__()
         self.self_attention_between_datapoints = nn.MultiheadAttention(e, a, batch_first=batch_first, device=device, dtype=dtype)
         self.self_attention_between_features = nn.MultiheadAttention(e, a, batch_first=batch_first, device=device, dtype=dtype)
@@ -229,12 +191,7 @@ def memory_chunking(chunks: int) -> callable:
 
 
 class Decoder(nn.Module):
-    def __init__(
-        self,
-        e: int,
-        h: int,
-        o: int,
-    ):
+    def __init__(self, e: int, h: int, o: int):
         super().__init__()
         self.linear1 = nn.Linear(e, h)
         self.linear2 = nn.Linear(h, o)
@@ -248,13 +205,7 @@ class Decoder(nn.Module):
 
 
 class PriorDumpDataLoader(DataLoader):
-    def __init__(
-        self,
-        filename,
-        num_steps,
-        batch_size,
-        device,
-    ):
+    def __init__(self, filename, num_steps, batch_size, device):
         self.filename = filename
         self.num_steps = num_steps
         self.batch_size = batch_size
@@ -363,11 +314,7 @@ def get_feature_preprocessor(X: np.ndarray | pd.DataFrame) -> ColumnTransformer:
 
 
 class NanoTabPFNClassifier:
-    def __init__(
-        self,
-        model: NanoTabPFNModel | str | None = None,
-        chunks: int = 8,
-    ):
+    def __init__(self, model: NanoTabPFNModel | str | None = None, chunks: int = 8):
         device = "cuda"
         if model is None:
             raise ValueError("model is None")
@@ -548,13 +495,7 @@ c.o = prior.max_num_classes
 
 assert prior.num_steps % c.accumulate == 0, "num_steps must be divisible by accumulate_gradients"
 
-model = NanoTabPFNModel(
-    l=c.l,
-    a=c.a,
-    e=c.e,
-    h=c.h,
-    o=c.o,
-)
+model = NanoTabPFNModel(l=c.l, a=c.a, e=c.e, h=c.h, o=c.o)
 if c.multigpu:
     model = nn.DataParallel(model)
 model.to(device)
