@@ -69,25 +69,25 @@ class NanoTabPFNModel(nn.Module):
             x = args[0]
             if args[2] is not None:
                 x = torch.cat((x, args[2]), dim=1)
-            return self._forward((x, args[1]), single_eval_pos=args[0].shape[1], **kwargs)
+            return self._forward((x, args[1]), sep=args[0].shape[1], **kwargs)
         elif len(args) == 1 and isinstance(args, tuple):
             return self._forward(*args, **kwargs)
 
     def _forward(
         self,
         src: Tuple[torch.Tensor, torch.Tensor],
-        single_eval_pos: int,
+        sep: int,
         chunks: int = 1,
     ) -> torch.Tensor:
         x_src, y_src = src
         if len(y_src.shape) < len(x_src.shape):
             y_src = y_src.unsqueeze(-1)
-        x_src = self.feature_encoder(x_src, single_eval_pos)
+        x_src = self.feature_encoder(x_src, sep)
         num_rows = x_src.shape[1]
         y_src = self.target_encoder(y_src, num_rows)
         src = torch.cat([x_src, y_src], 2)
-        output = self.transformer_encoder(src, single_eval_pos, chunks=chunks)
-        output = output[:, single_eval_pos:, -1, :]
+        output = self.transformer_encoder(src, sep, chunks=chunks)
+        output = output[:, sep:, -1, :]
         output = self.decoder(output)
         return output
 
@@ -100,10 +100,10 @@ class FeatureEncoder(nn.Module):
         super().__init__()
         self.linear_layer = nn.Linear(1, e)
 
-    def forward(self, x: torch.Tensor, single_eval_pos: int) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, sep: int) -> torch.Tensor:
         x = x.unsqueeze(-1)
-        mean = x[:, :single_eval_pos].mean(dim=1, keepdim=True)
-        std = x[:, :single_eval_pos].std(dim=1, keepdim=True) + 1e-8
+        mean = x[:, :sep].mean(dim=1, keepdim=True)
+        std = x[:, :sep].std(dim=1, keepdim=True) + 1e-8
         x = (x - mean) / std
         x = torch.clip(x, min=-100, max=100)
         return self.linear_layer(x)
@@ -141,11 +141,11 @@ class TransformerEncoderStack(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        single_eval_position: int,
+        sep: int,
         chunks: int = 1,
     ) -> torch.Tensor:
         for block in self.transformer_blocks:
-            x = block(x, single_eval_position=single_eval_position, chunks=chunks)
+            x = block(x, sep=sep, chunks=chunks)
         return x
 
 
@@ -171,7 +171,7 @@ class TransformerEncoderLayer(nn.Module):
         self.norm2 = nn.LayerNorm(e, eps=eps, device=device, dtype=dtype)
         self.norm3 = nn.LayerNorm(e, eps=eps, device=device, dtype=dtype)
 
-    def forward(self, src: torch.Tensor, single_eval_position: int, chunks: int = 1) -> torch.Tensor:
+    def forward(self, src: torch.Tensor, sep: int, chunks: int = 1) -> torch.Tensor:
         batch_size, rows_size, col_size, e = src.shape
         src = src.reshape(batch_size * rows_size, col_size, e)
 
@@ -187,8 +187,8 @@ class TransformerEncoderLayer(nn.Module):
 
         @memory_chunking(chunks)
         def datapoint_attention(x):
-            x_left = self.self_attention_between_datapoints(x[:, :single_eval_position], x[:, :single_eval_position], x[:, :single_eval_position])[0]
-            x_right = self.self_attention_between_datapoints(x[:, single_eval_position:], x[:, :single_eval_position], x[:, :single_eval_position])[0]
+            x_left = self.self_attention_between_datapoints(x[:, :sep], x[:, :sep], x[:, :sep])[0]
+            x_right = self.self_attention_between_datapoints(x[:, sep:], x[:, :sep], x[:, :sep])[0]
             return torch.cat([x_left, x_right], dim=1) + x
 
         src = datapoint_attention(src)
@@ -277,7 +277,7 @@ class PriorDumpDataLoader(DataLoader):
                 num_features = self.data["num_features"][self.pointer : end].max()
                 x = torch.from_numpy(self.data["X"][self.pointer : end, :, :num_features])
                 y = torch.from_numpy(self.data["y"][self.pointer : end])
-                single_eval_pos = self.data["single_eval_pos"][self.pointer : end]
+                sep = self.data["single_eval_pos"][self.pointer : end]
 
                 self.pointer += self.batch_size
                 if self.pointer >= self.data["X"].shape[0]:
@@ -291,7 +291,7 @@ class PriorDumpDataLoader(DataLoader):
                     x=x.to(self.device),
                     y=y.to(self.device),
                     target_y=y.to(self.device),
-                    single_eval_pos=single_eval_pos[0].item(),
+                    sep=sep[0].item(),
                 )
 
     def __len__(self):
@@ -393,7 +393,7 @@ class NanoTabPFNClassifier:
         with torch.no_grad():
             x = torch.from_numpy(x).unsqueeze(0).to(torch.float).to(self.device)
             y = torch.from_numpy(y).unsqueeze(0).to(torch.float).to(self.device)
-            out = self.model((x, y), single_eval_pos=len(self.X_train), chunks=self.chunks).squeeze(0)
+            out = self.model((x, y), sep=len(self.X_train), chunks=self.chunks).squeeze(0)
             out = out[:, : self.num_classes]
             probabilities = F.softmax(out, dim=1)
             return probabilities.to("cpu").numpy()
@@ -608,17 +608,17 @@ for epoch in range(1, c.epochs + 1):
     optimizer.train()
     total_loss = 0.0
     for i, full_data in enumerate(prior):
-        single_eval_pos = full_data["single_eval_pos"]
+        sep = full_data["sep"]
         data = (
             full_data["x"].to(device),
-            full_data["y"][:, :single_eval_pos].to(device),
+            full_data["y"][:, :sep].to(device),
         )
         if torch.isnan(data[0]).any() or torch.isnan(data[1]).any():
             continue
         targets = full_data["target_y"].to(device)
 
-        output = model(data, single_eval_pos=single_eval_pos)
-        targets = targets[:, single_eval_pos:]
+        output = model(data, sep=sep)
+        targets = targets[:, sep:]
         targets = targets.reshape((-1,)).to(torch.long)
         output = output.view(-1, output.shape[-1])
 
