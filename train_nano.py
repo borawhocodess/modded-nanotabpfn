@@ -11,7 +11,7 @@ import uuid
 import warnings
 from dataclasses import dataclass, fields
 from datetime import datetime
-from typing import Callable, Dict, Iterator, Tuple, Union
+from typing import Callable, Tuple
 
 import h5py
 import numpy as np
@@ -24,7 +24,7 @@ from openml.config import set_root_cache_directory
 from openml.tasks import TaskType
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
-from sklearn.metrics import balanced_accuracy_score, roc_auc_score
+from sklearn.metrics import roc_auc_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer, LabelEncoder, OrdinalEncoder
 from torch import nn
@@ -240,30 +240,6 @@ class Decoder(nn.Module):
 # priors
 
 
-class PriorDataLoader(DataLoader):
-    def __init__(
-        self,
-        get_batch_function: Callable[..., Dict[str, Union[torch.Tensor, int]]],
-        num_steps: int,
-        batch_size: int,
-        num_datapoints_max: int,
-        num_features: int,
-        device: torch.device,
-    ):
-        self.get_batch_function = get_batch_function
-        self.num_steps = num_steps
-        self.batch_size = batch_size
-        self.num_datapoints_max = num_datapoints_max
-        self.num_features = num_features
-        self.device = device
-
-    def __iter__(self) -> Iterator[Dict[str, Union[torch.Tensor, int]]]:
-        return iter(self.get_batch_function(self.batch_size, self.num_datapoints_max, self.num_features) for _ in range(self.num_steps))
-
-    def __len__(self) -> int:
-        return self.num_steps
-
-
 class PriorDumpDataLoader(DataLoader):
     def __init__(
         self,
@@ -426,13 +402,6 @@ TOY_TASKS_CLASSIFICATION = [
     9946,  # breast_cancer
 ]
 
-TABARENA_TASKS = [
-    363612, 363613, 363614, 363615, 363616, 363618, 363619, 363620, 363621, 363623, 363624, 363625, 363626, 363627, 
-    363628, 363629, 363630, 363631, 363632, 363671, 363672, 363673, 363674, 363675, 363676, 363677, 363678, 363679, 
-    363681, 363682, 363683, 363684, 363685, 363686, 363689, 363691, 363693, 363694, 363696, 363697, 363698, 363699, 
-    363700, 363702, 363704, 363705, 363706, 363707, 363708, 363711, 363712,
-]
-
 TASKS = [
     363614,  # anneal       (  898,  39) anneal
     363619,  # bank         (10000,  11) Bank_Customer_Churn
@@ -470,9 +439,6 @@ def get_openml_predictions(
     if cache_directory is not None:
         set_root_cache_directory(cache_directory)
 
-    if tasks == "toy_tasks":
-        tasks = TOY_TASKS_CLASSIFICATION
-
     if isinstance(tasks, str):
         benchmark_suite = openml.study.get_suite(tasks)
         task_ids = benchmark_suite.tasks
@@ -503,7 +469,7 @@ def get_openml_predictions(
         predictions = []
         probabilities = []
         for fold in range(folds):
-            X, y, categorical_indicator, attribute_names = dataset.get_data(target=task.target_name, dataset_format="dataframe")
+            X, y, _, _ = dataset.get_data(target=task.target_name, dataset_format="dataframe")
             train_indices, test_indices = task.get_train_test_split_indices(fold=fold, repeat=repeat)
             X_train = X.iloc[train_indices].to_numpy()
             y_train = y.iloc[train_indices].to_numpy()
@@ -528,40 +494,6 @@ def get_openml_predictions(
         probabilities = np.concatenate(probabilities, axis=0) if len(probabilities) > 0 else None
         dataset_predictions[str(dataset.name)] = (targets, y_pred, probabilities)
     return dataset_predictions
-
-
-def evaluate_openml_tasks(
-    *,
-    checkpoint: str | None = None,
-    tasks: list[int] | str = "tabarena-v0.1",
-    cache_directory: str | None = None,
-    max_n_features: int = 500,
-    max_n_samples: int = 10_000,
-    num_mem_chunks: int = 8,
-):
-    model = NanoTabPFNClassifier(model=checkpoint, num_mem_chunks=num_mem_chunks)
-    model.model.eval()
-
-    if tasks == "toy_tasks":
-        tasks = TOY_TASKS_CLASSIFICATION
-
-    predictions = get_openml_predictions(
-        model=model,
-        tasks=tasks,
-        max_n_features=max_n_features,
-        max_n_samples=max_n_samples,
-        cache_directory=cache_directory,
-    )
-
-    average_score = 0.0
-    for dataset_name, (y_true, y_pred, y_proba) in predictions.items():
-        acc = balanced_accuracy_score(y_true, y_pred)
-        auc = roc_auc_score(y_true, y_proba, multi_class="ovr")
-        average_score += auc
-        print(f"Dataset: {dataset_name} | ROC AUC: {auc:.4f} | Balanced Accuracy: {acc:.4f}")
-
-    average_score /= len(predictions)
-    print(f"Average ROC AUC: {average_score:.4f}")
 
 
 # -----------------------------------------------------------------------------
@@ -652,18 +584,14 @@ print0(f"host: {socket.gethostname()}")
 print0(f"platform: {platform.platform()}")
 print0(f"python: {sys.version}")
 print0(f"torch: {torch.version.__version__}")
-try:
-    print0(f"cuda: {torch.version.cuda}")
-    print0(subprocess.run(["nvidia-smi"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True).stdout)
-except Exception as e:
-    print0(f"no cuda: {e}")
+print0(f"cuda: {torch.version.cuda}")
+print0(subprocess.run(["nvidia-smi"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True).stdout)
 print0("=" * 100)
 print0("config:")
 for f in fields(Config):
     print0(f"  {f.name}: {getattr(c, f.name)}")
 print0("=" * 100)
 
-total_loss = 0.0
 t_t = 0.0
 
 for epoch in range(1, c.epochs + 1):
@@ -744,9 +672,6 @@ for epoch in range(1, c.epochs + 1):
             break
 
 print0("=" * 100)
-try:
-    print0(f"peak memory allocated: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB", console=True)
-    print0(f"peak memory reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB", console=True)
-except Exception as e:
-    print0(f"no cuda: {e}")
+print0(f"peak memory allocated: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB", console=True)
+print0(f"peak memory reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB", console=True)
 print0(f"experiment done: {e_id}", console=True)
