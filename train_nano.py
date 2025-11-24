@@ -77,7 +77,7 @@ class NanoTabPFNModel(nn.Module):
         self,
         src: Tuple[torch.Tensor, torch.Tensor],
         single_eval_pos: int,
-        num_mem_chunks: int = 1,
+        chunks: int = 1,
     ) -> torch.Tensor:
         x_src, y_src = src
         if len(y_src.shape) < len(x_src.shape):
@@ -86,7 +86,7 @@ class NanoTabPFNModel(nn.Module):
         num_rows = x_src.shape[1]
         y_src = self.target_encoder(y_src, num_rows)
         src = torch.cat([x_src, y_src], 2)
-        output = self.transformer_encoder(src, single_eval_pos, num_mem_chunks=num_mem_chunks)
+        output = self.transformer_encoder(src, single_eval_pos, chunks=chunks)
         output = output[:, single_eval_pos:, -1, :]
         output = self.decoder(output)
         return output
@@ -142,10 +142,10 @@ class TransformerEncoderStack(nn.Module):
         self,
         x: torch.Tensor,
         single_eval_position: int,
-        num_mem_chunks: int = 1,
+        chunks: int = 1,
     ) -> torch.Tensor:
         for block in self.transformer_blocks:
-            x = block(x, single_eval_position=single_eval_position, num_mem_chunks=num_mem_chunks)
+            x = block(x, single_eval_position=single_eval_position, chunks=chunks)
         return x
 
 
@@ -155,7 +155,7 @@ class TransformerEncoderLayer(nn.Module):
         e: int,
         a: int,
         h: int,
-        layer_norm_eps: float = 1e-5,
+        eps: float = 1e-5,
         batch_first: bool = True,
         device=None,
         dtype=None,
@@ -167,15 +167,15 @@ class TransformerEncoderLayer(nn.Module):
         self.linear1 = nn.Linear(e, h, device=device, dtype=dtype)
         self.linear2 = nn.Linear(h, e, device=device, dtype=dtype)
 
-        self.norm1 = nn.LayerNorm(e, eps=layer_norm_eps, device=device, dtype=dtype)
-        self.norm2 = nn.LayerNorm(e, eps=layer_norm_eps, device=device, dtype=dtype)
-        self.norm3 = nn.LayerNorm(e, eps=layer_norm_eps, device=device, dtype=dtype)
+        self.norm1 = nn.LayerNorm(e, eps=eps, device=device, dtype=dtype)
+        self.norm2 = nn.LayerNorm(e, eps=eps, device=device, dtype=dtype)
+        self.norm3 = nn.LayerNorm(e, eps=eps, device=device, dtype=dtype)
 
-    def forward(self, src: torch.Tensor, single_eval_position: int, num_mem_chunks: int = 1) -> torch.Tensor:
+    def forward(self, src: torch.Tensor, single_eval_position: int, chunks: int = 1) -> torch.Tensor:
         batch_size, rows_size, col_size, e = src.shape
         src = src.reshape(batch_size * rows_size, col_size, e)
 
-        @memory_chunking(num_mem_chunks)
+        @memory_chunking(chunks)
         def feature_attention(x):
             return self.self_attention_between_features(x, x, x)[0] + x
 
@@ -185,7 +185,7 @@ class TransformerEncoderLayer(nn.Module):
         src = src.transpose(1, 2)
         src = src.reshape(batch_size * col_size, rows_size, e)
 
-        @memory_chunking(num_mem_chunks)
+        @memory_chunking(chunks)
         def datapoint_attention(x):
             x_left = self.self_attention_between_datapoints(x[:, :single_eval_position], x[:, :single_eval_position], x[:, :single_eval_position])[0]
             x_right = self.self_attention_between_datapoints(x[:, single_eval_position:], x[:, :single_eval_position], x[:, :single_eval_position])[0]
@@ -197,7 +197,7 @@ class TransformerEncoderLayer(nn.Module):
         src = self.norm2(src)
         src = src.reshape(-1, e)
 
-        @memory_chunking(num_mem_chunks)
+        @memory_chunking(chunks)
         def mlp(x):
             return self.linear2(F.gelu(self.linear1(x))) + x
 
@@ -207,10 +207,10 @@ class TransformerEncoderLayer(nn.Module):
         return src
 
 
-def memory_chunking(num_mem_chunks: int) -> callable:
+def memory_chunking(chunks: int) -> callable:
     def decorator(func: Callable[[torch.Tensor], torch.Tensor]) -> Callable[[torch.Tensor], torch.Tensor]:
         def wrapper(x: torch.Tensor) -> torch.Tensor:
-            if num_mem_chunks <= 1 or x.shape[0] == 0:
+            if chunks <= 1 or x.shape[0] == 0:
                 return func(x)
             elif torch.is_grad_enabled():
                 warnings.warn(
@@ -218,7 +218,7 @@ def memory_chunking(num_mem_chunks: int) -> callable:
                     "Please use `with torch.no_grad():` during inference to enable chunking.",
                 )
                 return func(x)
-            chunk_size = max(1, math.ceil(x.shape[0] / num_mem_chunks))
+            chunk_size = max(1, math.ceil(x.shape[0] / chunks))
             for x_split in torch.split(x, split_size_or_sections=chunk_size, dim=0):
                 x_split[:] = func(x_split)
             return x
@@ -366,7 +366,7 @@ class NanoTabPFNClassifier:
     def __init__(
         self,
         model: NanoTabPFNModel | str | None = None,
-        num_mem_chunks: int = 8,
+        chunks: int = 8,
     ):
         device = "cuda"
         if model is None:
@@ -375,7 +375,7 @@ class NanoTabPFNClassifier:
             model = init_model_from_checkpoint_file(model)
         self.model = model.to(device)
         self.device = device
-        self.num_mem_chunks = num_mem_chunks
+        self.chunks = chunks
 
     def fit(self, X_train: np.ndarray, y_train: np.ndarray):
         self.feature_preprocessor = get_feature_preprocessor(X_train)
@@ -393,7 +393,7 @@ class NanoTabPFNClassifier:
         with torch.no_grad():
             x = torch.from_numpy(x).unsqueeze(0).to(torch.float).to(self.device)
             y = torch.from_numpy(y).unsqueeze(0).to(torch.float).to(self.device)
-            out = self.model((x, y), single_eval_pos=len(self.X_train), num_mem_chunks=self.num_mem_chunks).squeeze(0)
+            out = self.model((x, y), single_eval_pos=len(self.X_train), chunks=self.chunks).squeeze(0)
             out = out[:, : self.num_classes]
             probabilities = F.softmax(out, dim=1)
             return probabilities.to("cpu").numpy()
@@ -649,7 +649,7 @@ for epoch in range(1, c.epochs + 1):
 
     if (epoch == 1) or (epoch == c.epochs) or (epoch % c.eval_every == 0):
         unwrapped_model = model.module if c.multigpu else model
-        clf = NanoTabPFNClassifier(unwrapped_model, num_mem_chunks=64)
+        clf = NanoTabPFNClassifier(unwrapped_model, chunks=64)
         preds = get_openml_predictions(model=clf, tasks=TOY_TASKS_CLASSIFICATION)
         aucs: list[float] = []
         for dataset_name, (y_true, y_pred, y_proba) in preds.items():
