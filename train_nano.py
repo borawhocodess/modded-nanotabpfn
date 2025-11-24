@@ -434,27 +434,27 @@ TABARENA_TASKS = [
 ]
 
 TASKS = [
-    363614, # anneal       (  898,  39) anneal
-    363619, # bank         (10000,  11) Bank_Customer_Churn
-    363621, # blood        (  748,   5) blood-transfusion-service-center
-    363623, # churn        ( 5000,  20) churn
-    363624, # coil2000     ( 9822,  86) coil2000_insurance_policies
-    363626, # credit       ( 1000,  21) credit-g
-    363629, # diabetes     (  768,   9) diabetes
-    363671, # fitness      ( 1500,   7) Fitness_Club
-    363674, # hazelnut     ( 2400,  31) hazelnut-spread-contaminant-detection
-    363682, # is           ( 1723,  14) Is-this-a-good-customer
-    363684, # marketing    ( 2240,  26) Marketing_Campaign
-    363685, # maternal     ( 1014,   7) maternal_health_risk
-    363689, # naticusdroid ( 7491,  87) NATICUSdroid
-    363694, # polish       ( 5910,  65) polish_companies_bankruptcy
-    363696, # qsar         ( 1054,  42) qsar-biodeg
-    363700, # seismic      ( 2584,  16) seismic-bumps
-    363702, # splice       ( 3190,  61) splice
-    363704, # students     ( 4424,  37) students_dropout_and_academic_success
-    363706, # taiwanese    ( 6819,  95) taiwanese_bankruptcy_prediction
-    363707, # website      ( 1353,  10) website_phishing
-    363711, # mic          ( 1699, 112) MIC
+    363614,  # anneal       (  898,  39) anneal
+    363619,  # bank         (10000,  11) Bank_Customer_Churn
+    363621,  # blood        (  748,   5) blood-transfusion-service-center
+    363623,  # churn        ( 5000,  20) churn
+    363624,  # coil2000     ( 9822,  86) coil2000_insurance_policies
+    363626,  # credit       ( 1000,  21) credit-g
+    363629,  # diabetes     (  768,   9) diabetes
+    363671,  # fitness      ( 1500,   7) Fitness_Club
+    363674,  # hazelnut     ( 2400,  31) hazelnut-spread-contaminant-detection
+    363682,  # is           ( 1723,  14) Is-this-a-good-customer
+    363684,  # marketing    ( 2240,  26) Marketing_Campaign
+    363685,  # maternal     ( 1014,   7) maternal_health_risk
+    363689,  # naticusdroid ( 7491,  87) NATICUSdroid
+    363694,  # polish       ( 5910,  65) polish_companies_bankruptcy
+    363696,  # qsar         ( 1054,  42) qsar-biodeg
+    363700,  # seismic      ( 2584,  16) seismic-bumps
+    363702,  # splice       ( 3190,  61) splice
+    363704,  # students     ( 4424,  37) students_dropout_and_academic_success
+    363706,  # taiwanese    ( 6819,  95) taiwanese_bankruptcy_prediction
+    363707,  # website      ( 1353,  10) website_phishing
+    363711,  # mic          ( 1699, 112) MIC
 ]
 
 
@@ -698,9 +698,9 @@ for epoch in range(1, c.epochs + 1):
             optimizer.zero_grad()
 
     torch.cuda.synchronize()
-    e_t = time.perf_counter() - t0 # epoch time
-    t_t += e_t                     # train time
-    mu_e_t = t_t / epoch           # mean epoch time
+    e_t = time.perf_counter() - t0  # epoch time
+    t_t += e_t  # train time
+    mu_e_t = t_t / epoch  # mean epoch time
 
     mean_loss = total_loss / len(prior)
 
