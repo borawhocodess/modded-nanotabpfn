@@ -433,7 +433,7 @@ TABARENA_TASKS = [
     363700, 363702, 363704, 363705, 363706, 363707, 363708, 363711, 363712,
 ]
 
-DATASETS = [
+TASKS = [
     363614, # anneal       (  898,  39) anneal
     363619, # bank         (10000,  11) Bank_Customer_Churn
     363621, # blood        (  748,   5) blood-transfusion-service-center
@@ -493,12 +493,6 @@ def get_openml_predictions(
         n_samples = dataset.qualities["NumberOfInstances"]
         if n_features > max_n_features or n_samples > max_n_samples:
             continue
-
-        name = dataset.name.lower().split("-")[0].split("_")[0]
-
-        samples, features = int(n_samples), int(n_features)
-
-        print(f"{task_id:<6}, # {name:<12} ({samples:>5}, {features:>3}) {dataset.name}")
 
         _, folds, _ = task.get_split_dimensions()
         tabarena_light = True
@@ -730,7 +724,7 @@ for epoch in range(1, c.epochs + 1):
 
     if (epoch == 1) or (epoch == c.epochs) or (epoch % c.eval_every == 0):
         clf = NanoTabPFNClassifier((model.module if c.multigpu else model), num_mem_chunks=64)
-        preds = get_openml_predictions(model=clf, tasks=TABARENA_TASKS)
+        preds = get_openml_predictions(model=clf, tasks=TASKS)
         aucs: list[float] = []
         for dataset_name, (y_true, y_pred, y_proba) in preds.items():
             auc = roc_auc_score(y_true, y_proba, multi_class="ovr") if getattr(y_proba, "ndim", 1) > 1 else roc_auc_score(y_true, y_proba)
