@@ -703,34 +703,18 @@ for epoch in range(1, c.epochs + 1):
     mu_e_t = t_t / epoch           # mean epoch time
 
     mean_loss = total_loss / len(prior)
-    model.eval()
-    optimizer.eval()
 
     print0(
         f"e:{epoch}/{c.epochs} μ_l:{mean_loss:.2f} e_t:{e_t:.2f}s t_t:{t_t:.2f}s μ_e_t:{mu_e_t:.2f}s",
         console=True,
     )
 
-    checkpoint = {
-        "version": version,
-        "timestamp": ts,
-        "uid": uid,
-        "type": c.type,
-        "arch": {
-            "embedding_size": int((model.module if c.multigpu else model).embedding_size),
-            "num_attention_heads": int((model.module if c.multigpu else model).num_attention_heads),
-            "mlp_hidden_size": int((model.module if c.multigpu else model).mlp_hidden_size),
-            "num_layers": int((model.module if c.multigpu else model).num_layers),
-            "num_outputs": int((model.module if c.multigpu else model).num_outputs),
-        },
-        "model": (model.module if c.multigpu else model).state_dict(),
-    }
-
-    torch.save(checkpoint, ckpt_path)
+    model.eval()
+    optimizer.eval()
 
     if (epoch == 1) or (epoch == c.epochs) or (epoch % c.eval_every == 0):
         clf = NanoTabPFNClassifier((model.module if c.multigpu else model), num_mem_chunks=64)
-        preds = get_openml_predictions(model=clf, tasks=TASKS)
+        preds = get_openml_predictions(model=clf, tasks=TOY_TASKS_CLASSIFICATION)
         aucs: list[float] = []
         for dataset_name, (y_true, y_pred, y_proba) in preds.items():
             auc = roc_auc_score(y_true, y_proba, multi_class="ovr") if getattr(y_proba, "ndim", 1) > 1 else roc_auc_score(y_true, y_proba)
@@ -739,6 +723,22 @@ for epoch in range(1, c.epochs + 1):
             print0(f"{dataset_name}_roc_auc:{auc:.2f}", console=True)
         avg_auc = (sum(aucs) / len(aucs)) if len(aucs) > 0 else float("nan")
         print0(f"avg_roc_auc:{avg_auc:.2f}", console=True)
+
+        checkpoint = {
+            "version": version,
+            "timestamp": ts,
+            "uid": uid,
+            "type": c.type,
+            "arch": {
+                "embedding_size": int((model.module if c.multigpu else model).embedding_size),
+                "num_attention_heads": int((model.module if c.multigpu else model).num_attention_heads),
+                "mlp_hidden_size": int((model.module if c.multigpu else model).mlp_hidden_size),
+                "num_layers": int((model.module if c.multigpu else model).num_layers),
+                "num_outputs": int((model.module if c.multigpu else model).num_outputs),
+            },
+            "model": (model.module if c.multigpu else model).state_dict(),
+        }
+        torch.save(checkpoint, ckpt_path)
 
         if avg_auc >= c.jackpot:
             break
