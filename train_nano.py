@@ -434,6 +434,30 @@ TABARENA_TASKS = [
     363700, 363702, 363704, 363705, 363706, 363707, 363708, 363711, 363712,
 ]
 
+DATASETS = [
+    363614, # anneal       (  898,  39) anneal
+    363619, # bank         (10000,  11) Bank_Customer_Churn
+    363621, # blood        (  748,   5) blood-transfusion-service-center
+    363623, # churn        ( 5000,  20) churn
+    363624, # coil2000     ( 9822,  86) coil2000_insurance_policies
+    363626, # credit       ( 1000,  21) credit-g
+    363629, # diabetes     (  768,   9) diabetes
+    363671, # fitness      ( 1500,   7) Fitness_Club
+    363674, # hazelnut     ( 2400,  31) hazelnut-spread-contaminant-detection
+    363682, # is           ( 1723,  14) Is-this-a-good-customer
+    363684, # marketing    ( 2240,  26) Marketing_Campaign
+    363685, # maternal     ( 1014,   7) maternal_health_risk
+    363689, # naticusdroid ( 7491,  87) NATICUSdroid
+    363694, # polish       ( 5910,  65) polish_companies_bankruptcy
+    363696, # qsar         ( 1054,  42) qsar-biodeg
+    363700, # seismic      ( 2584,  16) seismic-bumps
+    363702, # splice       ( 3190,  61) splice
+    363704, # students     ( 4424,  37) students_dropout_and_academic_success
+    363706, # taiwanese    ( 6819,  95) taiwanese_bankruptcy_prediction
+    363707, # website      ( 1353,  10) website_phishing
+    363711, # mic          ( 1699, 112) MIC
+]
+
 
 @torch.no_grad()
 def get_openml_predictions(
@@ -470,6 +494,12 @@ def get_openml_predictions(
         n_samples = dataset.qualities["NumberOfInstances"]
         if n_features > max_n_features or n_samples > max_n_samples:
             continue
+
+        name = dataset.name.lower().split("-")[0].split("_")[0]
+
+        samples, features = int(n_samples), int(n_features)
+
+        print(f"{task_id:<6}, # {name:<12} ({samples:>5}, {features:>3}) {dataset.name}")
 
         _, folds, _ = task.get_split_dimensions()
         tabarena_light = True
@@ -700,15 +730,16 @@ for epoch in range(1, c.epochs + 1):
     torch.save(checkpoint, ckpt_path)
 
     if (epoch == 1) or (epoch == c.epochs) or (epoch % c.eval_every == 0):
-        clf = NanoTabPFNClassifier((model.module if c.multigpu else model))
-        preds = get_openml_predictions(model=clf, tasks=TABARENA_TASKS, max_n_samples=1000)
+        clf = NanoTabPFNClassifier((model.module if c.multigpu else model), num_mem_chunks=64)
+        preds = get_openml_predictions(model=clf, tasks=TABARENA_TASKS)
         aucs: list[float] = []
         for dataset_name, (y_true, y_pred, y_proba) in preds.items():
             auc = roc_auc_score(y_true, y_proba, multi_class="ovr") if getattr(y_proba, "ndim", 1) > 1 else roc_auc_score(y_true, y_proba)
             aucs.append(auc)
-            print0(f"dataset:{dataset_name}_roc_auc:{auc:.2f}", console=True)
+            dataset_name = dataset_name.lower().split("-")[0].split("_")[0]
+            print0(f"{dataset_name}_roc_auc:{auc:.2f}", console=True)
         avg_auc = (sum(aucs) / len(aucs)) if len(aucs) > 0 else float("nan")
-        print0(f"epoch:{epoch}/{c.epochs} avg_roc_auc:{avg_auc:.2f}", console=True)
+        print0(f"avg_roc_auc:{avg_auc:.2f}", console=True)
 
         if avg_auc >= c.jackpot:
             break
