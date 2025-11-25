@@ -295,15 +295,19 @@ def get_feature_preprocessor(X: np.ndarray | pd.DataFrame) -> ColumnTransformer:
     num_mask = np.array(num_mask)
     cat_mask = np.array(cat_mask)
 
-    num_transformer = Pipeline([
-        ("to_pandas", FunctionTransformer(to_pandas)), 
-        ("to_numeric", FunctionTransformer(to_numeric)), 
-        ("imputer", SimpleImputer(strategy="mean")),
-    ])
-    cat_transformer = Pipeline([
-        ("encoder", OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=np.nan)),
-        ("imputer", SimpleImputer(strategy="most_frequent")),
-    ])
+    num_transformer = Pipeline(
+        [
+            ("to_pandas", FunctionTransformer(to_pandas)),
+            ("to_numeric", FunctionTransformer(to_numeric)),
+            ("imputer", SimpleImputer(strategy="mean")),
+        ]
+    )
+    cat_transformer = Pipeline(
+        [
+            ("encoder", OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=np.nan)),
+            ("imputer", SimpleImputer(strategy="most_frequent")),
+        ]
+    )
 
     preprocessor = ColumnTransformer(
         transformers=[
@@ -595,7 +599,11 @@ for epoch in range(1, c.epochs + 1):
         preds = get_openml_predictions(model=clf, tasks=TOY_TASKS_CLASSIFICATION)
         aucs: list[float] = []
         for dataset_name, (y_true, y_pred, y_proba) in preds.items():
-            auc = roc_auc_score(y_true, y_proba, multi_class="ovr") if getattr(y_proba, "ndim", 1) > 1 else roc_auc_score(y_true, y_proba)
+            auc = (
+                roc_auc_score(y_true, y_proba, multi_class="ovr")
+                if getattr(y_proba, "ndim", 1) > 1
+                else roc_auc_score(y_true, y_proba)
+            )
             aucs.append(auc)
             dataset_name = dataset_name.lower().split("-")[0].split("_")[0]
             print0(f"{dataset_name}_roc_auc:{auc:.2f}", console=True)
