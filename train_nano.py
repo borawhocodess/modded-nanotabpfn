@@ -123,8 +123,9 @@ class TransformerEncoderStack(nn.Module):
 class TransformerEncoderLayer(nn.Module):
     def __init__(self, a: int, e: int, h: int, eps: float = 1e-5, batch_first: bool = True, device=None, dtype=None):
         super().__init__()
-        self.self_attention_between_datapoints = nn.MultiheadAttention(e, a, batch_first=batch_first, device=device, dtype=dtype)
-        self.self_attention_between_features = nn.MultiheadAttention(e, a, batch_first=batch_first, device=device, dtype=dtype)
+        # why does switching these two lines cause a difference in results !?!
+        self.a_datapoints = nn.MultiheadAttention(e, a, batch_first=batch_first, device=device, dtype=dtype)
+        self.a_features = nn.MultiheadAttention(e, a, batch_first=batch_first, device=device, dtype=dtype)
 
         self.linear1 = nn.Linear(e, h, device=device, dtype=dtype)
         self.linear2 = nn.Linear(h, e, device=device, dtype=dtype)
@@ -139,7 +140,7 @@ class TransformerEncoderLayer(nn.Module):
 
         @memory_chunking(chunks)
         def feature_attention(x):
-            return self.self_attention_between_features(x, x, x)[0] + x
+            return self.a_features(x, x, x)[0] + x
 
         src = feature_attention(src)
         src = src.reshape(batch_size, rows_size, col_size, e)
@@ -149,8 +150,8 @@ class TransformerEncoderLayer(nn.Module):
 
         @memory_chunking(chunks)
         def datapoint_attention(x):
-            x_left = self.self_attention_between_datapoints(x[:, :sep], x[:, :sep], x[:, :sep])[0]
-            x_right = self.self_attention_between_datapoints(x[:, sep:], x[:, :sep], x[:, :sep])[0]
+            x_left = self.a_datapoints(x[:, :sep], x[:, :sep], x[:, :sep])[0]
+            x_right = self.a_datapoints(x[:, sep:], x[:, :sep], x[:, :sep])[0]
             return torch.cat([x_left, x_right], dim=1) + x
 
         src = datapoint_attention(src)
