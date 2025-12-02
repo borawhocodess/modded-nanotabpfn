@@ -217,6 +217,10 @@ class PriorDumpDataLoader(DataLoader):
             else:
                 self.max_num_classes = None
             self.problem_type = f["problem_type"][()].decode("utf-8")
+            # X = (num_datasets, max_num_datapoints, max_num_features)
+            self.datasets = f["X"].shape[0]
+            self.max_rows = f["X"].shape[1]
+            self.max_cols = f["X"].shape[2]
         self.device = device
         self.pointer = 0
 
@@ -630,6 +634,9 @@ for epoch in range(1, c.epochs + 1):
             break
 
 print0("=" * 100)
+approx_mem = 4 * c.l * c.batch_size * prior.max_rows * prior.max_cols * (c.e + c.a * (prior.max_rows + prior.max_cols))
+print0(f"approximate memory: {approx_mem * 4 // (1024**3)} GB", console=True)
+print0(f"approximate memory: {approx_mem * 4 // (1024**2)} MiB", console=True)
 print0(f"peak memory allocated: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB", console=True)
 print0(f"peak memory reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB", console=True)
 print0(f"experiment done: {e_id}", console=True)
