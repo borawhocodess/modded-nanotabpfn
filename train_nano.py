@@ -464,21 +464,21 @@ def get_openml_predictions(
 class Config:
     type: str = "classification"
     experiments_dir: str = "workdir/experiments"
-    classification_dump: str = "workdir/dumps/50x3_3_100k_classification.h5"
+    classification_dump: str = "workdir/dumps/dump-d256000b1r1000c20-8.h5"
     multigpu: bool = False
-    seed: int = 2402
+    seed: int = 11
     batch_size: int = 1
     accumulate: int = 1
     lr: float = 1e-4
-    steps: int = 100
-    epochs: int = 4
+    steps: int = 64 # step size
+    epochs: int = 4000
     a: int = 6
     e: int = 192
     h: int = 768
     l: int = 6
     o: int | None = None
     eval_every: int = 100
-    jackpot: float = 0.5
+    jackpot: float = 0.85
 
 
 c = Config()
@@ -594,7 +594,7 @@ for epoch in range(1, c.epochs + 1):
     if (epoch == 1) or (epoch == c.epochs) or (epoch % c.eval_every == 0):
         unwrapped_model = model.module if c.multigpu else model
         clf = NanoTabPFNClassifier(unwrapped_model, chunks=64)
-        preds = get_openml_predictions(model=clf, tasks=TOY_TASKS_CLASSIFICATION)
+        preds = get_openml_predictions(model=clf, tasks=TASKS)
         aucs: list[float] = []
         for dataset_name, (y_true, y_pred, y_proba) in preds.items():
             auc = (
