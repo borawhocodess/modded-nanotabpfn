@@ -465,7 +465,6 @@ class Config:
     type: str = "classification"
     experiments_dir: str = "workdir/experiments"
     classification_dump: str = "workdir/dumps/dump-d256000b1r1000c20-8.h5"
-    multigpu: bool = False
     seed: int = 11
     batch_size: int = 1
     accumulate: int = 1
@@ -501,10 +500,7 @@ c.o = prior.max_num_classes
 
 assert prior.num_steps % c.accumulate == 0, "num_steps must be divisible by accumulate_gradients"
 
-model = NanoTabPFNModel(l=c.l, a=c.a, e=c.e, h=c.h, o=c.o)
-if c.multigpu:
-    model = nn.DataParallel(model)
-model.to(device)
+model = NanoTabPFNModel(l=c.l, a=c.a, e=c.e, h=c.h, o=c.o).to(device)
 
 optimizer = schedulefree.AdamWScheduleFree(model.parameters(), lr=c.lr, weight_decay=0.0)
 
@@ -592,8 +588,7 @@ for epoch in range(1, c.epochs + 1):
     optimizer.eval()
 
     if (epoch == 1) or (epoch == c.epochs) or (epoch % c.eval_every == 0):
-        unwrapped_model = model.module if c.multigpu else model
-        clf = NanoTabPFNClassifier(unwrapped_model, chunks=64)
+        clf = NanoTabPFNClassifier(model, chunks=64)
         preds = get_openml_predictions(model=clf, tasks=TASKS)
         aucs: list[float] = []
         for dataset_name, (y_true, y_pred, y_proba) in preds.items():
@@ -614,13 +609,13 @@ for epoch in range(1, c.epochs + 1):
             "uid": uid,
             "type": c.type,
             "arch": {
-                "e": unwrapped_model.e,
-                "a": unwrapped_model.a,
-                "h": unwrapped_model.h,
-                "l": unwrapped_model.l,
-                "o": unwrapped_model.o,
+                "e": model.e,
+                "a": model.a,
+                "h": model.h,
+                "l": model.l,
+                "o": model.o,
             },
-            "model": unwrapped_model.state_dict(),
+            "model": model.state_dict(),
         }
         torch.save(checkpoint, ckpt_path)
 
