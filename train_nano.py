@@ -560,7 +560,20 @@ assert prior.num_steps % c.accumulate == 0, "num_steps must be divisible by accu
 
 model = NanoTabPFNModel(l=c.l, a=c.a, e=c.e, h=c.h, o=c.o).to(device)
 
-optimizer = schedulefree.AdamWScheduleFree(model.parameters(), lr=c.lr, weight_decay=0.0)
+muon_params = []
+adam_params = []
+for name, p in model.named_parameters():
+    if p.ndim != 2:
+        adam_params.append(p)
+    elif "transformer_encoder" in name:
+        muon_params.append(p)
+    else:
+        adam_params.append(p)
+
+optimizer_muon = Muon(muon_params, lr=0.1*c.lr, momentum=0.95) 
+optimizer_adam = schedulefree.AdamWScheduleFree(adam_params, lr=c.lr, weight_decay=0.0)
+
+optimizers = [optimizer_muon, optimizer_adam]
 
 criterion = nn.CrossEntropyLoss()
 
@@ -606,7 +619,7 @@ for epoch in range(1, c.epochs + 1):
     torch.cuda.synchronize()
     t0 = time.perf_counter()
     model.train()
-    optimizer.train()
+    optimizer_adam.train()
     total_loss = 0.0
     for i, full_data in enumerate(prior):
         sep = full_data["sep"]
@@ -630,8 +643,9 @@ for epoch in range(1, c.epochs + 1):
 
         if (i + 1) % c.accumulate == 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-            optimizer.zero_grad()
+            for optimizer in optimizers:
+                optimizer.step()
+                optimizer.zero_grad()
 
     torch.cuda.synchronize()
     e_t = time.perf_counter() - t0  # epoch time
@@ -643,7 +657,7 @@ for epoch in range(1, c.epochs + 1):
     print0(f"e:{epoch}/{c.epochs} μ_l:{mean_loss:.2f} e_t:{e_t:.2f}s μ_e_t:{mu_e_t:.2f}s t_t:{t_t:.2f}s ", console=True)
 
     model.eval()
-    optimizer.eval()
+    optimizer_adam.eval()
 
     if (epoch == 1) or (epoch == c.epochs) or (epoch % c.eval_every == 0):
         clf = NanoTabPFNClassifier(model, chunks=64)
