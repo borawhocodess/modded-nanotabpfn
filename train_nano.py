@@ -528,7 +528,7 @@ class Config:
     batch_size: int = 1
     accumulate: int = 1
     lr: float = 1e-4
-    steps: int = 64 # step size
+    steps: int = 64  # step size
     epochs: int = 4
     a: int = 6
     e: int = 192
@@ -559,7 +559,7 @@ ckpt_path = os.path.join(e_dir, f"{e_id}-ckpt.pth")
 
 with open(sys.argv[0], "r") as f:
     code = f.read()
-    
+
 with open("pyproject.toml", "rb") as f:
     version = tomllib.load(f)["project"]["version"]
 
@@ -585,7 +585,7 @@ for name, p in model.named_parameters():
     else:
         adam_params.append(p)
 
-optimizer_muon = Muon(muon_params, lr=0.1*c.lr, momentum=0.95) 
+optimizer_muon = Muon(muon_params, lr=0.1*c.lr, momentum=0.95)
 optimizer_adam = schedulefree.AdamWScheduleFree(adam_params, lr=c.lr, weight_decay=0.0)
 
 optimizers = [optimizer_muon, optimizer_adam]
