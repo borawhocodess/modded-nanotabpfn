@@ -529,7 +529,7 @@ class Config:
     accumulate: int = 1
     lr: float = 1e-4
     steps: int = 64 # step size
-    epochs: int = 4000
+    epochs: int = 4
     a: int = 6
     e: int = 192
     h: int = 768
@@ -548,6 +548,20 @@ torch.manual_seed(c.seed)
 assert torch.cuda.is_available()
 
 device = "cuda"
+
+ts = datetime.now().strftime("%y%m%d-%H%M%S")
+uid = uuid.uuid4().hex[:8]
+e_id = f"{ts}-{uid}"
+e_dir = os.path.join(c.experiments_dir, e_id)
+os.makedirs(e_dir, exist_ok=True)
+log_path = os.path.join(e_dir, f"{e_id}-log.txt")
+ckpt_path = os.path.join(e_dir, f"{e_id}-ckpt.pth")
+
+with open(sys.argv[0], "r") as f:
+    code = f.read()
+    
+with open("pyproject.toml", "rb") as f:
+    version = tomllib.load(f)["project"]["version"]
 
 prior = PriorDumpDataLoader(
     filename=c.classification_dump,
@@ -578,14 +592,6 @@ optimizers = [optimizer_muon, optimizer_adam]
 
 criterion = nn.CrossEntropyLoss()
 
-ts = datetime.now().strftime("%y%m%d-%H%M%S")
-uid = uuid.uuid4().hex[:8]
-e_id = f"{ts}-{uid}"
-e_dir = os.path.join(c.experiments_dir, e_id)
-os.makedirs(e_dir, exist_ok=True)
-log_path = os.path.join(e_dir, f"{e_id}-log.txt")
-ckpt_path = os.path.join(e_dir, f"{e_id}-ckpt.pth")
-
 
 def print0(s, console=False):
     with open(log_path, "a") as f:
@@ -593,12 +599,6 @@ def print0(s, console=False):
             print(s)
         print(s, file=f)
 
-
-with open("pyproject.toml", "rb") as f:
-    version = tomllib.load(f)["project"]["version"]
-
-with open(sys.argv[0], "r") as f:
-    code = f.read()
 
 print0(code)
 print0("=" * 100)
@@ -608,10 +608,6 @@ print0(f"python: {sys.version}")
 print0(f"torch: {torch.version.__version__}")
 print0(f"cuda: {torch.version.cuda}")
 print0(subprocess.run(["nvidia-smi"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True).stdout)
-print0("=" * 100)
-print0("config:")
-for f in fields(Config):
-    print0(f"  {f.name}: {getattr(c, f.name)}")
 print0("=" * 100)
 
 t_t = 0.0
@@ -695,6 +691,10 @@ for epoch in range(1, c.epochs + 1):
         if avg_auc >= c.jackpot:
             break
 
+print0("=" * 100)
+print0("config:")
+for f in fields(Config):
+    print0(f"  {f.name}: {getattr(c, f.name)}")
 print0("=" * 100)
 approx_mem = 4 * c.l * c.batch_size * prior.max_rows * prior.max_cols * (c.e + c.a * (prior.max_rows + prior.max_cols))
 print0(f"approximate memory: {approx_mem * 4 // (1024**3)} GB", console=True)
