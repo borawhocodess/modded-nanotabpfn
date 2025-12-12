@@ -32,6 +32,73 @@ from torch.utils.data import DataLoader
 
 
 # -----------------------------------------------------------------------------
+# config
+
+
+@dataclass
+class Config:
+    type: str = "classification"
+    experiments_dir: str = "workdir/experiments"
+    classification_dump: str = "workdir/dumps/dump-d256000b1r1000c20-8.h5"
+    seed: int = 11
+    batch_size: int = 1
+    accumulate: int = 1
+    lr: float = 1e-4
+    steps: int = 64  # step size
+    epochs: int = 4000
+    a: int = 6
+    e: int = 192
+    h: int = 768
+    l: int = 6
+    o: int | None = None
+    eval_every: int = 100
+    jackpot: float = 0.85
+
+
+c = Config()
+
+random.seed(c.seed)
+np.random.seed(c.seed)
+torch.manual_seed(c.seed)
+
+assert torch.cuda.is_available()
+
+device = "cuda"
+
+ts = datetime.now().strftime("%y%m%d-%H%M%S")
+uid = uuid.uuid4().hex[:8]
+e_id = f"{ts}-{uid}"
+e_dir = os.path.join(c.experiments_dir, e_id)
+os.makedirs(e_dir, exist_ok=True)
+log_path = os.path.join(e_dir, f"{e_id}-log.txt")
+ckpt_path = os.path.join(e_dir, f"{e_id}-ckpt.pth")
+
+with open(sys.argv[0], "r") as f:
+    code = f.read()
+
+with open("pyproject.toml", "rb") as f:
+    version = tomllib.load(f)["project"]["version"]
+
+
+def print0(s, console=False):
+    with open(log_path, "a") as f:
+        if console:
+            print(s)
+        print(s, file=f)
+
+
+print0(code)
+print0("=" * 100)
+print0(f"host: {socket.gethostname()}")
+print0(f"platform: {platform.platform()}")
+print0(f"python: {sys.version}")
+print0(f"torch: {torch.version.__version__}")
+print0(f"cuda: {torch.version.cuda}")
+print0(subprocess.run(["nvidia-smi"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True).stdout)
+print0("=" * 100)
+
+
+# -----------------------------------------------------------------------------
 # muon
 
 
@@ -519,50 +586,6 @@ def get_openml_predictions(
 # main
 
 
-@dataclass
-class Config:
-    type: str = "classification"
-    experiments_dir: str = "workdir/experiments"
-    classification_dump: str = "workdir/dumps/dump-d256000b1r1000c20-8.h5"
-    seed: int = 11
-    batch_size: int = 1
-    accumulate: int = 1
-    lr: float = 1e-4
-    steps: int = 64  # step size
-    epochs: int = 4
-    a: int = 6
-    e: int = 192
-    h: int = 768
-    l: int = 6
-    o: int | None = None
-    eval_every: int = 100
-    jackpot: float = 0.85
-
-
-c = Config()
-
-random.seed(c.seed)
-np.random.seed(c.seed)
-torch.manual_seed(c.seed)
-
-assert torch.cuda.is_available()
-
-device = "cuda"
-
-ts = datetime.now().strftime("%y%m%d-%H%M%S")
-uid = uuid.uuid4().hex[:8]
-e_id = f"{ts}-{uid}"
-e_dir = os.path.join(c.experiments_dir, e_id)
-os.makedirs(e_dir, exist_ok=True)
-log_path = os.path.join(e_dir, f"{e_id}-log.txt")
-ckpt_path = os.path.join(e_dir, f"{e_id}-ckpt.pth")
-
-with open(sys.argv[0], "r") as f:
-    code = f.read()
-
-with open("pyproject.toml", "rb") as f:
-    version = tomllib.load(f)["project"]["version"]
-
 prior = PriorDumpDataLoader(
     filename=c.classification_dump,
     num_steps=c.steps,
@@ -592,23 +615,6 @@ optimizers = [optimizer_muon, optimizer_adam]
 
 criterion = nn.CrossEntropyLoss()
 
-
-def print0(s, console=False):
-    with open(log_path, "a") as f:
-        if console:
-            print(s)
-        print(s, file=f)
-
-
-print0(code)
-print0("=" * 100)
-print0(f"host: {socket.gethostname()}")
-print0(f"platform: {platform.platform()}")
-print0(f"python: {sys.version}")
-print0(f"torch: {torch.version.__version__}")
-print0(f"cuda: {torch.version.cuda}")
-print0(subprocess.run(["nvidia-smi"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True).stdout)
-print0("=" * 100)
 
 t_t = 0.0
 
