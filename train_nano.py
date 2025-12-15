@@ -28,7 +28,9 @@ from sklearn.metrics import roc_auc_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer, LabelEncoder, OrdinalEncoder
 from torch import nn
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
+import torch.distributed as dist
 
 
 # -----------------------------------------------------------------------------
@@ -41,7 +43,7 @@ class Config:
     experiments_dir: str = "workdir/experiments"
     classification_dump: str = "workdir/dumps/dump-d256000b1r1000c20-8.h5"
     seed: int = 11
-    batch_size: int = 1
+    batch_size: int = 1  # per GPU
     accumulate: int = 1
     lr: float = 1e-4
     steps: int = 64  # step size
@@ -63,39 +65,49 @@ torch.manual_seed(c.seed)
 
 assert torch.cuda.is_available()
 
-device = "cuda"
+rank = int(os.environ["RANK"])
+local_rank = int(os.environ["LOCAL_RANK"])
+world_size = int(os.environ["WORLD_SIZE"])
+device = torch.device("cuda", local_rank)
+torch.cuda.set_device(device)
+dist.init_process_group(backend="nccl", device_id=device)
+dist.barrier()
+master_process = (rank == 0)
 
-ts = datetime.now().strftime("%y%m%d-%H%M%S")
-uid = uuid.uuid4().hex[:8]
-e_id = f"{ts}-{uid}"
-e_dir = os.path.join(c.experiments_dir, e_id)
-os.makedirs(e_dir, exist_ok=True)
-log_path = os.path.join(e_dir, f"{e_id}-log.txt")
-ckpt_path = os.path.join(e_dir, f"{e_id}-ckpt.pth")
+if master_process:
+    ts = datetime.now().strftime("%y%m%d-%H%M%S")
+    uid = uuid.uuid4().hex[:8]
+    e_id = f"{ts}-{uid}"
+    e_dir = os.path.join(c.experiments_dir, e_id)
+    os.makedirs(e_dir, exist_ok=True)
+    log_path = os.path.join(e_dir, f"{e_id}-log.txt")
+    ckpt_path = os.path.join(e_dir, f"{e_id}-ckpt.pth")
 
-with open(sys.argv[0], "r") as f:
-    code = f.read()
+    with open(sys.argv[0], "r") as f:
+        code = f.read()
 
-with open("pyproject.toml", "rb") as f:
-    version = tomllib.load(f)["project"]["version"]
+    with open("pyproject.toml", "rb") as f:
+        version = tomllib.load(f)["project"]["version"]
 
 
 def print0(s, console=False):
-    with open(log_path, "a") as f:
-        if console:
-            print(s)
-        print(s, file=f)
+    if master_process:
+        with open(log_path, "a") as f:
+            if console:
+                print(s)
+            print(s, file=f)
 
 
-print0(code)
-print0("=" * 100)
-print0(f"host: {socket.gethostname()}")
-print0(f"platform: {platform.platform()}")
-print0(f"python: {sys.version}")
-print0(f"torch: {torch.version.__version__}")
-print0(f"cuda: {torch.version.cuda}")
-print0(subprocess.run(["nvidia-smi"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True).stdout)
-print0("=" * 100)
+if master_process:
+    print0(code)
+    print0("=" * 100)
+    print0(f"host: {socket.gethostname()}")
+    print0(f"platform: {platform.platform()}")
+    print0(f"python: {sys.version}")
+    print0(f"torch: {torch.version.__version__}")
+    print0(f"cuda: {torch.version.cuda}")
+    print0(subprocess.run(["nvidia-smi"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True).stdout)
+    print0("=" * 100)
 
 
 # -----------------------------------------------------------------------------
@@ -332,7 +344,7 @@ class Decoder(nn.Module):
 
 
 class PriorDumpDataLoader(DataLoader):
-    def __init__(self, filename, num_steps, batch_size, device):
+    def __init__(self, filename, num_steps, batch_size, device, rank, world_size):
         self.filename = filename
         self.num_steps = num_steps
         self.batch_size = batch_size
@@ -345,12 +357,16 @@ class PriorDumpDataLoader(DataLoader):
             self.max_rows = f["X"].shape[1]
             self.max_cols = f["X"].shape[2]
         self.device = device
-        self.pointer = 0
+        self.rank = rank
+        self.world_size = world_size
+        self.pointer = self.rank * self.batch_size
+        self.stride = self.world_size * self.batch_size
 
     def __iter__(self):
         with h5py.File(self.filename, "r") as f:
+            self.data = f
+
             for _ in range(self.num_steps):
-                self.data = f
                 end = self.pointer + self.batch_size
 
                 num_features = self.data["num_features"][self.pointer : end].max()
@@ -358,13 +374,10 @@ class PriorDumpDataLoader(DataLoader):
                 y = torch.from_numpy(self.data["y"][self.pointer : end])
                 sep = self.data["single_eval_pos"][self.pointer : end]
 
-                self.pointer += self.batch_size
-                if self.pointer >= self.data["X"].shape[0]:
-                    print(
-                        """Finished iteration over all stored datasets! """
-                        """Will start reusing the same data with different splits now.""",
-                    )
-                    self.pointer = 0
+                self.pointer += self.stride
+                if self.pointer >= self.datasets:
+                    print("pointer >= datasets, will reset!")
+                    self.pointer = self.rank * self.batch_size
 
                 yield dict(
                     x=x.to(self.device),
@@ -591,6 +604,8 @@ prior = PriorDumpDataLoader(
     num_steps=c.steps,
     batch_size=c.batch_size,
     device=device,
+    rank=rank,
+    world_size=world_size,
 )
 c.o = prior.max_num_classes
 
@@ -615,6 +630,7 @@ optimizers = [optimizer_muon, optimizer_adam]
 
 criterion = nn.CrossEntropyLoss()
 
+model = DDP(model, device_ids=[local_rank], output_device=local_rank)
 
 t_t = 0.0
 
@@ -630,8 +646,12 @@ for epoch in range(1, c.epochs + 1):
             full_data["x"].to(device),
             full_data["y"][:, :sep].to(device),
         )
-        if torch.isnan(data[0]).any() or torch.isnan(data[1]).any():
-            continue
+        # TODO: handle nans properly
+        x, y = data
+        x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+        y = torch.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
+        data = (x, y)
+
         targets = full_data["target_y"].to(device)
 
         output = model(data, sep=sep)
@@ -641,7 +661,13 @@ for epoch in range(1, c.epochs + 1):
 
         losses = criterion(output, targets)
         loss = losses.mean() / c.accumulate
-        loss.backward()
+
+        if (i + 1) % c.accumulate == 0:
+            loss.backward()
+        else:
+            with model.no_sync():
+                loss.backward()
+
         total_loss += loss.cpu().detach().item() * c.accumulate
 
         if (i + 1) % c.accumulate == 0:
@@ -662,8 +688,11 @@ for epoch in range(1, c.epochs + 1):
     model.eval()
     optimizer_adam.eval()
 
-    if (epoch == 1) or (epoch == c.epochs) or (epoch % c.eval_every == 0):
-        clf = NanoTabPFNClassifier(model, chunks=64)
+    stop = torch.zeros(1, device=device, dtype=torch.int32)
+
+    if master_process and ((epoch == 1) or (epoch == c.epochs) or (epoch % c.eval_every == 0)):
+        raw_model = model.module
+        clf = NanoTabPFNClassifier(raw_model, chunks=64)
         preds = get_openml_predictions(model=clf, tasks=TASKS)
         aucs: list[float] = []
         for dataset_name, (y_true, y_pred, y_proba) in preds.items():
@@ -684,24 +713,31 @@ for epoch in range(1, c.epochs + 1):
             "uid": uid,
             "type": c.type,
             "arch": {
-                "e": model.e,
-                "a": model.a,
-                "h": model.h,
-                "l": model.l,
-                "o": model.o,
+                "e": raw_model.e,
+                "a": raw_model.a,
+                "h": raw_model.h,
+                "l": raw_model.l,
+                "o": raw_model.o,
             },
-            "model": model.state_dict(),
+            "model": raw_model.state_dict(),
         }
         torch.save(checkpoint, ckpt_path)
 
         if avg_auc >= c.jackpot:
-            break
+            stop.fill_(1)
 
-print0("=" * 100)
-print0("config:")
-for f in fields(Config):
-    print0(f"  {f.name}: {getattr(c, f.name)}")
-print0("=" * 100)
-print0(f"peak memory allocated: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB", console=True)
-print0(f"peak memory reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB", console=True)
-print0(f"experiment done: {e_id}", console=True)
+    dist.broadcast(stop, src=0)
+    if stop.item() == 1:
+        break
+
+if master_process:
+    print0("=" * 100)
+    print0("config:")
+    for f in fields(Config):
+        print0(f"  {f.name}: {getattr(c, f.name)}")
+    print0("=" * 100)
+    print0(f"peak memory allocated: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB", console=True)
+    print0(f"peak memory reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB", console=True)
+    print0(f"experiment done: {e_id}", console=True)
+
+dist.destroy_process_group()
