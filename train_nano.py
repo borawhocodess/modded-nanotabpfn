@@ -11,7 +11,6 @@ import uuid
 import warnings
 from dataclasses import dataclass, fields
 from datetime import datetime
-from functools import partial
 from typing import Callable, Tuple
 
 import h5py
@@ -31,7 +30,6 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer, LabelEncoder, OrdinalEncoder
 from torch import nn
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.checkpoint import checkpoint
 from torch.utils.data import DataLoader
 
 
@@ -45,9 +43,9 @@ class Config:
     experiments_dir: str = "workdir/experiments"
     classification_dump: str = "workdir/dumps/dump-d256000b1r1000c20-8.h5"
     seed: int = 11
-    batch_size: int = 4  # per GPU
+    batch_size: int = 1  # per GPU
     accumulate: int = 1
-    lr: float = 4e-4
+    lr: float = 1e-4
     steps: int = 8  # step size
     epochs: int = 4000
     a: int = 6
@@ -197,10 +195,7 @@ class TransformerEncoderStack(nn.Module):
 
     def forward(self, x: torch.Tensor, sep: int, chunks: int = 1) -> torch.Tensor:
         for block in self.transformer_blocks:
-            if torch.is_grad_enabled():
-                x = checkpoint(partial(block, sep=sep, chunks=chunks), x, use_reentrant=False)
-            else:
-                x = block(x, sep=sep, chunks=chunks)
+            x = block(x, sep=sep, chunks=chunks)
         return x
 
 
@@ -224,7 +219,7 @@ class TransformerEncoderLayer(nn.Module):
 
         @memory_chunking(chunks)
         def feature_attention(x):
-            return self.a_features(x, x, x, need_weights=False)[0] + x
+            return self.a_features(x, x, x)[0] + x
 
         src = feature_attention(src)
         src = src.reshape(batch_size, rows_size, col_size, e)
@@ -234,8 +229,8 @@ class TransformerEncoderLayer(nn.Module):
 
         @memory_chunking(chunks)
         def datapoint_attention(x):
-            x_left = self.a_datapoints(x[:, :sep], x[:, :sep], x[:, :sep], need_weights=False)[0]
-            x_right = self.a_datapoints(x[:, sep:], x[:, :sep], x[:, :sep], need_weights=False)[0]
+            x_left = self.a_datapoints(x[:, :sep], x[:, :sep], x[:, :sep])[0]
+            x_right = self.a_datapoints(x[:, sep:], x[:, :sep], x[:, :sep])[0]
             return torch.cat([x_left, x_right], dim=1) + x
 
         src = datapoint_attention(src)
