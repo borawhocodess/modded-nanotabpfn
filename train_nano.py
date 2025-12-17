@@ -655,6 +655,7 @@ for epoch in range(1, c.epochs + 1):
         if avg_auc >= c.jackpot:
             stop.fill_(1)
             print0("=" * 100)
+            print0(f"effective batch size: {c.gpus * c.batch_size * c.accumulate}", console=True)
             print0(f"datasets seen: {epoch * c.gpus * c.batch_size * c.steps}", console=True)
 
     dist.broadcast(stop, src=0)
