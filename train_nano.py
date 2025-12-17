@@ -53,6 +53,7 @@ class Config:
     h: int = 768
     l: int = 6
     o: int | None = None
+    gpus: int | None = None
     eval_every: int = 100
     jackpot: float = 0.85
 
@@ -68,11 +69,12 @@ assert torch.cuda.is_available()
 rank = int(os.environ["RANK"])
 local_rank = int(os.environ["LOCAL_RANK"])
 world_size = int(os.environ["WORLD_SIZE"])
+c.gpus = world_size
 device = torch.device("cuda", local_rank)
 torch.cuda.set_device(device)
 dist.init_process_group(backend="nccl", device_id=device)
 dist.barrier()
-master_process = (rank == 0)
+master_process = rank == 0
 
 if master_process:
     ts = datetime.now().strftime("%y%m%d-%H%M%S")
@@ -610,7 +612,7 @@ for epoch in range(1, c.epochs + 1):
 
     mean_loss = total_loss / len(prior)
 
-    print0(f"e:{epoch}/{c.epochs} μ_l:{mean_loss:.2f} e_t:{e_t:.2f}s μ_e_t:{mu_e_t:.2f}s t_t:{t_t:.2f}s ", console=True)
+    print0(f"e:{epoch}/{c.epochs} μ_l:{mean_loss:.2f} e_t:{e_t:.2f}s μ_e_t:{mu_e_t:.2f}s t_t:{t_t:.2f}s", console=True)
 
     model.eval()
     optimizer.eval()
@@ -652,6 +654,8 @@ for epoch in range(1, c.epochs + 1):
 
         if avg_auc >= c.jackpot:
             stop.fill_(1)
+            print0("=" * 100)
+            print0(f"datasets seen: {epoch * c.gpus * c.batch_size * c.steps}", console=True)
 
     dist.broadcast(stop, src=0)
     if stop.item() == 1:
