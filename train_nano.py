@@ -11,6 +11,7 @@ import uuid
 import warnings
 from dataclasses import dataclass, fields
 from datetime import datetime
+from functools import partial
 from typing import Callable, Tuple
 
 import h5py
@@ -19,6 +20,7 @@ import openml
 import pandas as pd
 import schedulefree
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 from openml.config import set_root_cache_directory
 from openml.tasks import TaskType
@@ -29,8 +31,8 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer, LabelEncoder, OrdinalEncoder
 from torch import nn
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.checkpoint import checkpoint
 from torch.utils.data import DataLoader
-import torch.distributed as dist
 
 
 # -----------------------------------------------------------------------------
@@ -43,10 +45,10 @@ class Config:
     experiments_dir: str = "workdir/experiments"
     classification_dump: str = "workdir/dumps/dump-d256000b1r1000c20-8.h5"
     seed: int = 11
-    batch_size: int = 1  # per GPU
+    batch_size: int = 4  # per GPU
     accumulate: int = 1
-    lr: float = 1e-4
-    steps: int = 64  # step size
+    lr: float = 4e-4
+    steps: int = 8  # step size
     epochs: int = 4000
     a: int = 6
     e: int = 192
@@ -195,7 +197,10 @@ class TransformerEncoderStack(nn.Module):
 
     def forward(self, x: torch.Tensor, sep: int, chunks: int = 1) -> torch.Tensor:
         for block in self.transformer_blocks:
-            x = block(x, sep=sep, chunks=chunks)
+            if torch.is_grad_enabled():
+                x = checkpoint(partial(block, sep=sep, chunks=chunks), x, use_reentrant=False)
+            else:
+                x = block(x, sep=sep, chunks=chunks)
         return x
 
 
@@ -219,7 +224,7 @@ class TransformerEncoderLayer(nn.Module):
 
         @memory_chunking(chunks)
         def feature_attention(x):
-            return self.a_features(x, x, x)[0] + x
+            return self.a_features(x, x, x, need_weights=False)[0] + x
 
         src = feature_attention(src)
         src = src.reshape(batch_size, rows_size, col_size, e)
@@ -229,8 +234,8 @@ class TransformerEncoderLayer(nn.Module):
 
         @memory_chunking(chunks)
         def datapoint_attention(x):
-            x_left = self.a_datapoints(x[:, :sep], x[:, :sep], x[:, :sep])[0]
-            x_right = self.a_datapoints(x[:, sep:], x[:, :sep], x[:, :sep])[0]
+            x_left = self.a_datapoints(x[:, :sep], x[:, :sep], x[:, :sep], need_weights=False)[0]
+            x_right = self.a_datapoints(x[:, sep:], x[:, :sep], x[:, :sep], need_weights=False)[0]
             return torch.cat([x_left, x_right], dim=1) + x
 
         src = datapoint_attention(src)
@@ -335,7 +340,7 @@ class PriorDumpDataLoader(DataLoader):
 # interface
 
 
-def init_model_from_checkpoint_file(file_path):
+def init_model_from_ckpt_file(file_path):
     ckpt = torch.load(file_path, map_location="cpu")
     model = NanoTabPFNModel(
         l=ckpt["arch"]["l"],
@@ -405,7 +410,7 @@ class NanoTabPFNClassifier:
         if model is None:
             raise ValueError("model is None")
         if isinstance(model, str):
-            model = init_model_from_checkpoint_file(model)
+            model = init_model_from_ckpt_file(model)
         self.model = model.to(device)
         self.device = device
         self.chunks = chunks
@@ -634,7 +639,7 @@ for epoch in range(1, c.epochs + 1):
         avg_auc = (sum(aucs) / len(aucs)) if len(aucs) > 0 else float("nan")
         print0(f"avg_roc_auc:{avg_auc}", console=True)
 
-        checkpoint = {
+        ckpt = {
             "version": version,
             "timestamp": ts,
             "uid": uid,
@@ -648,7 +653,7 @@ for epoch in range(1, c.epochs + 1):
             },
             "model": raw_model.state_dict(),
         }
-        torch.save(checkpoint, ckpt_path)
+        torch.save(ckpt, ckpt_path)
 
         if avg_auc >= c.jackpot:
             stop.fill_(1)
