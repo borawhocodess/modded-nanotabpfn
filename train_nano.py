@@ -604,23 +604,22 @@ for epoch in range(1, c.epochs + 1):
         avg_auc = (sum(aucs) / len(aucs)) if len(aucs) > 0 else float("nan")
         print0(f"avg_roc_auc:{avg_auc}", console=True)
 
-        ckpt = {
-            "version": version,
-            "timestamp": ts,
-            "uid": uid,
-            "type": c.type,
-            "arch": {
-                "e": model.e,
-                "a": model.a,
-                "h": model.h,
-                "l": model.l,
-                "o": model.o,
-            },
-            "model": model.state_dict(),
-        }
-        torch.save(ckpt, ckpt_path)
-
         if avg_auc >= c.jackpot:
+            ckpt = {
+                "version": version,
+                "timestamp": ts,
+                "uid": uid,
+                "type": c.type,
+                "arch": {
+                    "e": model.e,
+                    "a": model.a,
+                    "h": model.h,
+                    "l": model.l,
+                    "o": model.o,
+                },
+                "model": model.state_dict(),
+            }
+            torch.save(ckpt, ckpt_path)
             print0("=" * 100)
             print0(f"effective batch size: {c.batch_size * c.accumulate}", console=True)
             print0(f"datasets seen: {epoch * c.batch_size * c.steps}", console=True)
