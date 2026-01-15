@@ -427,30 +427,6 @@ TOY_TASKS_CLASSIFICATION = [
     9946,  # breast_cancer
 ]
 
-TASKS = [
-    363614,  # anneal       (  898,  39) anneal
-    363619,  # bank         (10000,  11) Bank_Customer_Churn
-    363621,  # blood        (  748,   5) blood-transfusion-service-center
-    363623,  # churn        ( 5000,  20) churn
-    363624,  # coil2000     ( 9822,  86) coil2000_insurance_policies
-    363626,  # credit       ( 1000,  21) credit-g
-    363629,  # diabetes     (  768,   9) diabetes
-    363671,  # fitness      ( 1500,   7) Fitness_Club
-    363674,  # hazelnut     ( 2400,  31) hazelnut-spread-contaminant-detection
-    363682,  # is           ( 1723,  14) Is-this-a-good-customer
-    363684,  # marketing    ( 2240,  26) Marketing_Campaign
-    363685,  # maternal     ( 1014,   7) maternal_health_risk
-    363689,  # naticusdroid ( 7491,  87) NATICUSdroid
-    363694,  # polish       ( 5910,  65) polish_companies_bankruptcy
-    363696,  # qsar         ( 1054,  42) qsar-biodeg
-    363700,  # seismic      ( 2584,  16) seismic-bumps
-    363702,  # splice       ( 3190,  61) splice
-    363704,  # students     ( 4424,  37) students_dropout_and_academic_success
-    363706,  # taiwanese    ( 6819,  95) taiwanese_bankruptcy_prediction
-    363707,  # website      ( 1353,  10) website_phishing
-    363711,  # mic          ( 1699, 112) MIC
-]
-
 TABARENA_CLASSIFICATION_TASKS = [
     363613, # ( 32769,   10) Amazon_employee_access
     363614, # (   898,   39) anneal
@@ -497,8 +473,6 @@ def get_openml_predictions(
     *,
     model: NanoTabPFNClassifier,
     tasks: list[int] | str = "tabarena-v0.1",
-    max_n_features: int = 500,
-    max_n_samples: int = 10_000,
     cache_directory: str | None = None,
 ):
     if cache_directory is not None:
@@ -522,13 +496,6 @@ def get_openml_predictions(
 
         n_features = dataset.qualities["NumberOfFeatures"]
         n_samples = dataset.qualities["NumberOfInstances"]
-
-        samples, features = int(n_samples), int(n_features)
-
-        print(f"{task_id:<6}, # ({samples:>6}, {features:>4}) {dataset.name}")
-
-        if n_features > max_n_features or n_samples > max_n_samples:
-            continue
 
         _, folds, _ = task.get_split_dimensions()
         tabarena_light = True
