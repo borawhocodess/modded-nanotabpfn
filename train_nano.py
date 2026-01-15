@@ -451,6 +451,46 @@ TASKS = [
     363711,  # mic          ( 1699, 112) MIC
 ]
 
+TABARENA_CLASSIFICATION_TASKS = [
+    363613, # ( 32769,   10) Amazon_employee_access
+    363614, # (   898,   39) anneal
+    363616, # ( 76000,  171) APSFailure
+    363618, # ( 45211,   14) bank-marketing
+    363619, # ( 10000,   11) Bank_Customer_Churn
+    363620, # (  3751, 1777) Bioresponse
+    363621, # (   748,    5) blood-transfusion-service-center
+    363623, # (  5000,   20) churn
+    363624, # (  9822,   86) coil2000_insurance_policies
+    363626, # (  1000,   21) credit-g
+    363627, # ( 30000,   24) credit_card_clients_default
+    363628, # (129880,   22) customer_satisfaction_in_airline
+    363629, # (   768,    9) diabetes
+    363630, # ( 71518,   48) Diabetes130US
+    363632, # ( 10999,   11) E-CommereShippingData
+    363671, # (  1500,    7) Fitness_Club
+    363673, # (150000,   11) GiveMeSomeCredit
+    363674, # (  2400,   31) hazelnut-spread-contaminant-detection
+    363676, # ( 10459,   24) heloc
+    363677, # (  3845, 1618) hiva_agnostic
+    363679, # ( 19158,   13) HR_Analytics_Job_Change_of_Data_Scientists
+    363681, # ( 12684,   25) in_vehicle_coupon_recommendation
+    363682, # (  1723,   14) Is-this-a-good-customer
+    363683, # ( 50000,  213) kddcup09_appetency
+    363684, # (  2240,   26) Marketing_Campaign
+    363685, # (  1014,    7) maternal_health_risk
+    363689, # (  7491,   87) NATICUSdroid
+    363691, # ( 12330,   18) online_shoppers_intention
+    363694, # (  5910,   65) polish_companies_bankruptcy
+    363696, # (  1054,   42) qsar-biodeg
+    363699, # ( 78053,   12) SDSS17
+    363700, # (  2584,   16) seismic-bumps
+    363702, # (  3190,   61) splice
+    363704, # (  4424,   37) students_dropout_and_academic_success
+    363706, # (  6819,   95) taiwanese_bankruptcy_prediction
+    363707, # (  1353,   10) website_phishing
+    363711, # (  1699,  112) MIC
+    363712, # ( 10885,   22) jm1
+]
 
 @torch.no_grad()
 def get_openml_predictions(
@@ -482,6 +522,11 @@ def get_openml_predictions(
 
         n_features = dataset.qualities["NumberOfFeatures"]
         n_samples = dataset.qualities["NumberOfInstances"]
+
+        samples, features = int(n_samples), int(n_features)
+
+        print(f"{task_id:<6}, # ({samples:>6}, {features:>4}) {dataset.name}")
+
         if n_features > max_n_features or n_samples > max_n_samples:
             continue
 
@@ -590,7 +635,7 @@ for epoch in range(1, c.epochs + 1):
 
     if (epoch == 1) or (epoch == c.epochs) or (epoch % c.eval_every == 0):
         clf = NanoTabPFNClassifier(model, chunks=64)
-        preds = get_openml_predictions(model=clf, tasks=TASKS)
+        preds = get_openml_predictions(model=clf, tasks=TABARENA_CLASSIFICATION_TASKS)
         aucs: list[float] = []
         for dataset_name, (y_true, y_pred, y_proba) in preds.items():
             auc = (
@@ -599,7 +644,7 @@ for epoch in range(1, c.epochs + 1):
                 else roc_auc_score(y_true, y_proba)
             )
             aucs.append(auc)
-            dataset_name = dataset_name.lower().split("-")[0].split("_")[0]
+            dataset_name = dataset_name.lower().replace("-", "_")
             print0(f"{dataset_name}_roc_auc:{auc:.2f}", console=True)
         avg_auc = (sum(aucs) / len(aucs)) if len(aucs) > 0 else float("nan")
         print0(f"avg_roc_auc:{avg_auc}", console=True)
