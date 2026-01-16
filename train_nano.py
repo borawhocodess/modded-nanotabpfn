@@ -473,6 +473,8 @@ def get_openml_predictions(
     *,
     model: NanoTabPFNClassifier,
     tasks: list[int] | str = "tabarena-v0.1",
+    max_samples_subsample: int | None = 1000,
+    max_features_subsample: int | None = 100,
     cache_directory: str | None = None,
 ):
     if cache_directory is not None:
@@ -507,11 +509,33 @@ def get_openml_predictions(
         probabilities = []
         for fold in range(folds):
             X, y, _, _ = dataset.get_data(target=task.target_name, dataset_format="dataframe")
+
+            len_features = X.shape[1]
+            if max_features_subsample is not None and len_features > max_features_subsample:
+                rng = np.random.default_rng(c.seed)
+                feature_choices = rng.choice(len_features, size=max_features_subsample, replace=False)
+                X = X.iloc[:, feature_choices]
+
             train_indices, test_indices = task.get_train_test_split_indices(fold=fold, repeat=repeat)
             X_train = X.iloc[train_indices].to_numpy()
             y_train = y.iloc[train_indices].to_numpy()
             X_test = X.iloc[test_indices].to_numpy()
             y_test = y.iloc[test_indices].to_numpy()
+
+            len_train = X_train.shape[0]
+            len_test = X_test.shape[0]
+            total = len_train + len_test
+            if max_samples_subsample is not None and total > max_samples_subsample:
+                rng = np.random.default_rng(c.seed)
+                sub_train = int(round(max_samples_subsample * (len_train / total)))
+                sub_test = max_samples_subsample - sub_train
+
+                train_choices = rng.choice(len_train, size=sub_train, replace=False)
+                test_choices = rng.choice(len_test, size=sub_test, replace=False)
+                X_train = X_train[train_choices]
+                y_train = y_train[train_choices]
+                X_test = X_test[test_choices]
+                y_test = y_test[test_choices]
 
             label_encoder = LabelEncoder()
             y_train = label_encoder.fit_transform(y_train)
