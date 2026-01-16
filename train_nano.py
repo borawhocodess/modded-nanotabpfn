@@ -468,6 +468,8 @@ TABARENA_CLASSIFICATION_TASKS = [
     363712, # ( 10885,   22) jm1
 ]
 
+TCTSBV = [363621, 363629, 363614, 363626, 363685, 363696, 363707, 363671, 363711, 363682, 363684, 363674, 363700, 363702, 363620, 363677, 363704, 363623, 363694, 363706, 363689, 363624, 363619, 363676, 363712, 363632, 363691, 363681, 363679, 363627, 363613, 363618, 363683, 363630, 363616, 363699, 363628, 363673]
+
 @torch.no_grad()
 def get_openml_predictions(
     *,
@@ -626,7 +628,7 @@ for epoch in range(1, c.epochs + 1):
 
     if (epoch == 1) or (epoch == c.epochs) or (epoch % c.eval_every == 0):
         clf = NanoTabPFNClassifier(model, chunks=64)
-        preds = get_openml_predictions(model=clf, tasks=TABARENA_CLASSIFICATION_TASKS)
+        preds = get_openml_predictions(model=clf, tasks=TCTSBV)
         aucs: list[float] = []
         for dataset_name, (y_true, y_pred, y_proba) in preds.items():
             auc = (
