@@ -11,7 +11,7 @@ import uuid
 import warnings
 from dataclasses import dataclass, fields
 from datetime import datetime
-from typing import Callable, Tuple
+from typing import Any, Callable, Tuple
 
 import h5py
 import numpy as np
@@ -25,6 +25,7 @@ from openml.tasks import TaskType
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import roc_auc_score
+from sklearn.model_selection import StratifiedKFold
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer, LabelEncoder, OrdinalEncoder
 from torch import nn
@@ -473,8 +474,9 @@ TCTSBV = [363621, 363629, 363614, 363626, 363685, 363696, 363707, 363671, 363711
 @torch.no_grad()
 def get_openml_predictions(
     *,
-    model: NanoTabPFNClassifier,
+    model: Any,
     tasks: list[int] | str = "tabarena-v0.1",
+    folds: int = 5,
     max_samples_subsample: int | None = 1000,
     max_features_subsample: int | None = 100,
     cache_directory: str | None = None,
@@ -501,43 +503,31 @@ def get_openml_predictions(
         n_features = dataset.qualities["NumberOfFeatures"]
         n_samples = dataset.qualities["NumberOfInstances"]
 
-        _, folds, _ = task.get_split_dimensions()
-        tabarena_light = True
-        if tabarena_light:
-            folds = 1
-        repeat = 0
+        X, y, _, _ = dataset.get_data(target=task.target_name, dataset_format="dataframe")
+
+        len_features = X.shape[1]
+        if max_features_subsample is not None and len_features > max_features_subsample:
+            rng = np.random.default_rng(c.seed + task_id)
+            feature_choices = rng.choice(len_features, size=max_features_subsample, replace=False)
+            X = X.iloc[:, feature_choices]
+
+        if max_samples_subsample is not None and len(X) > max_samples_subsample:
+            rng = np.random.default_rng(c.seed + task_id)
+            sample_choices = rng.choice(len(X), size=max_samples_subsample, replace=False)
+            X = X.iloc[sample_choices].reset_index(drop=True)
+            y = y.iloc[sample_choices].reset_index(drop=True)
+
+        cv = StratifiedKFold(n_splits=folds, shuffle=True, random_state=c.seed + task_id)
+
         targets = []
         predictions = []
         probabilities = []
-        for fold in range(folds):
-            X, y, _, _ = dataset.get_data(target=task.target_name, dataset_format="dataframe")
 
-            len_features = X.shape[1]
-            if max_features_subsample is not None and len_features > max_features_subsample:
-                rng = np.random.default_rng(c.seed)
-                feature_choices = rng.choice(len_features, size=max_features_subsample, replace=False)
-                X = X.iloc[:, feature_choices]
-
-            train_indices, test_indices = task.get_train_test_split_indices(fold=fold, repeat=repeat)
+        for fold, (train_indices, test_indices) in enumerate(cv.split(X, y)):
             X_train = X.iloc[train_indices].to_numpy()
             y_train = y.iloc[train_indices].to_numpy()
             X_test = X.iloc[test_indices].to_numpy()
             y_test = y.iloc[test_indices].to_numpy()
-
-            len_train = X_train.shape[0]
-            len_test = X_test.shape[0]
-            total = len_train + len_test
-            if max_samples_subsample is not None and total > max_samples_subsample:
-                rng = np.random.default_rng(c.seed)
-                sub_train = int(round(max_samples_subsample * (len_train / total)))
-                sub_test = max_samples_subsample - sub_train
-
-                train_choices = rng.choice(len_train, size=sub_train, replace=False)
-                test_choices = rng.choice(len_test, size=sub_test, replace=False)
-                X_train = X_train[train_choices]
-                y_train = y_train[train_choices]
-                X_test = X_test[test_choices]
-                y_test = y_test[test_choices]
 
             label_encoder = LabelEncoder()
             y_train = label_encoder.fit_transform(y_train)
