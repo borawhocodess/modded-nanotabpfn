@@ -674,7 +674,7 @@ for epoch in range(1, c.epochs + 1):
         avg_rf_auc = (sum(rf_aucs) / len(rf_aucs)) if len(rf_aucs) > 0 else float("nan")
         print0(f"avg_rf_roc_auc:{avg_rf_auc}", console=True)
 
-        if avg_auc >= c.jackpot:
+        if avg_auc >= c.jackpot or epoch == c.epochs:
             ckpt = {
                 "version": version,
                 "timestamp": ts,
