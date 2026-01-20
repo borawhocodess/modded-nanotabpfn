@@ -1,4 +1,3 @@
-import math
 import os
 import platform
 import random
@@ -8,10 +7,9 @@ import sys
 import time
 import tomllib
 import uuid
-import warnings
 from dataclasses import dataclass, fields
 from datetime import datetime
-from typing import Any, Callable, Tuple
+from typing import Any, Tuple
 
 import h5py
 import numpy as np
@@ -134,7 +132,7 @@ class NanoTabPFNModel(nn.Module):
         elif len(args) == 1 and isinstance(args, tuple):
             return self._forward(*args, **kwargs)
 
-    def _forward(self, src: Tuple[torch.Tensor, torch.Tensor], sep: int, chunks: int = 1) -> torch.Tensor:
+    def _forward(self, src: Tuple[torch.Tensor, torch.Tensor], sep: int) -> torch.Tensor:
         x_src, y_src = src
         if len(y_src.shape) < len(x_src.shape):
             y_src = y_src.unsqueeze(-1)
@@ -142,7 +140,7 @@ class NanoTabPFNModel(nn.Module):
         num_rows = x_src.shape[1]
         y_src = self.target_encoder(y_src, num_rows)
         src = torch.cat([x_src, y_src], 2)
-        output = self.transformer_encoder(src, sep, chunks=chunks)
+        output = self.transformer_encoder(src, sep)
         output = output[:, sep:, -1, :]
         output = self.decoder(output)
         return output
@@ -182,9 +180,9 @@ class TransformerEncoderStack(nn.Module):
         for _ in range(l):
             self.transformer_blocks.append(TransformerEncoderLayer(a, e, h))
 
-    def forward(self, x: torch.Tensor, sep: int, chunks: int = 1) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, sep: int) -> torch.Tensor:
         for block in self.transformer_blocks:
-            x = block(x, sep=sep, chunks=chunks)
+            x = block(x, sep=sep)
         return x
 
 
@@ -202,61 +200,28 @@ class TransformerEncoderLayer(nn.Module):
         self.norm2 = nn.LayerNorm(e, eps=eps, device=device, dtype=dtype)
         self.norm3 = nn.LayerNorm(e, eps=eps, device=device, dtype=dtype)
 
-    def forward(self, src: torch.Tensor, sep: int, chunks: int = 1) -> torch.Tensor:
+    def forward(self, src: torch.Tensor, sep: int) -> torch.Tensor:
         batch_size, rows_size, col_size, e = src.shape
         src = src.reshape(batch_size * rows_size, col_size, e)
 
-        @memory_chunking(chunks)
-        def feature_attention(x):
-            return self.a_features(x, x, x)[0] + x
-
-        src = feature_attention(src)
+        src = self.a_features(src, src, src)[0] + src
         src = src.reshape(batch_size, rows_size, col_size, e)
         src = self.norm1(src)
         src = src.transpose(1, 2)
         src = src.reshape(batch_size * col_size, rows_size, e)
 
-        @memory_chunking(chunks)
-        def datapoint_attention(x):
-            x_left = self.a_datapoints(x[:, :sep], x[:, :sep], x[:, :sep])[0]
-            x_right = self.a_datapoints(x[:, sep:], x[:, :sep], x[:, :sep])[0]
-            return torch.cat([x_left, x_right], dim=1) + x
-
-        src = datapoint_attention(src)
+        x_left = self.a_datapoints(src[:, :sep], src[:, :sep], src[:, :sep])[0]
+        x_right = self.a_datapoints(src[:, sep:], src[:, :sep], src[:, :sep])[0]
+        src = torch.cat([x_left, x_right], dim=1) + src
         src = src.reshape(batch_size, col_size, rows_size, e)
         src = src.transpose(2, 1)
         src = self.norm2(src)
         src = src.reshape(-1, e)
 
-        @memory_chunking(chunks)
-        def mlp(x):
-            return self.linear2(F.gelu(self.linear1(x))) + x
-
-        src = mlp(src)
+        src = self.linear2(F.gelu(self.linear1(src))) + src
         src = src.reshape(batch_size, rows_size, col_size, e)
         src = self.norm3(src)
         return src
-
-
-def memory_chunking(chunks: int) -> callable:
-    def decorator(func: Callable[[torch.Tensor], torch.Tensor]) -> Callable[[torch.Tensor], torch.Tensor]:
-        def wrapper(x: torch.Tensor) -> torch.Tensor:
-            if chunks <= 1 or x.shape[0] == 0:
-                return func(x)
-            elif torch.is_grad_enabled():
-                warnings.warn(
-                    "Memory chunking is disabled since gradient computation is enabled to avoid incorrect gradients. "
-                    "Please use `with torch.no_grad():` during inference to enable chunking.",
-                )
-                return func(x)
-            chunk_size = max(1, math.ceil(x.shape[0] / chunks))
-            for x_split in torch.split(x, split_size_or_sections=chunk_size, dim=0):
-                x_split[:] = func(x_split)
-            return x
-
-        return wrapper
-
-    return decorator
 
 
 class Decoder(nn.Module):
@@ -386,7 +351,7 @@ def get_feature_preprocessor(X: np.ndarray | pd.DataFrame) -> ColumnTransformer:
 
 
 class NanoTabPFNClassifier:
-    def __init__(self, model: NanoTabPFNModel | str | None = None, chunks: int = 8):
+    def __init__(self, model: NanoTabPFNModel | str | None = None):
         device = "cuda"
         if model is None:
             raise ValueError("model is None")
@@ -394,7 +359,6 @@ class NanoTabPFNClassifier:
             model = init_model_from_ckpt_file(model)
         self.model = model.to(device)
         self.device = device
-        self.chunks = chunks
 
     def fit(self, X_train: np.ndarray, y_train: np.ndarray):
         self.feature_preprocessor = get_feature_preprocessor(X_train)
@@ -412,7 +376,7 @@ class NanoTabPFNClassifier:
         with torch.no_grad():
             x = torch.from_numpy(x).unsqueeze(0).to(torch.float).to(self.device)
             y = torch.from_numpy(y).unsqueeze(0).to(torch.float).to(self.device)
-            out = self.model((x, y), sep=len(self.X_train), chunks=self.chunks).squeeze(0)
+            out = self.model((x, y), sep=len(self.X_train)).squeeze(0)
             out = out[:, : self.num_classes]
             probabilities = F.softmax(out, dim=1)
             return probabilities.to("cpu").numpy()
@@ -620,8 +584,8 @@ for epoch in range(1, c.epochs + 1):
     optimizer.eval()
 
     if (epoch == 1) or (epoch == c.epochs) or (epoch % c.eval_every == 0):
-        clf = NanoTabPFNClassifier(model, chunks=64)
-        preds = get_openml_predictions(model=clf, tasks=TCTSBV)
+        clf = NanoTabPFNClassifier(model)
+        preds = get_openml_predictions(model=clf, tasks=TABARENA_CLASSIFICATION_TASKS)
         aucs: list[float] = []
         for dataset_name, (y_true, y_pred, y_proba) in preds.items():
             auc = (
