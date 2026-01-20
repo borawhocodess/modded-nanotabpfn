@@ -492,6 +492,8 @@ def get_openml_predictions(
 
     dataset_predictions = {}
 
+    eval_start_time = time.perf_counter()
+
     for task_id in task_ids:
         task = openml.tasks.get_task(task_id, download_splits=False)
 
@@ -546,6 +548,9 @@ def get_openml_predictions(
         targets = np.concatenate(targets, axis=0)
         probabilities = np.concatenate(probabilities, axis=0) if len(probabilities) > 0 else None
         dataset_predictions[str(dataset.name)] = (targets, y_pred, probabilities)
+
+    print(f"evaluation time: {time.perf_counter() - eval_start_time:.2f}s")
+
     return dataset_predictions
 
 
