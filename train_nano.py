@@ -655,7 +655,7 @@ for epoch in range(1, c.epochs + 1):
             )
             aucs.append(auc)
             dataset_name = dataset_name.lower().replace("-", "_")
-            print0(f"{dataset_name}_roc_auc:{auc:.2f}", console=True)
+            # print0(f"{dataset_name}_roc_auc:{auc:.2f}", console=True)
         avg_auc = (sum(aucs) / len(aucs)) if len(aucs) > 0 else float("nan")
         print0(f"avg_roc_auc:{avg_auc}", console=True)
 
@@ -670,7 +670,7 @@ for epoch in range(1, c.epochs + 1):
             )
             rf_aucs.append(auc)
             dataset_name = dataset_name.lower().replace("-", "_")
-            print0(f"{dataset_name}_rf_roc_auc:{auc:.2f}", console=True)
+            # print0(f"{dataset_name}_rf_roc_auc:{auc:.2f}", console=True)
         avg_rf_auc = (sum(rf_aucs) / len(rf_aucs)) if len(rf_aucs) > 0 else float("nan")
         print0(f"avg_rf_roc_auc:{avg_rf_auc}", console=True)
 
