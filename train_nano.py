@@ -244,7 +244,6 @@ class PriorDumpDataLoader(DataLoader):
         self.num_steps = num_steps
         self.batch_size = batch_size
         with h5py.File(self.filename, "r") as f:
-            self.num_datapoints_max = f["X"].shape[0]
             self.max_num_classes = f["max_num_classes"][0] if "max_num_classes" in f else None
             self.problem_type = f["problem_type"][()].decode("utf-8")
             # X = (num_datasets, max_num_datapoints, max_num_features)
@@ -386,12 +385,6 @@ class NanoTabPFNClassifier:
 # evaluation
 
 
-TOY_TASKS_CLASSIFICATION = [
-    59,  # iris
-    2382,  # wine
-    9946,  # breast_cancer
-]
-
 TABARENA_CLASSIFICATION_TASKS = [
     363613,  # ( 32769,   10) Amazon_employee_access
     363614,  # (   898,   39) anneal
@@ -433,6 +426,7 @@ TABARENA_CLASSIFICATION_TASKS = [
     363712,  # ( 10885,   22) jm1
 ]
 
+
 @torch.no_grad()
 def get_openml_predictions(
     *,
@@ -454,8 +448,6 @@ def get_openml_predictions(
 
     dataset_predictions = {}
 
-    eval_start_time = time.perf_counter()
-
     for task_id in task_ids:
         task = openml.tasks.get_task(task_id, download_splits=False)
 
@@ -463,9 +455,6 @@ def get_openml_predictions(
             continue
 
         dataset = task.get_dataset(download_data=False)
-
-        n_features = dataset.qualities["NumberOfFeatures"]
-        n_samples = dataset.qualities["NumberOfInstances"]
 
         X, y, _, _ = dataset.get_data(target=task.target_name, dataset_format="dataframe")
 
@@ -487,7 +476,7 @@ def get_openml_predictions(
         predictions = []
         probabilities = []
 
-        for fold, (train_indices, test_indices) in enumerate(cv.split(X, y)):
+        for _, (train_indices, test_indices) in enumerate(cv.split(X, y)):
             X_train = X.iloc[train_indices].to_numpy()
             y_train = y.iloc[train_indices].to_numpy()
             X_test = X.iloc[test_indices].to_numpy()
@@ -510,8 +499,6 @@ def get_openml_predictions(
         targets = np.concatenate(targets, axis=0)
         probabilities = np.concatenate(probabilities, axis=0) if len(probabilities) > 0 else None
         dataset_predictions[str(dataset.name)] = (targets, y_pred, probabilities)
-
-    print(f"evaluation time: {time.perf_counter() - eval_start_time:.2f}s")
 
     return dataset_predictions
 
