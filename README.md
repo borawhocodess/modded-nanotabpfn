@@ -1,6 +1,6 @@
 # modded-nanoTabPFN
 
-This repository hosts the nanoTabPFN speedrun, in which we search for the fastest way to use ___TODO___ to train a tabular foundation model (nanoTabPFN) that attains ___TODO___ cross-entropy loss on the ___TODO___ validation set.
+This repository hosts the nanoTabPFN speedrun, in which we search for the fastest way to use 1 NVIDIA L40S to train a tabular foundation model (nanoTabPFN) that beats Random Forest on [TabArena](https://github.com/autogluon/tabarena).
 
 The code is derived from [nanoTabPFN](https://github.com/automl/nanoTabPFN) with the inspiration of [modded-nanogpt](https://github.com/KellerJordan/modded-nanogpt).
 
@@ -32,6 +32,12 @@ The following is the historical progression of speed records for the following t
 | # | Record time | Date | Description | Log |
 | - | - | - | - | - |
 1 | ___TODO___ minutes | 14/10/25 | baseline | [log](records/...TODO...)
+
+
+## Evaluation details
+
+__TODO__
+
 
 ## Changelog
 
