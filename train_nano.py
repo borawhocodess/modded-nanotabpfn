@@ -23,7 +23,6 @@ import torch.nn.functional as F
 from openml.config import set_root_cache_directory
 from openml.tasks import TaskType
 from sklearn.compose import ColumnTransformer
-from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import StratifiedKFold
@@ -54,7 +53,7 @@ class Config:
     l: int = 6
     o: int | None = None
     eval_every: int = 100
-    jackpot: float = 0.8032442315174498  # random forest baseline roc auc on TCTSBV
+    jackpot: float = 0.8032442315174498  # random forest baseline
 
 
 c = Config()
@@ -419,27 +418,6 @@ class NanoTabPFNClassifier:
             return probabilities.to("cpu").numpy()
 
 
-class RandomForestBaseline:
-    def __init__(self, random_state: int | None = None):
-        self.random_state = random_state
-        self.feature_preprocessor = None
-        self.clf = None
-
-    def fit(self, X_train: np.ndarray, y_train: np.ndarray):
-        self.feature_preprocessor = get_feature_preprocessor(X_train)
-        X_train = self.feature_preprocessor.fit_transform(X_train)
-        self.clf = RandomForestClassifier(random_state=self.random_state, n_jobs=-1)
-        self.clf.fit(X_train, y_train)
-
-    def predict(self, X_test: np.ndarray) -> np.ndarray:
-        X_test = self.feature_preprocessor.transform(X_test)
-        return self.clf.predict(X_test)
-
-    def predict_proba(self, X_test: np.ndarray) -> np.ndarray:
-        X_test = self.feature_preprocessor.transform(X_test)
-        return self.clf.predict_proba(X_test)
-
-
 # -----------------------------------------------------------------------------
 # evaluation
 
@@ -656,21 +634,6 @@ for epoch in range(1, c.epochs + 1):
             # print0(f"{dataset_name}_roc_auc:{auc:.2f}", console=True)
         avg_auc = (sum(aucs) / len(aucs)) if len(aucs) > 0 else float("nan")
         print0(f"avg_roc_auc:{avg_auc}", console=True)
-
-        rf_clf = RandomForestBaseline(random_state=c.seed)
-        rf_preds = get_openml_predictions(model=rf_clf, tasks=TABARENA_CLASSIFICATION_TASKS)
-        rf_aucs: list[float] = []
-        for dataset_name, (y_true, y_pred, y_proba) in rf_preds.items():
-            auc = (
-                roc_auc_score(y_true, y_proba, multi_class="ovr")
-                if getattr(y_proba, "ndim", 1) > 1
-                else roc_auc_score(y_true, y_proba)
-            )
-            rf_aucs.append(auc)
-            dataset_name = dataset_name.lower().replace("-", "_")
-            # print0(f"{dataset_name}_rf_roc_auc:{auc:.2f}", console=True)
-        avg_rf_auc = (sum(rf_aucs) / len(rf_aucs)) if len(rf_aucs) > 0 else float("nan")
-        print0(f"avg_rf_roc_auc:{avg_rf_auc}", console=True)
 
         if avg_auc >= c.jackpot or epoch == c.epochs:
             ckpt = {
