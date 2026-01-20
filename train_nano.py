@@ -451,47 +451,45 @@ TOY_TASKS_CLASSIFICATION = [
 ]
 
 TABARENA_CLASSIFICATION_TASKS = [
-    363613, # ( 32769,   10) Amazon_employee_access
-    363614, # (   898,   39) anneal
-    363616, # ( 76000,  171) APSFailure
-    363618, # ( 45211,   14) bank-marketing
-    363619, # ( 10000,   11) Bank_Customer_Churn
-    363620, # (  3751, 1777) Bioresponse
-    363621, # (   748,    5) blood-transfusion-service-center
-    363623, # (  5000,   20) churn
-    363624, # (  9822,   86) coil2000_insurance_policies
-    363626, # (  1000,   21) credit-g
-    363627, # ( 30000,   24) credit_card_clients_default
-    363628, # (129880,   22) customer_satisfaction_in_airline
-    363629, # (   768,    9) diabetes
-    363630, # ( 71518,   48) Diabetes130US
-    363632, # ( 10999,   11) E-CommereShippingData
-    363671, # (  1500,    7) Fitness_Club
-    363673, # (150000,   11) GiveMeSomeCredit
-    363674, # (  2400,   31) hazelnut-spread-contaminant-detection
-    363676, # ( 10459,   24) heloc
-    363677, # (  3845, 1618) hiva_agnostic
-    363679, # ( 19158,   13) HR_Analytics_Job_Change_of_Data_Scientists
-    363681, # ( 12684,   25) in_vehicle_coupon_recommendation
-    363682, # (  1723,   14) Is-this-a-good-customer
-    363683, # ( 50000,  213) kddcup09_appetency
-    363684, # (  2240,   26) Marketing_Campaign
-    363685, # (  1014,    7) maternal_health_risk
-    363689, # (  7491,   87) NATICUSdroid
-    363691, # ( 12330,   18) online_shoppers_intention
-    363694, # (  5910,   65) polish_companies_bankruptcy
-    363696, # (  1054,   42) qsar-biodeg
-    363699, # ( 78053,   12) SDSS17
-    363700, # (  2584,   16) seismic-bumps
-    363702, # (  3190,   61) splice
-    363704, # (  4424,   37) students_dropout_and_academic_success
-    363706, # (  6819,   95) taiwanese_bankruptcy_prediction
-    363707, # (  1353,   10) website_phishing
-    363711, # (  1699,  112) MIC
-    363712, # ( 10885,   22) jm1
+    363613,  # ( 32769,   10) Amazon_employee_access
+    363614,  # (   898,   39) anneal
+    363616,  # ( 76000,  171) APSFailure
+    363618,  # ( 45211,   14) bank-marketing
+    363619,  # ( 10000,   11) Bank_Customer_Churn
+    363620,  # (  3751, 1777) Bioresponse
+    363621,  # (   748,    5) blood-transfusion-service-center
+    363623,  # (  5000,   20) churn
+    363624,  # (  9822,   86) coil2000_insurance_policies
+    363626,  # (  1000,   21) credit-g
+    363627,  # ( 30000,   24) credit_card_clients_default
+    363628,  # (129880,   22) customer_satisfaction_in_airline
+    363629,  # (   768,    9) diabetes
+    363630,  # ( 71518,   48) Diabetes130US
+    363632,  # ( 10999,   11) E-CommereShippingData
+    363671,  # (  1500,    7) Fitness_Club
+    363673,  # (150000,   11) GiveMeSomeCredit
+    363674,  # (  2400,   31) hazelnut-spread-contaminant-detection
+    363676,  # ( 10459,   24) heloc
+    363677,  # (  3845, 1618) hiva_agnostic
+    363679,  # ( 19158,   13) HR_Analytics_Job_Change_of_Data_Scientists
+    363681,  # ( 12684,   25) in_vehicle_coupon_recommendation
+    363682,  # (  1723,   14) Is-this-a-good-customer
+    363683,  # ( 50000,  213) kddcup09_appetency
+    363684,  # (  2240,   26) Marketing_Campaign
+    363685,  # (  1014,    7) maternal_health_risk
+    363689,  # (  7491,   87) NATICUSdroid
+    363691,  # ( 12330,   18) online_shoppers_intention
+    363694,  # (  5910,   65) polish_companies_bankruptcy
+    363696,  # (  1054,   42) qsar-biodeg
+    363699,  # ( 78053,   12) SDSS17
+    363700,  # (  2584,   16) seismic-bumps
+    363702,  # (  3190,   61) splice
+    363704,  # (  4424,   37) students_dropout_and_academic_success
+    363706,  # (  6819,   95) taiwanese_bankruptcy_prediction
+    363707,  # (  1353,   10) website_phishing
+    363711,  # (  1699,  112) MIC
+    363712,  # ( 10885,   22) jm1
 ]
-
-TCTSBV = [363621, 363629, 363614, 363626, 363685, 363696, 363707, 363671, 363711, 363682, 363684, 363674, 363700, 363702, 363620, 363677, 363704, 363623, 363694, 363706, 363689, 363624, 363619, 363676, 363712, 363632, 363691, 363681, 363679, 363627, 363613, 363618, 363683, 363630, 363616, 363699, 363628, 363673]
 
 @torch.no_grad()
 def get_openml_predictions(
@@ -660,7 +658,7 @@ for epoch in range(1, c.epochs + 1):
         print0(f"avg_roc_auc:{avg_auc}", console=True)
 
         rf_clf = RandomForestBaseline(random_state=c.seed)
-        rf_preds = get_openml_predictions(model=rf_clf, tasks=TCTSBV)
+        rf_preds = get_openml_predictions(model=rf_clf, tasks=TABARENA_CLASSIFICATION_TASKS)
         rf_aucs: list[float] = []
         for dataset_name, (y_true, y_pred, y_proba) in rf_preds.items():
             auc = (
