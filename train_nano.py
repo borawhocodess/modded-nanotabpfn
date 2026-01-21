@@ -591,7 +591,7 @@ for epoch in range(1, c.epochs + 1):
         avg_auc = (sum(aucs) / len(aucs)) if len(aucs) > 0 else float("nan")
         print0(f"avg_roc_auc:{avg_auc}", console=True)
 
-        if avg_auc >= c.jackpot or epoch == c.epochs:
+        if avg_auc >= c.jackpot:
             ckpt = {
                 "version": version,
                 "timestamp": ts,
