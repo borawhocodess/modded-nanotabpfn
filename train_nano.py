@@ -565,7 +565,12 @@ for epoch in range(1, c.epochs + 1):
 
     mean_loss = total_loss / len(prior)
 
-    print0(f"e:{epoch}/{c.epochs} μ_l:{mean_loss:.2f} e_t:{e_t:.2f}s μ_e_t:{mu_e_t:.2f}s t_t:{t_t:.2f}s", console=True)
+    print0(
+        f"[{datetime.now().strftime("%H:%M:%S")}] "
+        f"e:{epoch}/{c.epochs} μ_l:{mean_loss:.2f} "
+        f"e_t:{e_t:.2f}s μ_e_t:{mu_e_t:.2f}s t_t:{t_t:.2f}s",
+        console=True,
+    )
 
     model.eval()
     optimizer.eval()
