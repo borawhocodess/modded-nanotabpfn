@@ -5,8 +5,8 @@ This repository hosts the nanoTabPFN speedrun, in which we search for the fastes
 The code is derived from [nanoTabPFN](https://github.com/automl/nanoTabPFN) with the inspiration of [modded-nanogpt](https://github.com/KellerJordan/modded-nanogpt).
 
 This repo now contains a training algorithm which attains the target performance in:
-* ___TODO___ minutes on ___TODO___ (baseline needed ___TODO___ minutes)
-* ___TODO___ tokens (baseline needed ___TODO___)
+* ___TODO___ minutes on 1xL40S (baseline needed __TODO_BASELINE__ minutes)
+* ___TODO___ synthetic datasets (baseline needed __TODO_BASELINE__)
 
 with the help of the following techniques:
 * ___TODO___
@@ -27,21 +27,32 @@ uv sync
 
 The following is the historical progression of speed records for the following task:
 
-> *Pretrain a neural network to ≤___TODO___ validation loss on ___TODO___ using ___TODO___.*
+> *Pretrain a neural network to ≤__TODO_BASELINE__ validation average ROC AUC on subsampled TabArena using 1 NVIDIA L40S.*
+
+Note: The __TODO_BASELINE__ target was selected to match the performance of Random Forest on the same subsampled TabArena evaluation.
 
 | # | Record time | Date | Description | Log |
 | - | - | - | - | - |
-1 | ___TODO___ minutes | 14/10/25 | baseline | [log](records/...TODO...)
+1 | __TODO_BASELINE__ minutes | __TODO_BASELINE__/01/26 | baseline | [log](records/__TODO_BASELINE__)
 
 
 ## Evaluation details
 
-__TODO__
+Evaluation is on all of 38 TabArena classification tasks.
 
-
-## Changelog
-
-- 14/10/25: Created repository and moved the whole codebase.
+- Subsampling:
+  - if >100 features, randomly select 100
+  - if >1000 rows, randomly select 1000
+- Cross-validation:
+  - 5-fold StratifiedKFold with shuffling
+  - class labels are encoded with integers per fold
+- Preprocessing:
+  - constant columns: dropped
+  - numeric columns: numeric coercion + mean imputation
+  - categorical columns: ordinal encoding + most-frequent imputation
+- Metric:
+  - binary or one-vs-rest ROC AUC
+  - average over all tasks
 
 
 ## References
