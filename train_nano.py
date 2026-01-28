@@ -530,6 +530,7 @@ for epoch in range(1, c.epochs + 1):
     model.train()
     optimizer.train()
     total_loss = 0.0
+    num_valid = 0
     for i, full_data in enumerate(prior):
         sep = full_data["sep"]
         data = (
@@ -538,6 +539,7 @@ for epoch in range(1, c.epochs + 1):
         )
         if torch.isnan(data[0]).any() or torch.isnan(data[1]).any():
             continue
+        num_valid += 1
 
         targets = full_data["target_y"].to(device)
 
@@ -562,7 +564,7 @@ for epoch in range(1, c.epochs + 1):
     t_t += e_t  # train time
     mu_e_t = t_t / epoch  # mean epoch time
 
-    mean_loss = total_loss / len(prior)
+    mean_loss = total_loss / max(num_valid, 1)
 
     print0(
         f"[{datetime.now().strftime("%H:%M:%S")}] "
