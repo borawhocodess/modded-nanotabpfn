@@ -50,7 +50,7 @@ class Config:
     l: int = 6
     o: int | None = None
     eval_every: int = 100
-    jackpot: float = 0.8032442315174498  # random forest baseline
+    jackpot: float = 0.8  # random baseline
 
 
 c = Config()
@@ -188,7 +188,6 @@ class TransformerEncoderStack(nn.Module):
 class TransformerEncoderLayer(nn.Module):
     def __init__(self, a: int, e: int, h: int, eps: float = 1e-5, batch_first: bool = True, device=None, dtype=None):
         super().__init__()
-        # why does switching these two lines cause a difference in results !?!
         self.a_datapoints = nn.MultiheadAttention(e, a, batch_first=batch_first, device=device, dtype=dtype)
         self.a_features = nn.MultiheadAttention(e, a, batch_first=batch_first, device=device, dtype=dtype)
 
@@ -322,9 +321,6 @@ def get_feature_preprocessor(X: np.ndarray | pd.DataFrame) -> ColumnTransformer:
         num_mask.append(non_nan_entries == numeric_entries)
         cat_mask.append(non_nan_entries != numeric_entries)
 
-    num_mask = np.array(num_mask)
-    cat_mask = np.array(cat_mask)
-
     num_transformer = Pipeline(
         [
             ("to_pandas", FunctionTransformer(to_pandas)),
@@ -341,8 +337,8 @@ def get_feature_preprocessor(X: np.ndarray | pd.DataFrame) -> ColumnTransformer:
 
     preprocessor = ColumnTransformer(
         transformers=[
-            ("num", num_transformer, num_mask),
-            ("cat", cat_transformer, cat_mask),
+            ("num", num_transformer, np.array(num_mask)),
+            ("cat", cat_transformer, np.array(cat_mask)),
         ],
     )
     return preprocessor
@@ -562,7 +558,7 @@ for epoch in range(1, c.epochs + 1):
     print0(
         f"[{datetime.now().strftime('%H:%M:%S')}] "
         f"e:{epoch}/{c.epochs} μ_l:{mean_loss:.2f} "
-        f"({c.steps}-{num_valid}={c.steps - num_valid})"
+        f"({c.steps}-{num_valid}={c.steps - num_valid}) "
         f"e_t:{e_t:.2f}s μ_e_t:{mu_e_t:.2f}s t_t:{t_t:.2f}s",
         console=True,
     )
@@ -574,15 +570,13 @@ for epoch in range(1, c.epochs + 1):
         clf = NanoTabPFNClassifier(model)
         preds = get_openml_predictions(model=clf, tasks=TABARENA_CLASSIFICATION_TASKS)
         aucs: list[float] = []
-        for dataset_name, (y_true, y_pred, y_proba) in preds.items():
+        for _, (y_true, y_pred, y_proba) in preds.items():
             auc = (
                 roc_auc_score(y_true, y_proba, multi_class="ovr")
                 if getattr(y_proba, "ndim", 1) > 1
                 else roc_auc_score(y_true, y_proba)
             )
             aucs.append(auc)
-            dataset_name = dataset_name.lower().replace("-", "_")
-            # print0(f"{dataset_name}_roc_auc:{auc:.2f}", console=True)
         avg_auc = (sum(aucs) / len(aucs)) if len(aucs) > 0 else float("nan")
         print0(f"avg_roc_auc:{avg_auc}", console=True)
 
