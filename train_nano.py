@@ -41,7 +41,6 @@ class Config:
     classification_dump: str = "workdir/dumps/dump-d256000b1r1000c20-8.h5"
     seed: int = 11
     batch_size: int = 1
-    accumulate: int = 1
     lr: float = 1e-4
     steps: int = 64  # step size
     epochs: int = 4000
@@ -514,8 +513,6 @@ prior = PriorDumpDataLoader(
 )
 c.o = prior.max_num_classes
 
-assert prior.num_steps % c.accumulate == 0, "num_steps must be divisible by accumulate_gradients"
-
 model = NanoTabPFNModel(l=c.l, a=c.a, e=c.e, h=c.h, o=c.o).to(device)
 
 optimizer = schedulefree.AdamWScheduleFree(model.parameters(), lr=c.lr, weight_decay=0.0)
@@ -548,16 +545,14 @@ for epoch in range(1, c.epochs + 1):
         targets = targets.reshape((-1,)).to(torch.long)
         output = output.view(-1, output.shape[-1])
 
-        losses = criterion(output, targets)
-        loss = losses.mean() / c.accumulate
+        loss = criterion(output, targets)
         loss.backward()
 
-        total_loss += loss.cpu().detach().item() * c.accumulate
+        total_loss += loss.detach().cpu().item()
 
-        if (i + 1) % c.accumulate == 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-            optimizer.zero_grad()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        optimizer.step()
+        optimizer.zero_grad()
 
     torch.cuda.synchronize()
     e_t = time.perf_counter() - t0  # epoch time
@@ -609,7 +604,6 @@ for epoch in range(1, c.epochs + 1):
             }
             torch.save(ckpt, ckpt_path)
             print0("=" * 100)
-            print0(f"effective batch size: {c.batch_size * c.accumulate}", console=True)
             print0(f"datasets seen: {epoch * c.batch_size * c.steps}", console=True)
             break
 
