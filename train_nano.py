@@ -9,7 +9,7 @@ import tomllib
 import uuid
 from dataclasses import dataclass, fields
 from datetime import datetime
-from typing import Any, Tuple
+from typing import Tuple
 
 import h5py
 import numpy as np
@@ -18,7 +18,6 @@ import pandas as pd
 import schedulefree
 import torch
 import torch.nn.functional as F
-from openml.config import set_root_cache_directory
 from openml.tasks import TaskType
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
@@ -50,6 +49,9 @@ class Config:
     l: int = 6
     o: int | None = None
     eval_every: int = 100
+    eval_folds: int = 5
+    eval_subsample_samples: int | None = 1000
+    eval_subsample_features: int | None = 100
     jackpot: float = 0.8  # random baseline
 
 
@@ -94,6 +96,47 @@ print0(f"torch: {torch.version.__version__}")
 print0(f"cuda: {torch.version.cuda}")
 print0(subprocess.run(["nvidia-smi"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True).stdout)
 print0("=" * 100)
+
+TABARENA_CLASSIFICATION_TASKS = [
+    363613,  # ( 32769,   10) Amazon_employee_access
+    363614,  # (   898,   39) anneal
+    363616,  # ( 76000,  171) APSFailure
+    363618,  # ( 45211,   14) bank-marketing
+    363619,  # ( 10000,   11) Bank_Customer_Churn
+    363620,  # (  3751, 1777) Bioresponse
+    363621,  # (   748,    5) blood-transfusion-service-center
+    363623,  # (  5000,   20) churn
+    363624,  # (  9822,   86) coil2000_insurance_policies
+    363626,  # (  1000,   21) credit-g
+    363627,  # ( 30000,   24) credit_card_clients_default
+    363628,  # (129880,   22) customer_satisfaction_in_airline
+    363629,  # (   768,    9) diabetes
+    363630,  # ( 71518,   48) Diabetes130US
+    363632,  # ( 10999,   11) E-CommereShippingData
+    363671,  # (  1500,    7) Fitness_Club
+    363673,  # (150000,   11) GiveMeSomeCredit
+    363674,  # (  2400,   31) hazelnut-spread-contaminant-detection
+    363676,  # ( 10459,   24) heloc
+    363677,  # (  3845, 1618) hiva_agnostic
+    363679,  # ( 19158,   13) HR_Analytics_Job_Change_of_Data_Scientists
+    363681,  # ( 12684,   25) in_vehicle_coupon_recommendation
+    363682,  # (  1723,   14) Is-this-a-good-customer
+    363683,  # ( 50000,  213) kddcup09_appetency
+    363684,  # (  2240,   26) Marketing_Campaign
+    363685,  # (  1014,    7) maternal_health_risk
+    363689,  # (  7491,   87) NATICUSdroid
+    363691,  # ( 12330,   18) online_shoppers_intention
+    363694,  # (  5910,   65) polish_companies_bankruptcy
+    363696,  # (  1054,   42) qsar-biodeg
+    363699,  # ( 78053,   12) SDSS17
+    363700,  # (  2584,   16) seismic-bumps
+    363702,  # (  3190,   61) splice
+    363704,  # (  4424,   37) students_dropout_and_academic_success
+    363706,  # (  6819,   95) taiwanese_bankruptcy_prediction
+    363707,  # (  1353,   10) website_phishing
+    363711,  # (  1699,  112) MIC
+    363712,  # ( 10885,   22) jm1
+]
 
 
 # -----------------------------------------------------------------------------
@@ -377,127 +420,6 @@ class NanoTabPFNClassifier:
 
 
 # -----------------------------------------------------------------------------
-# evaluation
-
-
-TABARENA_CLASSIFICATION_TASKS = [
-    363613,  # ( 32769,   10) Amazon_employee_access
-    363614,  # (   898,   39) anneal
-    363616,  # ( 76000,  171) APSFailure
-    363618,  # ( 45211,   14) bank-marketing
-    363619,  # ( 10000,   11) Bank_Customer_Churn
-    363620,  # (  3751, 1777) Bioresponse
-    363621,  # (   748,    5) blood-transfusion-service-center
-    363623,  # (  5000,   20) churn
-    363624,  # (  9822,   86) coil2000_insurance_policies
-    363626,  # (  1000,   21) credit-g
-    363627,  # ( 30000,   24) credit_card_clients_default
-    363628,  # (129880,   22) customer_satisfaction_in_airline
-    363629,  # (   768,    9) diabetes
-    363630,  # ( 71518,   48) Diabetes130US
-    363632,  # ( 10999,   11) E-CommereShippingData
-    363671,  # (  1500,    7) Fitness_Club
-    363673,  # (150000,   11) GiveMeSomeCredit
-    363674,  # (  2400,   31) hazelnut-spread-contaminant-detection
-    363676,  # ( 10459,   24) heloc
-    363677,  # (  3845, 1618) hiva_agnostic
-    363679,  # ( 19158,   13) HR_Analytics_Job_Change_of_Data_Scientists
-    363681,  # ( 12684,   25) in_vehicle_coupon_recommendation
-    363682,  # (  1723,   14) Is-this-a-good-customer
-    363683,  # ( 50000,  213) kddcup09_appetency
-    363684,  # (  2240,   26) Marketing_Campaign
-    363685,  # (  1014,    7) maternal_health_risk
-    363689,  # (  7491,   87) NATICUSdroid
-    363691,  # ( 12330,   18) online_shoppers_intention
-    363694,  # (  5910,   65) polish_companies_bankruptcy
-    363696,  # (  1054,   42) qsar-biodeg
-    363699,  # ( 78053,   12) SDSS17
-    363700,  # (  2584,   16) seismic-bumps
-    363702,  # (  3190,   61) splice
-    363704,  # (  4424,   37) students_dropout_and_academic_success
-    363706,  # (  6819,   95) taiwanese_bankruptcy_prediction
-    363707,  # (  1353,   10) website_phishing
-    363711,  # (  1699,  112) MIC
-    363712,  # ( 10885,   22) jm1
-]
-
-
-@torch.no_grad()
-def get_openml_predictions(
-    *,
-    model: Any,
-    tasks: list[int] | str = "tabarena-v0.1",
-    folds: int = 5,
-    max_samples_subsample: int | None = 1000,
-    max_features_subsample: int | None = 100,
-    cache_directory: str | None = None,
-):
-    if cache_directory is not None:
-        set_root_cache_directory(cache_directory)
-
-    if isinstance(tasks, str):
-        benchmark_suite = openml.study.get_suite(tasks)
-        task_ids = benchmark_suite.tasks
-    else:
-        task_ids = tasks
-
-    dataset_predictions = {}
-
-    for task_id in task_ids:
-        task = openml.tasks.get_task(task_id, download_splits=False)
-
-        if task.task_type_id != TaskType.SUPERVISED_CLASSIFICATION:
-            continue
-
-        dataset = task.get_dataset(download_data=False)
-
-        X, y, _, _ = dataset.get_data(target=task.target_name, dataset_format="dataframe")
-
-        len_features = X.shape[1]
-        if max_features_subsample is not None and len_features > max_features_subsample:
-            rng = np.random.default_rng(c.seed)
-            feature_choices = rng.choice(len_features, size=max_features_subsample, replace=False)
-            X = X.iloc[:, feature_choices]
-
-        if max_samples_subsample is not None and len(X) > max_samples_subsample:
-            _, X, _, y = train_test_split(X, y, test_size=max_samples_subsample, stratify=y, random_state=c.seed)
-            X = X.reset_index(drop=True)
-            y = y.reset_index(drop=True)
-
-        cv = StratifiedKFold(n_splits=folds, shuffle=True, random_state=c.seed)
-
-        targets = []
-        predictions = []
-        probabilities = []
-
-        for _, (train_indices, test_indices) in enumerate(cv.split(X, y)):
-            X_train = X.iloc[train_indices].to_numpy()
-            y_train = y.iloc[train_indices].to_numpy()
-            X_test = X.iloc[test_indices].to_numpy()
-            y_test = y.iloc[test_indices].to_numpy()
-
-            label_encoder = LabelEncoder()
-            y_train = label_encoder.fit_transform(y_train)
-            y_test = label_encoder.transform(y_test)
-            targets.append(y_test)
-
-            model.fit(X_train, y_train)
-            y_pred = model.predict(X_test)
-            predictions.append(y_pred)
-            y_proba = model.predict_proba(X_test)
-            if y_proba.shape[1] == 2:
-                y_proba = y_proba[:, 1]
-            probabilities.append(y_proba)
-
-        y_pred = np.concatenate(predictions, axis=0)
-        targets = np.concatenate(targets, axis=0)
-        probabilities = np.concatenate(probabilities, axis=0) if len(probabilities) > 0 else None
-        dataset_predictions[str(dataset.name)] = (targets, y_pred, probabilities)
-
-    return dataset_predictions
-
-
-# -----------------------------------------------------------------------------
 # main
 
 
@@ -568,9 +490,53 @@ for epoch in range(1, c.epochs + 1):
 
     if (epoch == 1) or (epoch == c.epochs) or (epoch % c.eval_every == 0):
         clf = NanoTabPFNClassifier(model)
-        preds = get_openml_predictions(model=clf, tasks=TABARENA_CLASSIFICATION_TASKS)
         aucs: list[float] = []
-        for _, (y_true, y_pred, y_proba) in preds.items():
+
+        for task_id in TABARENA_CLASSIFICATION_TASKS:
+            task = openml.tasks.get_task(task_id, download_splits=False)
+
+            if task.task_type_id != TaskType.SUPERVISED_CLASSIFICATION:
+                continue
+
+            dataset = task.get_dataset(download_data=False)
+            X, y, _, _ = dataset.get_data(target=task.target_name, dataset_format="dataframe")
+
+            len_features = X.shape[1]
+            if c.eval_subsample_features is not None and len_features > c.eval_subsample_features:
+                rng = np.random.default_rng(c.seed)
+                feature_choices = rng.choice(len_features, size=c.eval_subsample_features, replace=False)
+                X = X.iloc[:, feature_choices]
+
+            if c.eval_subsample_samples is not None and len(X) > c.eval_subsample_samples:
+                _, X, _, y = train_test_split(X, y, test_size=c.eval_subsample_samples, stratify=y, random_state=c.seed)
+                X = X.reset_index(drop=True)
+                y = y.reset_index(drop=True)
+
+            cv = StratifiedKFold(n_splits=c.eval_folds, shuffle=True, random_state=c.seed)
+
+            targets = []
+            probabilities = []
+
+            for _, (train_indices, test_indices) in enumerate(cv.split(X, y)):
+                X_train = X.iloc[train_indices].to_numpy()
+                y_train = y.iloc[train_indices].to_numpy()
+                X_test = X.iloc[test_indices].to_numpy()
+                y_test = y.iloc[test_indices].to_numpy()
+
+                label_encoder = LabelEncoder()
+                y_train = label_encoder.fit_transform(y_train)
+                y_test = label_encoder.transform(y_test)
+                targets.append(y_test)
+
+                clf.fit(X_train, y_train)
+                y_proba = clf.predict_proba(X_test)
+                if y_proba.shape[1] == 2:
+                    y_proba = y_proba[:, 1]
+                probabilities.append(y_proba)
+
+            y_true = np.concatenate(targets, axis=0)
+            y_proba = np.concatenate(probabilities, axis=0) if len(probabilities) > 0 else None
+
             auc = (
                 roc_auc_score(y_true, y_proba, multi_class="ovr")
                 if getattr(y_proba, "ndim", 1) > 1
