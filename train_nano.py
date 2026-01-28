@@ -1,9 +1,13 @@
 import os
+import sys
+
+with open(sys.argv[0], "r") as f:
+    code = f.read()
+
 import platform
 import random
 import socket
 import subprocess
-import sys
 import time
 import tomllib
 import uuid
@@ -72,9 +76,6 @@ e_dir = os.path.join(c.experiments_dir, e_id)
 os.makedirs(e_dir, exist_ok=True)
 log_path = os.path.join(e_dir, f"{e_id}-log.txt")
 ckpt_path = os.path.join(e_dir, f"{e_id}-ckpt.pth")
-
-with open(sys.argv[0], "r") as f:
-    code = f.read()
 
 with open("pyproject.toml", "rb") as f:
     version = tomllib.load(f)["project"]["version"]
