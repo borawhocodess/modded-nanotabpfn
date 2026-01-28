@@ -13,7 +13,6 @@ import tomllib
 import uuid
 from dataclasses import dataclass, fields
 from datetime import datetime
-from typing import Tuple
 
 import h5py
 import numpy as np
@@ -145,7 +144,7 @@ TABARENA_CLASSIFICATION_TASKS = [
 
 
 class NanoTabPFNModel(nn.Module):
-    def __init__(self, l: int, a: int, e: int, h: int, o: int):
+    def __init__(self, l, a, e, h, o):
         """
         l : num layers
         a : num attention heads
@@ -166,7 +165,7 @@ class NanoTabPFNModel(nn.Module):
 
         self.register_buffer("borders", None, persistent=True)
 
-    def forward(self, *args, **kwargs) -> torch.Tensor:
+    def forward(self, *args, **kwargs):
         if len(args) == 3:
             x = args[0]
             if args[2] is not None:
@@ -175,7 +174,7 @@ class NanoTabPFNModel(nn.Module):
         elif len(args) == 1 and isinstance(args[0], tuple):
             return self._forward(*args, **kwargs)
 
-    def _forward(self, src: Tuple[torch.Tensor, torch.Tensor], sep: int) -> torch.Tensor:
+    def _forward(self, src, sep):
         x_src, y_src = src
         if len(y_src.shape) < len(x_src.shape):
             y_src = y_src.unsqueeze(-1)
@@ -190,11 +189,11 @@ class NanoTabPFNModel(nn.Module):
 
 
 class FeatureEncoder(nn.Module):
-    def __init__(self, e: int):
+    def __init__(self, e):
         super().__init__()
         self.linear_layer = nn.Linear(1, e)
 
-    def forward(self, x: torch.Tensor, sep: int) -> torch.Tensor:
+    def forward(self, x, sep):
         x = x.unsqueeze(-1)
         mean = x[:, :sep].mean(dim=1, keepdim=True)
         std = x[:, :sep].std(dim=1, keepdim=True) + 1e-8
@@ -204,11 +203,11 @@ class FeatureEncoder(nn.Module):
 
 
 class TargetEncoder(nn.Module):
-    def __init__(self, e: int):
+    def __init__(self, e):
         super().__init__()
         self.linear_layer = nn.Linear(1, e)
 
-    def forward(self, y_train: torch.Tensor, num_rows: int) -> torch.Tensor:
+    def forward(self, y_train, num_rows):
         mean = y_train.mean(dim=1, keepdim=True)
         padding = mean.repeat(1, num_rows - y_train.shape[1], 1)
         y = torch.cat([y_train, padding], dim=1)
@@ -217,20 +216,20 @@ class TargetEncoder(nn.Module):
 
 
 class TransformerEncoderStack(nn.Module):
-    def __init__(self, l: int, a: int, e: int, h: int):
+    def __init__(self, l, a, e, h):
         super().__init__()
         self.transformer_blocks = nn.ModuleList()
         for _ in range(l):
             self.transformer_blocks.append(TransformerEncoderLayer(a, e, h))
 
-    def forward(self, x: torch.Tensor, sep: int) -> torch.Tensor:
+    def forward(self, x, sep):
         for block in self.transformer_blocks:
             x = block(x, sep=sep)
         return x
 
 
 class TransformerEncoderLayer(nn.Module):
-    def __init__(self, a: int, e: int, h: int, eps: float = 1e-5, batch_first: bool = True, device=None, dtype=None):
+    def __init__(self, a, e, h, eps=1e-5, batch_first=True, device=None, dtype=None):
         super().__init__()
         self.a_datapoints = nn.MultiheadAttention(e, a, batch_first=batch_first, device=device, dtype=dtype)
         self.a_features = nn.MultiheadAttention(e, a, batch_first=batch_first, device=device, dtype=dtype)
@@ -242,7 +241,7 @@ class TransformerEncoderLayer(nn.Module):
         self.norm2 = nn.LayerNorm(e, eps=eps, device=device, dtype=dtype)
         self.norm3 = nn.LayerNorm(e, eps=eps, device=device, dtype=dtype)
 
-    def forward(self, src: torch.Tensor, sep: int) -> torch.Tensor:
+    def forward(self, src, sep):
         batch_size, rows_size, col_size, e = src.shape
         src = src.reshape(batch_size * rows_size, col_size, e)
 
@@ -267,12 +266,12 @@ class TransformerEncoderLayer(nn.Module):
 
 
 class Decoder(nn.Module):
-    def __init__(self, e: int, h: int, o: int):
+    def __init__(self, e, h, o):
         super().__init__()
         self.linear1 = nn.Linear(e, h)
         self.linear2 = nn.Linear(h, o)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x):
         return self.linear2(F.gelu(self.linear1(x)))
 
 
@@ -350,7 +349,7 @@ def to_numeric(x):
     return x.apply(pd.to_numeric, errors="coerce").to_numpy()
 
 
-def get_feature_preprocessor(X: np.ndarray | pd.DataFrame) -> ColumnTransformer:
+def get_feature_preprocessor(X):
     X = pd.DataFrame(X)
     num_mask = []
     cat_mask = []
@@ -389,7 +388,7 @@ def get_feature_preprocessor(X: np.ndarray | pd.DataFrame) -> ColumnTransformer:
 
 
 class NanoTabPFNClassifier:
-    def __init__(self, model: NanoTabPFNModel | str | None = None):
+    def __init__(self, model=None):
         device = "cuda"
         if model is None:
             raise ValueError("model is None")
@@ -398,17 +397,17 @@ class NanoTabPFNClassifier:
         self.model = model.to(device)
         self.device = device
 
-    def fit(self, X_train: np.ndarray, y_train: np.ndarray):
+    def fit(self, X_train, y_train):
         self.feature_preprocessor = get_feature_preprocessor(X_train)
         self.X_train = self.feature_preprocessor.fit_transform(X_train)
         self.y_train = y_train
         self.num_classes = max(set(y_train)) + 1
 
-    def predict(self, X_test: np.ndarray) -> np.ndarray:
+    def predict(self, X_test):
         predicted_probabilities = self.predict_proba(X_test)
         return predicted_probabilities.argmax(axis=1)
 
-    def predict_proba(self, X_test: np.ndarray) -> np.ndarray:
+    def predict_proba(self, X_test):
         x = np.concatenate((self.X_train, self.feature_preprocessor.transform(X_test)))
         y = self.y_train
         with torch.no_grad():
@@ -491,7 +490,7 @@ for epoch in range(1, c.epochs + 1):
 
     if (epoch == 1) or (epoch == c.epochs) or (epoch % c.eval_every == 0):
         clf = NanoTabPFNClassifier(model)
-        aucs: list[float] = []
+        aucs = []
 
         for task_id in TABARENA_CLASSIFICATION_TASKS:
             task = openml.tasks.get_task(task_id, download_splits=False)
