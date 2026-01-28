@@ -515,7 +515,7 @@ c.o = prior.max_num_classes
 
 model = NanoTabPFNModel(l=c.l, a=c.a, e=c.e, h=c.h, o=c.o).to(device)
 
-optimizer = schedulefree.AdamWScheduleFree(model.parameters(), lr=c.lr, weight_decay=0.0)
+optimizer = schedulefree.AdamWScheduleFree(model.parameters(), lr=c.lr, weight_decay=0.0, warmup_steps=1000)
 
 criterion = nn.CrossEntropyLoss()
 
@@ -530,20 +530,19 @@ for epoch in range(1, c.epochs + 1):
     num_valid = 0
     for i, full_data in enumerate(prior):
         sep = full_data["sep"]
-        data = (
-            full_data["x"].to(device),
-            full_data["y"][:, :sep].to(device),
-        )
-        if torch.isnan(data[0]).any() or torch.isnan(data[1]).any():
+        x = full_data["x"]
+        y = full_data["y"][:, :sep]
+        targets = full_data["target_y"][:, sep:]
+
+        if torch.isnan(x).any() or torch.isnan(y).any():
             continue
         num_valid += 1
 
-        targets = full_data["target_y"].to(device)
+        optimizer.zero_grad(set_to_none=True)
 
-        output = model(data, sep=sep)
-        targets = targets[:, sep:]
+        output = model((x, y), sep=sep)
+        output = output.reshape(-1, output.shape[-1])
         targets = targets.reshape((-1,)).to(torch.long)
-        output = output.view(-1, output.shape[-1])
 
         loss = criterion(output, targets)
         loss.backward()
@@ -552,7 +551,6 @@ for epoch in range(1, c.epochs + 1):
 
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
-        optimizer.zero_grad()
 
     torch.cuda.synchronize()
     e_t = time.perf_counter() - t0  # epoch time
@@ -562,8 +560,9 @@ for epoch in range(1, c.epochs + 1):
     mean_loss = total_loss / max(num_valid, 1)
 
     print0(
-        f"[{datetime.now().strftime("%H:%M:%S")}] "
+        f"[{datetime.now().strftime('%H:%M:%S')}] "
         f"e:{epoch}/{c.epochs} μ_l:{mean_loss:.2f} "
+        f"({c.steps}-{num_valid}={c.steps - num_valid})"
         f"e_t:{e_t:.2f}s μ_e_t:{mu_e_t:.2f}s t_t:{t_t:.2f}s",
         console=True,
     )
