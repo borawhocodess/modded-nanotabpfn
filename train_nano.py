@@ -128,7 +128,7 @@ class NanoTabPFNModel(nn.Module):
             if args[2] is not None:
                 x = torch.cat((x, args[2]), dim=1)
             return self._forward((x, args[1]), sep=args[0].shape[1], **kwargs)
-        elif len(args) == 1 and isinstance(args, tuple):
+        elif len(args) == 1 and isinstance(args[0], tuple):
             return self._forward(*args, **kwargs)
 
     def _forward(self, src: Tuple[torch.Tensor, torch.Tensor], sep: int) -> torch.Tensor:
