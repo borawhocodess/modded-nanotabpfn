@@ -370,13 +370,13 @@ def get_feature_preprocessor(X: np.ndarray | pd.DataFrame) -> ColumnTransformer:
             ("to_pandas", FunctionTransformer(to_pandas)),
             ("to_numeric", FunctionTransformer(to_numeric)),
             ("imputer", SimpleImputer(strategy="mean")),
-        ]
+        ],
     )
     cat_transformer = Pipeline(
         [
             ("encoder", OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=np.nan)),
             ("imputer", SimpleImputer(strategy="most_frequent")),
-        ]
+        ],
     )
 
     preprocessor = ColumnTransformer(
