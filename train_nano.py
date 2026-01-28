@@ -23,7 +23,7 @@ from openml.tasks import TaskType
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import roc_auc_score
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import StratifiedKFold, train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer, LabelEncoder, OrdinalEncoder
 from torch import nn
@@ -460,17 +460,16 @@ def get_openml_predictions(
 
         len_features = X.shape[1]
         if max_features_subsample is not None and len_features > max_features_subsample:
-            rng = np.random.default_rng(c.seed + task_id)
+            rng = np.random.default_rng(c.seed)
             feature_choices = rng.choice(len_features, size=max_features_subsample, replace=False)
             X = X.iloc[:, feature_choices]
 
         if max_samples_subsample is not None and len(X) > max_samples_subsample:
-            rng = np.random.default_rng(c.seed + task_id)
-            sample_choices = rng.choice(len(X), size=max_samples_subsample, replace=False)
-            X = X.iloc[sample_choices].reset_index(drop=True)
-            y = y.iloc[sample_choices].reset_index(drop=True)
+            _, X, _, y = train_test_split(X, y, test_size=max_samples_subsample, stratify=y, random_state=c.seed)
+            X = X.reset_index(drop=True)
+            y = y.reset_index(drop=True)
 
-        cv = StratifiedKFold(n_splits=folds, shuffle=True, random_state=c.seed + task_id)
+        cv = StratifiedKFold(n_splits=folds, shuffle=True, random_state=c.seed)
 
         targets = []
         predictions = []
