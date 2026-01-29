@@ -23,6 +23,7 @@ import torch
 import torch.nn.functional as F
 from openml.tasks import TaskType
 from sklearn.compose import ColumnTransformer
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import StratifiedKFold, train_test_split
@@ -55,7 +56,7 @@ class Config:
     eval_folds: int = 5
     eval_subsample_samples: int | None = 1000
     eval_subsample_features: int | None = 100
-    jackpot: float = 0.8  # random baseline
+    jackpot: float = 0.8068462330697953  # random forest baseline
 
 
 c = Config()
@@ -419,6 +420,27 @@ class NanoTabPFNClassifier:
             return probabilities.to("cpu").numpy()
 
 
+class RandomForestBaseline:
+    def __init__(self, random_state: int | None = None):
+        self.random_state = random_state
+        self.feature_preprocessor = None
+        self.clf = None
+
+    def fit(self, X_train: np.ndarray, y_train: np.ndarray):
+        self.feature_preprocessor = get_feature_preprocessor(X_train)
+        X_train = self.feature_preprocessor.fit_transform(X_train)
+        self.clf = RandomForestClassifier(random_state=self.random_state, n_jobs=-1)
+        self.clf.fit(X_train, y_train)
+
+    def predict(self, X_test: np.ndarray) -> np.ndarray:
+        X_test = self.feature_preprocessor.transform(X_test)
+        return self.clf.predict(X_test)
+
+    def predict_proba(self, X_test: np.ndarray) -> np.ndarray:
+        X_test = self.feature_preprocessor.transform(X_test)
+        return self.clf.predict_proba(X_test)
+
+
 # -----------------------------------------------------------------------------
 # main
 
@@ -491,6 +513,9 @@ for epoch in range(1, c.epochs + 1):
     if (epoch == 1) or (epoch == c.epochs) or (epoch % c.eval_every == 0):
         clf = NanoTabPFNClassifier(model)
         aucs = []
+        run_rf_baseline = epoch == 1
+        rf_clf = RandomForestBaseline(random_state=c.seed) if run_rf_baseline else None
+        rf_aucs = [] if run_rf_baseline else None
 
         for task_id in TABARENA_CLASSIFICATION_TASKS:
             task = openml.tasks.get_task(task_id, download_splits=False)
@@ -516,6 +541,8 @@ for epoch in range(1, c.epochs + 1):
 
             targets = []
             probabilities = []
+            rf_targets = [] if run_rf_baseline else None
+            rf_probabilities = [] if run_rf_baseline else None
 
             for _, (train_indices, test_indices) in enumerate(cv.split(X, y)):
                 X_train = X.iloc[train_indices].to_numpy()
@@ -534,6 +561,14 @@ for epoch in range(1, c.epochs + 1):
                     y_proba = y_proba[:, 1]
                 probabilities.append(y_proba)
 
+                if run_rf_baseline:
+                    rf_clf.fit(X_train, y_train)
+                    rf_y_proba = rf_clf.predict_proba(X_test)
+                    if rf_y_proba.shape[1] == 2:
+                        rf_y_proba = rf_y_proba[:, 1]
+                    rf_targets.append(y_test)
+                    rf_probabilities.append(rf_y_proba)
+
             y_true = np.concatenate(targets, axis=0)
             y_proba = np.concatenate(probabilities, axis=0) if len(probabilities) > 0 else None
 
@@ -543,8 +578,21 @@ for epoch in range(1, c.epochs + 1):
                 else roc_auc_score(y_true, y_proba)
             )
             aucs.append(auc)
+
+            if run_rf_baseline:
+                rf_y_true = np.concatenate(rf_targets, axis=0)
+                rf_y_proba = np.concatenate(rf_probabilities, axis=0) if len(rf_probabilities) > 0 else None
+                rf_auc = (
+                    roc_auc_score(rf_y_true, rf_y_proba, multi_class="ovr")
+                    if getattr(rf_y_proba, "ndim", 1) > 1
+                    else roc_auc_score(rf_y_true, rf_y_proba)
+                )
+                rf_aucs.append(rf_auc)
         avg_auc = (sum(aucs) / len(aucs)) if len(aucs) > 0 else float("nan")
         print0(f"avg_roc_auc:{avg_auc}", console=True)
+        if run_rf_baseline:
+            avg_rf_auc = (sum(rf_aucs) / len(rf_aucs)) if len(rf_aucs) > 0 else float("nan")
+            print0(f"avg_rf_roc_auc:{avg_rf_auc}", console=True)
 
         if avg_auc >= c.jackpot:
             ckpt = {
