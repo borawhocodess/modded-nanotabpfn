@@ -27,6 +27,12 @@ COLUMNS = [
         "attr": "total_time",
         "header": "total_time",
     },
+    {
+        "key": "total_time_min",
+        "flag": "--mins",
+        "attr": "mins",
+        "header": "in_mins",
+    },
 ]
 
 COLUMN_BY_KEY = {col["key"]: col for col in COLUMNS}
@@ -39,7 +45,6 @@ def parse_log(log_path):
     last_t_t = None
     first_clock = None
     last_clock = None
-
     try:
         with log_path.open("r", encoding="utf-8", errors="ignore") as f:
             for line in f:
@@ -138,10 +143,12 @@ def unique(items):
 
 
 def column_values(exp_id, hostname, total_time):
+    total_time_min = "-" if total_time is None else f"{total_time / 60:.2f}m"
     return {
         "experiment_id": exp_id,
         "hostname": hostname or "-",
         "total_time": "-" if total_time is None else f"{total_time:.2f}s",
+        "total_time_min": total_time_min,
     }
 
 
