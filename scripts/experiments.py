@@ -33,6 +33,12 @@ COLUMNS = [
         "attr": "mins",
         "header": "in_mins",
     },
+    {
+        "key": "status",
+        "flag": "--status",
+        "attr": "status",
+        "header": "status",
+    },
 ]
 
 COLUMN_BY_KEY = {col["key"]: col for col in COLUMNS}
@@ -45,9 +51,14 @@ def parse_log(log_path):
     last_t_t = None
     first_clock = None
     last_clock = None
+    completed = False
+
     try:
         with log_path.open("r", encoding="utf-8", errors="ignore") as f:
             for line in f:
+                if line.strip().startswith("experiment done:"):
+                    completed = True
+
                 if hostname is None:
                     match = HOST_RE.match(line)
                     if match:
@@ -88,7 +99,7 @@ def parse_log(log_path):
             last_clock += 24 * 3600
         total_time = float(last_clock - first_clock)
 
-    return hostname, total_time
+    return hostname, total_time, completed
 
 
 def pick_log_file(exp_dir):
@@ -142,13 +153,14 @@ def unique(items):
     return out
 
 
-def column_values(exp_id, hostname, total_time):
+def column_values(exp_id, hostname, total_time, completed):
     total_time_min = "-" if total_time is None else f"{total_time / 60:.2f}m"
     return {
         "experiment_id": exp_id,
         "hostname": hostname or "-",
         "total_time": "-" if total_time is None else f"{total_time:.2f}s",
         "total_time_min": total_time_min,
+        "status": "completed" if completed else "uncompleted",
     }
 
 
@@ -174,10 +186,11 @@ def main():
         log_path = pick_log_file(exp_dir)
         hostname = None
         total_time = None
+        completed = False
         if log_path is not None:
-            hostname, total_time = parse_log(log_path)
+            hostname, total_time, completed = parse_log(log_path)
 
-        values = column_values(exp_id, hostname, total_time)
+        values = column_values(exp_id, hostname, total_time, completed)
         row = [str(idx)] + [values[key] for key in columns]
         rows.append(row)
 
