@@ -53,6 +53,9 @@ class Config:
     l: int = 6
     o: int | None = None
     eval_every: int = 100
+    eval_probe_start: int | None = 1200
+    eval_probe_end: int | None = 1300
+    eval_probe_every: int = 1
     eval_folds: int = 5
     eval_subsample_samples: int | None = 1000
     eval_subsample_features: int | None = 100
@@ -461,6 +464,17 @@ criterion = nn.CrossEntropyLoss()
 
 t_t = 0.0
 
+
+def should_eval(epoch: int) -> bool:
+    if (epoch == 1) or (epoch == c.epochs):
+        return True
+    if c.eval_probe_start is not None and c.eval_probe_end is not None:
+        if c.eval_probe_start <= epoch <= c.eval_probe_end:
+            probe_every = max(1, int(c.eval_probe_every))
+            return (epoch - c.eval_probe_start) % probe_every == 0
+    return (epoch % c.eval_every) == 0
+
+
 for epoch in range(1, c.epochs + 1):
     torch.cuda.synchronize()
     t0 = time.perf_counter()
@@ -510,7 +524,7 @@ for epoch in range(1, c.epochs + 1):
     model.eval()
     optimizer.eval()
 
-    if (epoch == 1) or (epoch == c.epochs) or (epoch % c.eval_every == 0):
+    if should_eval(epoch):
         clf = NanoTabPFNClassifier(model)
         aucs = []
         run_rf_baseline = epoch == 1

@@ -1,7 +1,9 @@
 import argparse
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
+from statistics import mean, median, pstdev
 
 HOST_RE = re.compile(r"^\s*host:\s*(.+?)\s*$")
 TT_RE = re.compile(r"\bt_t:([0-9]+(?:\.[0-9]+)?)s\b")
@@ -33,12 +35,6 @@ COLUMNS = [
         "attr": "mins",
         "header": "in_mins",
     },
-    {
-        "key": "status",
-        "flag": "--status",
-        "attr": "status",
-        "header": "status",
-    },
 ]
 
 COLUMN_BY_KEY = {col["key"]: col for col in COLUMNS}
@@ -51,14 +47,10 @@ def parse_log(log_path):
     last_t_t = None
     first_clock = None
     last_clock = None
-    completed = False
 
     try:
         with log_path.open("r", encoding="utf-8", errors="ignore") as f:
             for line in f:
-                if line.strip().startswith("experiment done:"):
-                    completed = True
-
                 if hostname is None:
                     match = HOST_RE.match(line)
                     if match:
@@ -99,7 +91,7 @@ def parse_log(log_path):
             last_clock += 24 * 3600
         total_time = float(last_clock - first_clock)
 
-    return hostname, total_time, completed
+    return hostname, total_time
 
 
 def pick_log_file(exp_dir):
@@ -153,15 +145,105 @@ def unique(items):
     return out
 
 
-def column_values(exp_id, hostname, total_time, completed):
+def column_values(exp_id, hostname, total_time):
     total_time_min = "-" if total_time is None else f"{total_time / 60:.2f}m"
     return {
         "experiment_id": exp_id,
         "hostname": hostname or "-",
         "total_time": "-" if total_time is None else f"{total_time:.2f}s",
         "total_time_min": total_time_min,
-        "status": "completed" if completed else "uncompleted",
     }
+
+
+def save_plot(values, out_path):
+    values = [v for v in values if v is not None]
+    if len(values) < 2:
+        return None
+    try:
+        import matplotlib.pyplot as plt
+    except Exception:
+        return None
+
+    x = list(range(1, len(values) + 1))
+    plt.figure(figsize=(8, 4))
+    plt.plot(x, values, marker="o", linewidth=1.5)
+    plt.xticks(x)
+    plt.xlabel("experiment")
+    plt.ylabel("total_time (s)")
+    add_stat_lines(plt, values)
+    plt.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(out_path)
+    plt.close()
+    return out_path
+
+
+def save_plot_grouped(series_by_host, out_path):
+    if "__scatter__" in series_by_host:
+        points = [(h, v) for h, v in series_by_host["__scatter__"] if v is not None]
+        if len(points) < 2:
+            return None
+        try:
+            import matplotlib.pyplot as plt
+        except Exception:
+            return None
+        hosts = [h for h, _ in points]
+        vals = [v for _, v in points]
+        plt.figure(figsize=(9, 4.5))
+        plt.scatter(hosts, vals, s=20, alpha=0.7)
+        plt.xlabel("hostname")
+        plt.ylabel("total_time (s)")
+        add_stat_lines(plt, vals)
+        plt.tight_layout()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(out_path)
+        plt.close()
+        return out_path
+
+    series_by_host = {k: [v for v in vs if v is not None] for k, vs in series_by_host.items()}
+    series_by_host = {k: v for k, v in series_by_host.items() if len(v) >= 2}
+    if not series_by_host:
+        return None
+    try:
+        import matplotlib.pyplot as plt
+    except Exception:
+        return None
+
+    plt.figure(figsize=(9, 4.5))
+    max_len = 0
+    for host, values in sorted(series_by_host.items()):
+        x = list(range(1, len(values) + 1))
+        max_len = max(max_len, len(values))
+        plt.plot(x, values, marker="o", linewidth=1.2, label=host)
+    if max_len:
+        plt.xticks(list(range(1, max_len + 1)))
+    plt.xlabel("experiment")
+    plt.ylabel("total_time (s)")
+    all_vals = [v for series in series_by_host.values() for v in series if v is not None]
+    add_stat_lines(plt, all_vals)
+    plt.legend(loc="best", fontsize="small")
+    plt.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(out_path)
+    plt.close()
+    return out_path
+
+
+def add_stat_lines(plt, values):
+    if len(values) < 2:
+        return
+    mu = mean(values)
+    sigma = pstdev(values)
+    med = median(values)
+    plt.axhline(y=mu, linestyle="-", linewidth=1.4, alpha=0.8)
+    plt.axhline(y=med, linestyle=":", linewidth=1.1, alpha=0.7, color="purple")
+    plt.axhline(y=mu + sigma, linestyle="--", linewidth=0.9, alpha=0.6)
+    plt.axhline(y=mu - sigma, linestyle="--", linewidth=0.9, alpha=0.6)
+    plt.axhline(y=mu + 2 * sigma, linestyle="--", linewidth=0.8, alpha=0.5)
+    plt.axhline(y=mu - 2 * sigma, linestyle="--", linewidth=0.8, alpha=0.5)
+    ticks = [mu, mu + sigma, mu - sigma, mu + 2 * sigma, mu - 2 * sigma]
+    ticks = sorted(ticks)
+    plt.yticks(ticks)
 
 
 def main():
@@ -169,6 +251,11 @@ def main():
     parser.add_argument("--experiments-dir", default="workdir/experiments")
     for col in COLUMNS:
         parser.add_argument(col["flag"], action="store_true")
+    parser.add_argument("--plot", action="store_true")
+    parser.add_argument("--group-host", action="store_true")
+    parser.add_argument("--x-host", action="store_true", help="use hostname on x-axis (no aggregation)")
+    parser.add_argument("--sort", action="store_true", help="sort by total_time ascending")
+    parser.add_argument("--exclude", default="", help="comma-separated experiment ids to exclude")
     args = parser.parse_args()
 
     requested = [col["key"] for col in COLUMNS if getattr(args, col["attr"])]
@@ -180,27 +267,71 @@ def main():
 
     experiments_dir = Path(args.experiments_dir)
     rows = []
+    times = []
+    times_by_host = {}
+
+    exclude_ids = {e.strip() for e in args.exclude.split(",") if e.strip()}
 
     for idx, exp_dir in enumerate(iter_experiments(experiments_dir), start=1):
         exp_id = exp_dir.name
+        if exp_id in exclude_ids:
+            continue
         log_path = pick_log_file(exp_dir)
         hostname = None
         total_time = None
-        completed = False
         if log_path is not None:
-            hostname, total_time, completed = parse_log(log_path)
+            hostname, total_time = parse_log(log_path)
 
-        values = column_values(exp_id, hostname, total_time, completed)
-        row = [str(idx)] + [values[key] for key in columns]
-        rows.append(row)
+        values = column_values(exp_id, hostname, total_time)
+        rows.append((total_time, [str(idx)] + [values[key] for key in columns]))
+        times.append(total_time)
+        if hostname:
+            times_by_host.setdefault(hostname, []).append(total_time)
 
-    headers = ["#"] + [COLUMN_BY_KEY[key]["header"] for key in columns]
+    if args.sort:
+        rows.sort(key=lambda r: float("inf") if r[0] is None else r[0])
+        rows = [[str(i + 1)] + row for i, (_, row) in enumerate(rows)]
+        headers = ["##", "#"] + [COLUMN_BY_KEY[key]["header"] for key in columns]
+    else:
+        rows = [row for _, row in rows]
+        headers = ["#"] + [COLUMN_BY_KEY[key]["header"] for key in columns]
 
     if not rows:
         print("No experiments found.")
         return 1
 
     print(make_table(headers, rows))
+    stats_values = [t for t in times if t is not None]
+    if stats_values:
+        mu = mean(stats_values)
+        sigma = pstdev(stats_values)
+        med = median(stats_values)
+        print("\nstatistics:")
+        print(f"mean: {mu:.2f}s")
+        print(f"std: {sigma:.2f}s")
+        print(f"median: {med:.2f}s")
+
+    if args.plot:
+        ts = datetime.now().strftime("%y%m%d-%H%M%S")
+        suffix = "hostplot" if args.group_host else "expplot"
+        out_path = Path("workdir/plots") / f"{ts}-{suffix}.png"
+        if args.group_host and args.x_host:
+            flat_hosts = []
+            flat_times = []
+            for host, series in sorted(times_by_host.items()):
+                for v in series:
+                    if v is not None:
+                        flat_hosts.append(host)
+                        flat_times.append(v)
+            saved = save_plot_grouped({"__scatter__": list(zip(flat_hosts, flat_times))}, out_path)
+        elif args.group_host:
+            saved = save_plot_grouped(times_by_host, out_path)
+        else:
+            saved = save_plot(times, out_path)
+        if saved:
+            print(f"plot: {saved}")
+        else:
+            print("plot: matplotlib missing or not enough data")
     return 0
 
 

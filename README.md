@@ -5,8 +5,8 @@ This repository hosts the nanoTabPFN speedrun, in which we search for the fastes
 The code is derived from [nanoTabPFN](https://github.com/automl/nanoTabPFN) with the inspiration of [modded-nanogpt](https://github.com/KellerJordan/modded-nanogpt).
 
 This repo now contains a training algorithm which attains the target performance in:
-* ___TODO___ minutes on 1xL40S (baseline needed __TODO_BASELINE__ minutes)
-* ___TODO___ synthetic datasets (baseline needed __TODO_BASELINE__)
+* ___TODO___ minutes on 1xL40S (baseline needed 74.25 minutes)
+* ___TODO___ synthetic datasets (baseline needed 80576)
 
 with the help of the following techniques:
 * ___TODO___
@@ -27,13 +27,13 @@ uv sync
 
 The following is the historical progression of speed records for the following task:
 
-> *Pretrain a neural network to ≤__TODO_BASELINE__ validation average ROC AUC on subsampled TabArena using 1 NVIDIA L40S.*
+> *Pretrain a neural network to ≤0.8068462330697953 validation average ROC AUC on subsampled TabArena using 1 NVIDIA L40S.*
 
-Note: The __TODO_BASELINE__ target was selected to match the performance of Random Forest on the same subsampled TabArena evaluation.
+Note: The 0.8068462330697953 target was selected to match the performance of Random Forest on the same subsampled TabArena evaluation.
 
 | # | Record time | Date | Description | Log |
 | - | - | - | - | - |
-1 | __TODO_BASELINE__ minutes | __TODO_BASELINE__/01/26 | baseline | [log](records/__TODO_BASELINE__)
+| 1 | 74.25 minutes | 31/01/26 | Baseline | [log](records/20260131baseline) |
 
 
 ## Evaluation details
