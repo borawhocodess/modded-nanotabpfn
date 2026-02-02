@@ -52,9 +52,9 @@ class Config:
     l: int = 6
     o: int | None = None
     eval_every: int = 100
-    eval_probe_start: int | None = 1000
-    eval_probe_end: int | None = 1300
-    eval_probe_every: int = 10
+    eval_probe_start: int | None = 900
+    eval_probe_end: int | None = 1000
+    eval_probe_every: int = 1
     eval_folds: int = 5
     eval_subsample_samples: int | None = 1000
     eval_subsample_features: int | None = 100
@@ -140,6 +140,67 @@ TABARENA_CLASSIFICATION_TASKS = [
     363711,  # (  1699,  112) MIC
     363712,  # ( 10885,   22) jm1
 ]
+
+
+# -----------------------------------------------------------------------------
+# muon
+
+
+def zeropower_via_svd(G, steps=None):
+    U, S, V = G.svd()
+    return U @ V.T
+
+@torch.compile
+def zeropower_via_newtonschulz5(G, steps=10, eps=1e-7):
+    assert len(G.shape) == 2
+    a, b, c = (3.4445, -4.7750,  2.0315)
+    X = G.bfloat16() # TODO: try with L40S
+    X /= (X.norm() + eps) # ensure top singular value <= 1
+    if G.size(0) > G.size(1):
+        X = X.T
+    for _ in range(steps):
+        A = X @ X.T
+        B = A @ X
+        X = a * X + b * B + c * A @ B
+    if G.size(0) > G.size(1):
+        X = X.T
+    return X.to(G.dtype)
+
+zeropower_backends = dict(svd=zeropower_via_svd, newtonschulz5=zeropower_via_newtonschulz5)
+
+class Muon(torch.optim.Optimizer):
+    """
+    code adapted from: https://github.com/KellerJordan/modded-nanogpt/commit/b356a1f
+    """
+    def __init__(self, params, lr=3e-4, momentum=0.95, nesterov=True, backend='newtonschulz5', backend_steps=5):
+        defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, backend=backend, backend_steps=backend_steps)
+        super().__init__(params, defaults)
+
+    def step(self):
+        for group in self.param_groups:
+            lr = group['lr']
+            momentum = group['momentum']
+            zeropower_backend = zeropower_backends[group['backend']]
+            for p in group['params']:
+                g = p.grad
+                if g is None:
+                    continue
+                state = self.state[p]
+                if 'momentum_buffer' not in state:
+                    state['momentum_buffer'] = torch.zeros_like(g)
+                buf = state['momentum_buffer']
+                buf.mul_(momentum).add_(g)
+                if group['nesterov']:
+                    g = g.add(buf, alpha=momentum)
+                if g.size(0) == 3 * g.size(1): # split grouped QKV parameters
+                    g = torch.cat([zeropower_backend(g1, steps=group['backend_steps']) for g1 in g.split(g.size(1))])
+                    scale = g.size(1)**0.5
+                else:
+                    g = zeropower_backend(g, steps=group['backend_steps'])
+                    scale = max(g.size(0), g.size(1))**0.5 # scale to have update.square().mean() == 1
+                p.data.add_(g, alpha=-lr * scale)
+
+
 
 
 # -----------------------------------------------------------------------------
@@ -436,7 +497,20 @@ c.o = prior.max_num_classes
 
 model = NanoTabPFNModel(l=c.l, a=c.a, e=c.e, h=c.h, o=c.o).to(device)
 
-optimizer = schedulefree.AdamWScheduleFree(model.parameters(), lr=c.lr, weight_decay=0.0, warmup_steps=1000)
+muon_params = []
+adam_params = []
+for name, p in model.named_parameters():
+    if p.ndim != 2:
+        adam_params.append(p)
+    elif "transformer_encoder" in name:
+        muon_params.append(p)
+    else:
+        adam_params.append(p)
+
+optimizer_muon = Muon(muon_params, lr=0.1*c.lr, momentum=0.95)
+optimizer_adam = schedulefree.AdamWScheduleFree(adam_params, lr=c.lr, weight_decay=0.0, warmup_steps=1000)
+
+optimizers = [optimizer_muon, optimizer_adam]
 
 criterion = nn.CrossEntropyLoss()
 
@@ -457,7 +531,7 @@ for epoch in range(1, c.epochs + 1):
     torch.cuda.synchronize()
     t0 = time.perf_counter()
     model.train()
-    optimizer.train()
+    optimizer_adam.train()
     total_loss = 0.0
     num_valid = 0
     for i, full_data in enumerate(prior):
@@ -470,7 +544,8 @@ for epoch in range(1, c.epochs + 1):
             continue
         num_valid += 1
 
-        optimizer.zero_grad(set_to_none=True)
+        for opt in optimizers:
+            opt.zero_grad(set_to_none=True)
 
         output = model((x, y), sep=sep)
         output = output.reshape(-1, output.shape[-1])
@@ -482,7 +557,8 @@ for epoch in range(1, c.epochs + 1):
         total_loss += loss.detach().cpu().item()
 
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
+        for opt in optimizers:
+            opt.step()
 
     torch.cuda.synchronize()
     e_t = time.perf_counter() - t0  # epoch time
@@ -500,7 +576,7 @@ for epoch in range(1, c.epochs + 1):
     )
 
     model.eval()
-    optimizer.eval()
+    optimizer_adam.eval()
 
     if should_eval(epoch):
         clf = NanoTabPFNClassifier(model)

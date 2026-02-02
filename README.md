@@ -5,11 +5,11 @@ This repository hosts the nanoTabPFN speedrun, in which we search for the fastes
 The code is derived from [nanoTabPFN](https://github.com/automl/nanoTabPFN) with the inspiration of [modded-nanogpt](https://github.com/KellerJordan/modded-nanogpt).
 
 This repo now contains a training algorithm which attains the target performance in:
-* ___TODO___ minutes on 1xL40S (baseline needed 74.25 minutes)
-* ___TODO___ synthetic datasets (baseline needed 80576)
+* 69.15 minutes on 1xL40S (baseline needed 74.25 minutes)
+* 58176 synthetic datasets (baseline needed 80576)
 
 with the help of the following techniques:
-* ___TODO___
+* Muon optimizer
 
 
 ## Running the current record
@@ -34,6 +34,7 @@ Note: The 0.8068462330697953 target was selected to match the performance of Ran
 | # | Record time | Date | Description | Log |
 | - | - | - | - | - |
 | 1 | 74.25 minutes | 31/01/26 | Baseline | [log](records/20260131baseline) |
+| 2 | 69.15 minutes | 02/02/26 | Muon optimizer | [log](records/20260202muon) |
 
 
 ## Evaluation details
