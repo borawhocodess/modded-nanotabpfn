@@ -154,7 +154,7 @@ def zeropower_via_svd(G, steps=None):
 def zeropower_via_newtonschulz5(G, steps=10, eps=1e-7):
     assert len(G.shape) == 2
     a, b, c = (3.4445, -4.7750,  2.0315)
-    X = G.bfloat16() # TODO: try with L40S
+    X = G.bfloat16()
     X /= (X.norm() + eps) # ensure top singular value <= 1
     if G.size(0) > G.size(1):
         X = X.T
@@ -199,8 +199,6 @@ class Muon(torch.optim.Optimizer):
                     g = zeropower_backend(g, steps=group['backend_steps'])
                     scale = max(g.size(0), g.size(1))**0.5 # scale to have update.square().mean() == 1
                 p.data.add_(g, alpha=-lr * scale)
-
-
 
 
 # -----------------------------------------------------------------------------
@@ -360,15 +358,13 @@ class PriorDumpDataLoader(DataLoader):
 
     def __iter__(self):
         with h5py.File(self.filename, "r") as f:
-            self.data = f
-
             for _ in range(self.num_steps):
                 end = self.pointer + self.batch_size
 
-                num_features = self.data["num_features"][self.pointer : end].max()
-                x = torch.from_numpy(self.data["X"][self.pointer : end, :, :num_features])
-                y = torch.from_numpy(self.data["y"][self.pointer : end])
-                sep = self.data["single_eval_pos"][self.pointer : end]
+                num_features = f["num_features"][self.pointer : end].max()
+                x = torch.from_numpy(f["X"][self.pointer : end, :, :num_features])
+                y = torch.from_numpy(f["y"][self.pointer : end])
+                sep = f["single_eval_pos"][self.pointer : end]
 
                 self.pointer += self.batch_size
                 if self.pointer >= self.datasets:
