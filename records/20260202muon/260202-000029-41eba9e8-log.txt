@@ -1,0 +1,1653 @@
+import os
+import sys
+
+with open(sys.argv[0], "r") as f:
+    code = f.read()
+
+import platform
+import random
+import socket
+import subprocess
+import time
+import tomllib
+import uuid
+from dataclasses import dataclass, fields
+from datetime import datetime
+
+import h5py
+import numpy as np
+import openml
+import pandas as pd
+import schedulefree
+import torch
+import torch.nn.functional as F
+from openml.tasks import TaskType
+from sklearn.compose import ColumnTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.metrics import roc_auc_score
+from sklearn.model_selection import StratifiedKFold, train_test_split
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import FunctionTransformer, LabelEncoder, OrdinalEncoder
+from torch import nn
+from torch.utils.data import DataLoader
+
+
+# -----------------------------------------------------------------------------
+# config
+
+
+@dataclass
+class Config:
+    type: str = "classification"
+    experiments_dir: str = "workdir/experiments"
+    classification_dump: str = "workdir/dumps/dump-d256000b1r1000c20-8.h5"
+    seed: int = 11
+    batch_size: int = 1
+    lr: float = 1e-4
+    steps: int = 64  # step size
+    epochs: int = 4000
+    a: int = 6
+    e: int = 192
+    h: int = 768
+    l: int = 6
+    o: int | None = None
+    eval_every: int = 100
+    eval_probe_start: int | None = 900
+    eval_probe_end: int | None = 1000
+    eval_probe_every: int = 1
+    eval_folds: int = 5
+    eval_subsample_samples: int | None = 1000
+    eval_subsample_features: int | None = 100
+    jackpot: float = 0.8068462330697953  # random forest baseline
+
+
+c = Config()
+
+random.seed(c.seed)
+np.random.seed(c.seed)
+torch.manual_seed(c.seed)
+
+assert torch.cuda.is_available()
+
+device = "cuda"
+
+ts = datetime.now().strftime("%y%m%d-%H%M%S")
+uid = uuid.uuid4().hex[:8]
+e_id = f"{ts}-{uid}"
+e_dir = os.path.join(c.experiments_dir, e_id)
+os.makedirs(e_dir, exist_ok=True)
+log_path = os.path.join(e_dir, f"{e_id}-log.txt")
+ckpt_path = os.path.join(e_dir, f"{e_id}-ckpt.pth")
+
+with open("pyproject.toml", "rb") as f:
+    version = tomllib.load(f)["project"]["version"]
+
+
+def print0(s, console=False):
+    with open(log_path, "a") as f:
+        if console:
+            print(s)
+        print(s, file=f)
+
+
+print0(code)
+print0("=" * 100)
+print0(f"host: {socket.gethostname()}")
+print0(f"platform: {platform.platform()}")
+print0(f"python: {sys.version}")
+print0(f"torch: {torch.version.__version__}")
+print0(f"cuda: {torch.version.cuda}")
+print0(subprocess.run(["nvidia-smi"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True).stdout)
+print0("=" * 100)
+
+TABARENA_CLASSIFICATION_TASKS = [
+    363613,  # ( 32769,   10) Amazon_employee_access
+    363614,  # (   898,   39) anneal
+    363616,  # ( 76000,  171) APSFailure
+    363618,  # ( 45211,   14) bank-marketing
+    363619,  # ( 10000,   11) Bank_Customer_Churn
+    363620,  # (  3751, 1777) Bioresponse
+    363621,  # (   748,    5) blood-transfusion-service-center
+    363623,  # (  5000,   20) churn
+    363624,  # (  9822,   86) coil2000_insurance_policies
+    363626,  # (  1000,   21) credit-g
+    363627,  # ( 30000,   24) credit_card_clients_default
+    363628,  # (129880,   22) customer_satisfaction_in_airline
+    363629,  # (   768,    9) diabetes
+    363630,  # ( 71518,   48) Diabetes130US
+    363632,  # ( 10999,   11) E-CommereShippingData
+    363671,  # (  1500,    7) Fitness_Club
+    363673,  # (150000,   11) GiveMeSomeCredit
+    363674,  # (  2400,   31) hazelnut-spread-contaminant-detection
+    363676,  # ( 10459,   24) heloc
+    363677,  # (  3845, 1618) hiva_agnostic
+    363679,  # ( 19158,   13) HR_Analytics_Job_Change_of_Data_Scientists
+    363681,  # ( 12684,   25) in_vehicle_coupon_recommendation
+    363682,  # (  1723,   14) Is-this-a-good-customer
+    363683,  # ( 50000,  213) kddcup09_appetency
+    363684,  # (  2240,   26) Marketing_Campaign
+    363685,  # (  1014,    7) maternal_health_risk
+    363689,  # (  7491,   87) NATICUSdroid
+    363691,  # ( 12330,   18) online_shoppers_intention
+    363694,  # (  5910,   65) polish_companies_bankruptcy
+    363696,  # (  1054,   42) qsar-biodeg
+    363699,  # ( 78053,   12) SDSS17
+    363700,  # (  2584,   16) seismic-bumps
+    363702,  # (  3190,   61) splice
+    363704,  # (  4424,   37) students_dropout_and_academic_success
+    363706,  # (  6819,   95) taiwanese_bankruptcy_prediction
+    363707,  # (  1353,   10) website_phishing
+    363711,  # (  1699,  112) MIC
+    363712,  # ( 10885,   22) jm1
+]
+
+
+# -----------------------------------------------------------------------------
+# muon
+
+
+def zeropower_via_svd(G, steps=None):
+    U, S, V = G.svd()
+    return U @ V.T
+
+@torch.compile
+def zeropower_via_newtonschulz5(G, steps=10, eps=1e-7):
+    assert len(G.shape) == 2
+    a, b, c = (3.4445, -4.7750,  2.0315)
+    X = G.bfloat16() # TODO: try with L40S
+    X /= (X.norm() + eps) # ensure top singular value <= 1
+    if G.size(0) > G.size(1):
+        X = X.T
+    for _ in range(steps):
+        A = X @ X.T
+        B = A @ X
+        X = a * X + b * B + c * A @ B
+    if G.size(0) > G.size(1):
+        X = X.T
+    return X.to(G.dtype)
+
+zeropower_backends = dict(svd=zeropower_via_svd, newtonschulz5=zeropower_via_newtonschulz5)
+
+class Muon(torch.optim.Optimizer):
+    """
+    code adapted from: https://github.com/KellerJordan/modded-nanogpt/commit/b356a1f
+    """
+    def __init__(self, params, lr=3e-4, momentum=0.95, nesterov=True, backend='newtonschulz5', backend_steps=5):
+        defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, backend=backend, backend_steps=backend_steps)
+        super().__init__(params, defaults)
+
+    def step(self):
+        for group in self.param_groups:
+            lr = group['lr']
+            momentum = group['momentum']
+            zeropower_backend = zeropower_backends[group['backend']]
+            for p in group['params']:
+                g = p.grad
+                if g is None:
+                    continue
+                state = self.state[p]
+                if 'momentum_buffer' not in state:
+                    state['momentum_buffer'] = torch.zeros_like(g)
+                buf = state['momentum_buffer']
+                buf.mul_(momentum).add_(g)
+                if group['nesterov']:
+                    g = g.add(buf, alpha=momentum)
+                if g.size(0) == 3 * g.size(1): # split grouped QKV parameters
+                    g = torch.cat([zeropower_backend(g1, steps=group['backend_steps']) for g1 in g.split(g.size(1))])
+                    scale = g.size(1)**0.5
+                else:
+                    g = zeropower_backend(g, steps=group['backend_steps'])
+                    scale = max(g.size(0), g.size(1))**0.5 # scale to have update.square().mean() == 1
+                p.data.add_(g, alpha=-lr * scale)
+
+
+
+
+# -----------------------------------------------------------------------------
+# model
+
+
+class NanoTabPFNModel(nn.Module):
+    def __init__(self, l, a, e, h, o):
+        """
+        l : num layers
+        a : num attention heads
+        e : embedding size
+        h : mlp hidden size
+        o : num outputs
+        """
+        super().__init__()
+        self.l = l
+        self.a = a
+        self.e = e
+        self.h = h
+        self.o = o
+        self.feature_encoder = FeatureEncoder(e)
+        self.target_encoder = TargetEncoder(e)
+        self.transformer_encoder = TransformerEncoderStack(l, a, e, h)
+        self.decoder = Decoder(e, h, o)
+
+        self.register_buffer("borders", None, persistent=True)
+
+    def forward(self, *args, **kwargs):
+        if len(args) == 3:
+            x = args[0]
+            if args[2] is not None:
+                x = torch.cat((x, args[2]), dim=1)
+            return self._forward((x, args[1]), sep=args[0].shape[1], **kwargs)
+        elif len(args) == 1 and isinstance(args[0], tuple):
+            return self._forward(*args, **kwargs)
+
+    def _forward(self, src, sep):
+        x_src, y_src = src
+        if len(y_src.shape) < len(x_src.shape):
+            y_src = y_src.unsqueeze(-1)
+        x_src = self.feature_encoder(x_src, sep)
+        num_rows = x_src.shape[1]
+        y_src = self.target_encoder(y_src, num_rows)
+        src = torch.cat([x_src, y_src], 2)
+        output = self.transformer_encoder(src, sep)
+        output = output[:, sep:, -1, :]
+        output = self.decoder(output)
+        return output
+
+
+class FeatureEncoder(nn.Module):
+    def __init__(self, e):
+        super().__init__()
+        self.linear_layer = nn.Linear(1, e)
+
+    def forward(self, x, sep):
+        x = x.unsqueeze(-1)
+        mean = x[:, :sep].mean(dim=1, keepdim=True)
+        std = x[:, :sep].std(dim=1, keepdim=True) + 1e-8
+        x = (x - mean) / std
+        x = torch.clip(x, min=-100, max=100)
+        return self.linear_layer(x)
+
+
+class TargetEncoder(nn.Module):
+    def __init__(self, e):
+        super().__init__()
+        self.linear_layer = nn.Linear(1, e)
+
+    def forward(self, y_train, num_rows):
+        mean = y_train.mean(dim=1, keepdim=True)
+        padding = mean.repeat(1, num_rows - y_train.shape[1], 1)
+        y = torch.cat([y_train, padding], dim=1)
+        y = y.unsqueeze(-1)
+        return self.linear_layer(y)
+
+
+class TransformerEncoderStack(nn.Module):
+    def __init__(self, l, a, e, h):
+        super().__init__()
+        self.transformer_blocks = nn.ModuleList()
+        for _ in range(l):
+            self.transformer_blocks.append(TransformerEncoderLayer(a, e, h))
+
+    def forward(self, x, sep):
+        for block in self.transformer_blocks:
+            x = block(x, sep=sep)
+        return x
+
+
+class TransformerEncoderLayer(nn.Module):
+    def __init__(self, a, e, h, eps=1e-5, batch_first=True, device=None, dtype=None):
+        super().__init__()
+        self.a_datapoints = nn.MultiheadAttention(e, a, batch_first=batch_first, device=device, dtype=dtype)
+        self.a_features = nn.MultiheadAttention(e, a, batch_first=batch_first, device=device, dtype=dtype)
+
+        self.linear1 = nn.Linear(e, h, device=device, dtype=dtype)
+        self.linear2 = nn.Linear(h, e, device=device, dtype=dtype)
+
+        self.norm1 = nn.LayerNorm(e, eps=eps, device=device, dtype=dtype)
+        self.norm2 = nn.LayerNorm(e, eps=eps, device=device, dtype=dtype)
+        self.norm3 = nn.LayerNorm(e, eps=eps, device=device, dtype=dtype)
+
+    def forward(self, src, sep):
+        batch_size, rows_size, col_size, e = src.shape
+        src = src.reshape(batch_size * rows_size, col_size, e)
+
+        src = self.a_features(src, src, src)[0] + src
+        src = src.reshape(batch_size, rows_size, col_size, e)
+        src = self.norm1(src)
+        src = src.transpose(1, 2)
+        src = src.reshape(batch_size * col_size, rows_size, e)
+
+        x_left = self.a_datapoints(src[:, :sep], src[:, :sep], src[:, :sep])[0]
+        x_right = self.a_datapoints(src[:, sep:], src[:, :sep], src[:, :sep])[0]
+        src = torch.cat([x_left, x_right], dim=1) + src
+        src = src.reshape(batch_size, col_size, rows_size, e)
+        src = src.transpose(2, 1)
+        src = self.norm2(src)
+        src = src.reshape(-1, e)
+
+        src = self.linear2(F.gelu(self.linear1(src))) + src
+        src = src.reshape(batch_size, rows_size, col_size, e)
+        src = self.norm3(src)
+        return src
+
+
+class Decoder(nn.Module):
+    def __init__(self, e, h, o):
+        super().__init__()
+        self.linear1 = nn.Linear(e, h)
+        self.linear2 = nn.Linear(h, o)
+
+    def forward(self, x):
+        return self.linear2(F.gelu(self.linear1(x)))
+
+
+# -----------------------------------------------------------------------------
+# priors
+
+
+class PriorDumpDataLoader(DataLoader):
+    def __init__(self, filename, num_steps, batch_size, device):
+        self.filename = filename
+        self.num_steps = num_steps
+        self.batch_size = batch_size
+        with h5py.File(self.filename, "r") as f:
+            self.max_num_classes = f["max_num_classes"][0] if "max_num_classes" in f else None
+            self.problem_type = f["problem_type"][()].decode("utf-8")
+            # X = (num_datasets, max_num_datapoints, max_num_features)
+            self.datasets = f["X"].shape[0]
+            self.max_rows = f["X"].shape[1]
+            self.max_cols = f["X"].shape[2]
+        self.device = device
+        self.pointer = 0
+
+    def __iter__(self):
+        with h5py.File(self.filename, "r") as f:
+            self.data = f
+
+            for _ in range(self.num_steps):
+                end = self.pointer + self.batch_size
+
+                num_features = self.data["num_features"][self.pointer : end].max()
+                x = torch.from_numpy(self.data["X"][self.pointer : end, :, :num_features])
+                y = torch.from_numpy(self.data["y"][self.pointer : end])
+                sep = self.data["single_eval_pos"][self.pointer : end]
+
+                self.pointer += self.batch_size
+                if self.pointer >= self.datasets:
+                    print("pointer >= datasets, will reset!")
+                    self.pointer = 0
+
+                yield dict(
+                    x=x.to(self.device),
+                    y=y.to(self.device),
+                    target_y=y.to(self.device),
+                    sep=sep[0].item(),
+                )
+
+    def __len__(self):
+        return self.num_steps
+
+
+# -----------------------------------------------------------------------------
+# interface
+
+
+def init_model_from_ckpt_file(file_path):
+    ckpt = torch.load(file_path, map_location="cpu")
+    model = NanoTabPFNModel(
+        l=ckpt["arch"]["l"],
+        a=ckpt["arch"]["a"],
+        e=ckpt["arch"]["e"],
+        h=ckpt["arch"]["h"],
+        o=ckpt["arch"]["o"],
+    )
+    if "borders" in ckpt["model"]:
+        model.borders = ckpt["model"]["borders"]
+    model.load_state_dict(ckpt["model"])
+    return model
+
+
+def to_pandas(x):
+    return pd.DataFrame(x) if not isinstance(x, pd.DataFrame) else x
+
+
+def to_numeric(x):
+    return x.apply(pd.to_numeric, errors="coerce").to_numpy()
+
+
+def get_feature_preprocessor(X):
+    X = pd.DataFrame(X)
+    num_mask = []
+    cat_mask = []
+    for col in X:
+        unique_non_nan_entries = X[col].dropna().unique()
+        if len(unique_non_nan_entries) <= 1:
+            num_mask.append(False)
+            cat_mask.append(False)
+            continue
+        non_nan_entries = X[col].notna().sum()
+        numeric_entries = pd.to_numeric(X[col], errors="coerce").notna().sum()
+        num_mask.append(non_nan_entries == numeric_entries)
+        cat_mask.append(non_nan_entries != numeric_entries)
+
+    num_transformer = Pipeline(
+        [
+            ("to_pandas", FunctionTransformer(to_pandas)),
+            ("to_numeric", FunctionTransformer(to_numeric)),
+            ("imputer", SimpleImputer(strategy="mean")),
+        ],
+    )
+    cat_transformer = Pipeline(
+        [
+            ("encoder", OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=np.nan)),
+            ("imputer", SimpleImputer(strategy="most_frequent")),
+        ],
+    )
+
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ("num", num_transformer, np.array(num_mask)),
+            ("cat", cat_transformer, np.array(cat_mask)),
+        ],
+    )
+    return preprocessor
+
+
+class NanoTabPFNClassifier:
+    def __init__(self, model=None):
+        device = "cuda"
+        if model is None:
+            raise ValueError("model is None")
+        if isinstance(model, str):
+            model = init_model_from_ckpt_file(model)
+        self.model = model.to(device)
+        self.device = device
+
+    def fit(self, X_train, y_train):
+        self.feature_preprocessor = get_feature_preprocessor(X_train)
+        self.X_train = self.feature_preprocessor.fit_transform(X_train)
+        self.y_train = y_train
+        self.num_classes = max(set(y_train)) + 1
+
+    def predict(self, X_test):
+        predicted_probabilities = self.predict_proba(X_test)
+        return predicted_probabilities.argmax(axis=1)
+
+    def predict_proba(self, X_test):
+        x = np.concatenate((self.X_train, self.feature_preprocessor.transform(X_test)))
+        y = self.y_train
+        with torch.no_grad():
+            x = torch.from_numpy(x).unsqueeze(0).to(torch.float).to(self.device)
+            y = torch.from_numpy(y).unsqueeze(0).to(torch.float).to(self.device)
+            out = self.model((x, y), sep=len(self.X_train)).squeeze(0)
+            out = out[:, : self.num_classes]
+            probabilities = F.softmax(out, dim=1)
+            return probabilities.to("cpu").numpy()
+
+
+# -----------------------------------------------------------------------------
+# main
+
+
+prior = PriorDumpDataLoader(
+    filename=c.classification_dump,
+    num_steps=c.steps,
+    batch_size=c.batch_size,
+    device=device,
+)
+c.o = prior.max_num_classes
+
+model = NanoTabPFNModel(l=c.l, a=c.a, e=c.e, h=c.h, o=c.o).to(device)
+
+muon_params = []
+adam_params = []
+for name, p in model.named_parameters():
+    if p.ndim != 2:
+        adam_params.append(p)
+    elif "transformer_encoder" in name:
+        muon_params.append(p)
+    else:
+        adam_params.append(p)
+
+optimizer_muon = Muon(muon_params, lr=0.1*c.lr, momentum=0.95)
+optimizer_adam = schedulefree.AdamWScheduleFree(adam_params, lr=c.lr, weight_decay=0.0, warmup_steps=1000)
+
+optimizers = [optimizer_muon, optimizer_adam]
+
+criterion = nn.CrossEntropyLoss()
+
+t_t = 0.0
+
+
+def should_eval(epoch: int) -> bool:
+    if (epoch == 1) or (epoch == c.epochs):
+        return True
+    if c.eval_probe_start is not None and c.eval_probe_end is not None:
+        if c.eval_probe_start <= epoch <= c.eval_probe_end:
+            probe_every = max(1, int(c.eval_probe_every))
+            return (epoch - c.eval_probe_start) % probe_every == 0
+    return (epoch % c.eval_every) == 0
+
+
+for epoch in range(1, c.epochs + 1):
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    model.train()
+    optimizer_adam.train()
+    total_loss = 0.0
+    num_valid = 0
+    for i, full_data in enumerate(prior):
+        sep = full_data["sep"]
+        x = full_data["x"]
+        y = full_data["y"][:, :sep]
+        targets = full_data["target_y"][:, sep:]
+
+        if torch.isnan(x).any() or torch.isnan(y).any():
+            continue
+        num_valid += 1
+
+        for opt in optimizers:
+            opt.zero_grad(set_to_none=True)
+
+        output = model((x, y), sep=sep)
+        output = output.reshape(-1, output.shape[-1])
+        targets = targets.reshape((-1,)).to(torch.long)
+
+        loss = criterion(output, targets)
+        loss.backward()
+
+        total_loss += loss.detach().cpu().item()
+
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        for opt in optimizers:
+            opt.step()
+
+    torch.cuda.synchronize()
+    e_t = time.perf_counter() - t0  # epoch time
+    t_t += e_t  # train time
+    mu_e_t = t_t / epoch  # mean epoch time
+
+    mean_loss = total_loss / max(num_valid, 1)
+
+    print0(
+        f"[{datetime.now().strftime('%H:%M:%S')}] "
+        f"e:{epoch}/{c.epochs} μ_l:{mean_loss:.2f} "
+        f"({c.steps}-{num_valid}={c.steps - num_valid}) "
+        f"e_t:{e_t:.2f}s μ_e_t:{mu_e_t:.2f}s t_t:{t_t:.2f}s",
+        console=True,
+    )
+
+    model.eval()
+    optimizer_adam.eval()
+
+    if should_eval(epoch):
+        clf = NanoTabPFNClassifier(model)
+        aucs = []
+
+        for task_id in TABARENA_CLASSIFICATION_TASKS:
+            task = openml.tasks.get_task(task_id, download_splits=False)
+
+            if task.task_type_id != TaskType.SUPERVISED_CLASSIFICATION:
+                continue
+
+            dataset = task.get_dataset(download_data=False)
+            X, y, _, _ = dataset.get_data(target=task.target_name, dataset_format="dataframe")
+
+            len_features = X.shape[1]
+            if c.eval_subsample_features is not None and len_features > c.eval_subsample_features:
+                rng = np.random.default_rng(c.seed)
+                feature_choices = rng.choice(len_features, size=c.eval_subsample_features, replace=False)
+                X = X.iloc[:, feature_choices]
+
+            if c.eval_subsample_samples is not None and len(X) > c.eval_subsample_samples:
+                _, X, _, y = train_test_split(X, y, test_size=c.eval_subsample_samples, stratify=y, random_state=c.seed)
+                X = X.reset_index(drop=True)
+                y = y.reset_index(drop=True)
+
+            cv = StratifiedKFold(n_splits=c.eval_folds, shuffle=True, random_state=c.seed)
+
+            targets = []
+            probabilities = []
+
+            for _, (train_indices, test_indices) in enumerate(cv.split(X, y)):
+                X_train = X.iloc[train_indices].to_numpy()
+                y_train = y.iloc[train_indices].to_numpy()
+                X_test = X.iloc[test_indices].to_numpy()
+                y_test = y.iloc[test_indices].to_numpy()
+
+                label_encoder = LabelEncoder()
+                y_train = label_encoder.fit_transform(y_train)
+                y_test = label_encoder.transform(y_test)
+                targets.append(y_test)
+
+                clf.fit(X_train, y_train)
+                y_proba = clf.predict_proba(X_test)
+                if y_proba.shape[1] == 2:
+                    y_proba = y_proba[:, 1]
+                probabilities.append(y_proba)
+
+            y_true = np.concatenate(targets, axis=0)
+            y_proba = np.concatenate(probabilities, axis=0) if len(probabilities) > 0 else None
+
+            auc = (
+                roc_auc_score(y_true, y_proba, multi_class="ovr")
+                if getattr(y_proba, "ndim", 1) > 1
+                else roc_auc_score(y_true, y_proba)
+            )
+            aucs.append(auc)
+
+        avg_auc = (sum(aucs) / len(aucs)) if len(aucs) > 0 else float("nan")
+        print0(f"avg_roc_auc:{avg_auc}", console=True)
+
+        if avg_auc >= c.jackpot:
+            ckpt = {
+                "version": version,
+                "timestamp": ts,
+                "uid": uid,
+                "type": c.type,
+                "arch": {
+                    "e": model.e,
+                    "a": model.a,
+                    "h": model.h,
+                    "l": model.l,
+                    "o": model.o,
+                },
+                "model": model.state_dict(),
+            }
+            torch.save(ckpt, ckpt_path)
+            print0("=" * 100)
+            print0(f"datasets seen: {epoch * c.batch_size * c.steps}", console=True)
+            break
+
+print0("=" * 100)
+print0("config:")
+for f in fields(Config):
+    print0(f"  {f.name}: {getattr(c, f.name)}")
+print0("=" * 100)
+print0(f"peak memory allocated: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB", console=True)
+print0(f"peak memory reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB", console=True)
+print0(f"experiment done: {e_id}", console=True)
+
+====================================================================================================
+host: dlc2gpu01
+platform: Linux-6.8.0-79-generic-x86_64-with-glibc2.35
+python: 3.13.9 (main, Oct 14 2025, 21:29:44) [Clang 20.1.4 ]
+torch: 2.9.1+cu128
+cuda: 12.8
+Mon Feb  2 00:00:29 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 570.133.20             Driver Version: 570.133.20     CUDA Version: 12.8     |
+|-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA L40S                    On  |   00000000:61:00.0 Off |                    0 |
+| N/A   39C    P8             34W /  350W |       3MiB /  46068MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+                                                                                         
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+
+====================================================================================================
+[00:01:21] e:1/4000 μ_l:1.88 (64-64=0) e_t:34.58s μ_e_t:34.58s t_t:34.58s
+avg_roc_auc:0.5146290643393854
+[00:01:46] e:2/4000 μ_l:1.65 (64-64=0) e_t:4.62s μ_e_t:19.60s t_t:39.20s
+[00:01:51] e:3/4000 μ_l:1.45 (64-64=0) e_t:4.60s μ_e_t:14.60s t_t:43.80s
+[00:01:55] e:4/4000 μ_l:1.21 (64-64=0) e_t:4.53s μ_e_t:12.08s t_t:48.33s
+[00:02:00] e:5/4000 μ_l:1.15 (64-64=0) e_t:4.41s μ_e_t:10.55s t_t:52.74s
+[00:02:04] e:6/4000 μ_l:1.02 (64-63=1) e_t:4.43s μ_e_t:9.53s t_t:57.16s
+[00:02:08] e:7/4000 μ_l:1.23 (64-64=0) e_t:4.46s μ_e_t:8.80s t_t:61.62s
+[00:02:13] e:8/4000 μ_l:1.07 (64-64=0) e_t:4.47s μ_e_t:8.26s t_t:66.09s
+[00:02:18] e:9/4000 μ_l:0.97 (64-64=0) e_t:4.95s μ_e_t:7.89s t_t:71.04s
+[00:02:23] e:10/4000 μ_l:1.07 (64-64=0) e_t:4.64s μ_e_t:7.57s t_t:75.69s
+[00:02:27] e:11/4000 μ_l:1.03 (64-64=0) e_t:4.67s μ_e_t:7.31s t_t:80.36s
+[00:02:31] e:12/4000 μ_l:1.13 (64-64=0) e_t:4.21s μ_e_t:7.05s t_t:84.57s
+[00:02:36] e:13/4000 μ_l:0.99 (64-64=0) e_t:4.57s μ_e_t:6.86s t_t:89.14s
+[00:02:41] e:14/4000 μ_l:1.02 (64-64=0) e_t:4.60s μ_e_t:6.70s t_t:93.73s
+[00:02:45] e:15/4000 μ_l:0.92 (64-64=0) e_t:4.08s μ_e_t:6.52s t_t:97.82s
+[00:02:49] e:16/4000 μ_l:0.92 (64-64=0) e_t:4.61s μ_e_t:6.40s t_t:102.43s
+[00:02:54] e:17/4000 μ_l:1.06 (64-64=0) e_t:4.54s μ_e_t:6.29s t_t:106.97s
+[00:02:58] e:18/4000 μ_l:0.89 (64-64=0) e_t:4.42s μ_e_t:6.19s t_t:111.39s
+[00:03:03] e:19/4000 μ_l:1.03 (64-64=0) e_t:4.77s μ_e_t:6.11s t_t:116.16s
+[00:03:08] e:20/4000 μ_l:0.91 (64-64=0) e_t:4.64s μ_e_t:6.04s t_t:120.80s
+[00:03:12] e:21/4000 μ_l:0.93 (64-64=0) e_t:4.75s μ_e_t:5.98s t_t:125.55s
+[00:03:17] e:22/4000 μ_l:0.94 (64-64=0) e_t:4.44s μ_e_t:5.91s t_t:129.99s
+[00:03:21] e:23/4000 μ_l:0.88 (64-64=0) e_t:4.29s μ_e_t:5.84s t_t:134.28s
+[00:03:25] e:24/4000 μ_l:0.99 (64-64=0) e_t:4.26s μ_e_t:5.77s t_t:138.53s
+[00:03:30] e:25/4000 μ_l:1.04 (64-64=0) e_t:4.79s μ_e_t:5.73s t_t:143.32s
+[00:03:35] e:26/4000 μ_l:0.99 (64-64=0) e_t:4.41s μ_e_t:5.68s t_t:147.73s
+[00:03:39] e:27/4000 μ_l:0.95 (64-64=0) e_t:4.38s μ_e_t:5.63s t_t:152.11s
+[00:03:44] e:28/4000 μ_l:0.96 (64-64=0) e_t:4.91s μ_e_t:5.61s t_t:157.02s
+[00:03:48] e:29/4000 μ_l:0.74 (64-64=0) e_t:4.49s μ_e_t:5.57s t_t:161.51s
+[00:03:53] e:30/4000 μ_l:1.02 (64-64=0) e_t:4.66s μ_e_t:5.54s t_t:166.17s
+[00:03:57] e:31/4000 μ_l:0.99 (64-64=0) e_t:4.28s μ_e_t:5.50s t_t:170.45s
+[00:04:02] e:32/4000 μ_l:0.97 (64-64=0) e_t:4.73s μ_e_t:5.47s t_t:175.18s
+[00:04:06] e:33/4000 μ_l:0.85 (64-64=0) e_t:4.37s μ_e_t:5.44s t_t:179.55s
+[00:04:11] e:34/4000 μ_l:0.96 (64-64=0) e_t:4.64s μ_e_t:5.42s t_t:184.19s
+[00:04:16] e:35/4000 μ_l:0.98 (64-64=0) e_t:4.44s μ_e_t:5.39s t_t:188.63s
+[00:04:20] e:36/4000 μ_l:0.71 (64-64=0) e_t:4.24s μ_e_t:5.36s t_t:192.88s
+[00:04:24] e:37/4000 μ_l:0.77 (64-64=0) e_t:4.67s μ_e_t:5.34s t_t:197.54s
+[00:04:29] e:38/4000 μ_l:0.95 (64-64=0) e_t:4.56s μ_e_t:5.32s t_t:202.10s
+[00:04:34] e:39/4000 μ_l:0.94 (64-64=0) e_t:4.71s μ_e_t:5.30s t_t:206.81s
+[00:04:38] e:40/4000 μ_l:0.87 (64-64=0) e_t:4.28s μ_e_t:5.28s t_t:211.09s
+[00:04:42] e:41/4000 μ_l:0.93 (64-64=0) e_t:4.47s μ_e_t:5.26s t_t:215.57s
+[00:04:47] e:42/4000 μ_l:0.87 (64-64=0) e_t:4.58s μ_e_t:5.24s t_t:220.15s
+[00:04:51] e:43/4000 μ_l:0.91 (64-64=0) e_t:4.27s μ_e_t:5.22s t_t:224.42s
+[00:04:56] e:44/4000 μ_l:0.89 (64-64=0) e_t:4.63s μ_e_t:5.21s t_t:229.04s
+[00:05:00] e:45/4000 μ_l:0.88 (64-64=0) e_t:4.37s μ_e_t:5.19s t_t:233.41s
+[00:05:05] e:46/4000 μ_l:0.92 (64-64=0) e_t:4.67s μ_e_t:5.18s t_t:238.08s
+[00:05:10] e:47/4000 μ_l:1.00 (64-64=0) e_t:4.72s μ_e_t:5.17s t_t:242.80s
+[00:05:14] e:48/4000 μ_l:0.91 (64-64=0) e_t:4.24s μ_e_t:5.15s t_t:247.04s
+[00:05:18] e:49/4000 μ_l:1.01 (64-64=0) e_t:4.52s μ_e_t:5.13s t_t:251.56s
+[00:05:23] e:50/4000 μ_l:0.93 (64-64=0) e_t:4.32s μ_e_t:5.12s t_t:255.88s
+[00:05:27] e:51/4000 μ_l:0.83 (64-64=0) e_t:4.32s μ_e_t:5.10s t_t:260.20s
+[00:05:32] e:52/4000 μ_l:0.84 (64-64=0) e_t:4.39s μ_e_t:5.09s t_t:264.58s
+[00:05:36] e:53/4000 μ_l:0.75 (64-64=0) e_t:4.42s μ_e_t:5.08s t_t:269.01s
+[00:05:40] e:54/4000 μ_l:0.74 (64-64=0) e_t:4.49s μ_e_t:5.06s t_t:273.50s
+[00:05:45] e:55/4000 μ_l:0.92 (64-64=0) e_t:4.33s μ_e_t:5.05s t_t:277.82s
+[00:05:49] e:56/4000 μ_l:0.92 (64-64=0) e_t:4.67s μ_e_t:5.04s t_t:282.49s
+[00:05:54] e:57/4000 μ_l:0.93 (64-64=0) e_t:4.40s μ_e_t:5.03s t_t:286.89s
+[00:05:58] e:58/4000 μ_l:0.87 (64-64=0) e_t:4.49s μ_e_t:5.02s t_t:291.38s
+[00:06:03] e:59/4000 μ_l:0.95 (64-64=0) e_t:4.57s μ_e_t:5.02s t_t:295.94s
+[00:06:07] e:60/4000 μ_l:0.87 (64-64=0) e_t:4.39s μ_e_t:5.01s t_t:300.33s
+[00:06:12] e:61/4000 μ_l:0.87 (64-64=0) e_t:4.48s μ_e_t:5.00s t_t:304.82s
+[00:06:16] e:62/4000 μ_l:0.98 (64-64=0) e_t:4.65s μ_e_t:4.99s t_t:309.46s
+[00:06:21] e:63/4000 μ_l:0.76 (64-64=0) e_t:4.45s μ_e_t:4.98s t_t:313.91s
+[00:06:25] e:64/4000 μ_l:0.86 (64-64=0) e_t:4.30s μ_e_t:4.97s t_t:318.21s
+[00:06:30] e:65/4000 μ_l:0.79 (64-64=0) e_t:4.87s μ_e_t:4.97s t_t:323.08s
+[00:06:35] e:66/4000 μ_l:0.83 (64-64=0) e_t:4.70s μ_e_t:4.97s t_t:327.77s
+[00:06:39] e:67/4000 μ_l:0.75 (64-64=0) e_t:4.70s μ_e_t:4.96s t_t:332.48s
+[00:06:44] e:68/4000 μ_l:0.84 (64-64=0) e_t:4.42s μ_e_t:4.95s t_t:336.89s
+[00:06:49] e:69/4000 μ_l:1.01 (64-64=0) e_t:4.76s μ_e_t:4.95s t_t:341.65s
+[00:06:53] e:70/4000 μ_l:0.86 (64-64=0) e_t:4.69s μ_e_t:4.95s t_t:346.35s
+[00:06:58] e:71/4000 μ_l:0.84 (64-64=0) e_t:4.38s μ_e_t:4.94s t_t:350.73s
+[00:07:02] e:72/4000 μ_l:0.83 (64-64=0) e_t:4.51s μ_e_t:4.93s t_t:355.23s
+[00:07:07] e:73/4000 μ_l:0.92 (64-64=0) e_t:4.63s μ_e_t:4.93s t_t:359.86s
+[00:07:11] e:74/4000 μ_l:0.76 (64-64=0) e_t:4.45s μ_e_t:4.92s t_t:364.32s
+[00:07:16] e:75/4000 μ_l:0.72 (64-64=0) e_t:4.52s μ_e_t:4.92s t_t:368.83s
+[00:07:20] e:76/4000 μ_l:1.00 (64-64=0) e_t:4.50s μ_e_t:4.91s t_t:373.33s
+[00:07:25] e:77/4000 μ_l:0.83 (64-64=0) e_t:4.79s μ_e_t:4.91s t_t:378.12s
+[00:07:30] e:78/4000 μ_l:0.83 (64-64=0) e_t:4.82s μ_e_t:4.91s t_t:382.94s
+[00:07:34] e:79/4000 μ_l:0.91 (64-64=0) e_t:4.39s μ_e_t:4.90s t_t:387.33s
+[00:07:39] e:80/4000 μ_l:0.81 (64-64=0) e_t:4.56s μ_e_t:4.90s t_t:391.89s
+[00:07:43] e:81/4000 μ_l:0.84 (64-64=0) e_t:4.40s μ_e_t:4.89s t_t:396.29s
+[00:07:48] e:82/4000 μ_l:0.93 (64-64=0) e_t:4.26s μ_e_t:4.88s t_t:400.54s
+[00:07:52] e:83/4000 μ_l:0.92 (64-64=0) e_t:4.65s μ_e_t:4.88s t_t:405.19s
+[00:07:57] e:84/4000 μ_l:0.72 (64-64=0) e_t:4.63s μ_e_t:4.88s t_t:409.82s
+[00:08:01] e:85/4000 μ_l:0.85 (64-64=0) e_t:4.47s μ_e_t:4.87s t_t:414.29s
+[00:08:06] e:86/4000 μ_l:0.83 (64-64=0) e_t:4.68s μ_e_t:4.87s t_t:418.97s
+[00:08:10] e:87/4000 μ_l:0.98 (64-64=0) e_t:4.28s μ_e_t:4.86s t_t:423.25s
+[00:08:15] e:88/4000 μ_l:0.90 (64-64=0) e_t:4.43s μ_e_t:4.86s t_t:427.68s
+[00:08:19] e:89/4000 μ_l:0.86 (64-64=0) e_t:4.55s μ_e_t:4.86s t_t:432.24s
+[00:08:24] e:90/4000 μ_l:0.89 (64-64=0) e_t:4.59s μ_e_t:4.85s t_t:436.83s
+[00:08:28] e:91/4000 μ_l:0.88 (64-64=0) e_t:4.09s μ_e_t:4.85s t_t:440.92s
+[00:08:32] e:92/4000 μ_l:0.93 (64-64=0) e_t:4.27s μ_e_t:4.84s t_t:445.19s
+[00:08:36] e:93/4000 μ_l:0.61 (64-64=0) e_t:4.12s μ_e_t:4.83s t_t:449.31s
+[00:08:41] e:94/4000 μ_l:0.83 (64-64=0) e_t:4.33s μ_e_t:4.83s t_t:453.64s
+[00:08:45] e:95/4000 μ_l:0.83 (64-64=0) e_t:4.29s μ_e_t:4.82s t_t:457.93s
+[00:08:49] e:96/4000 μ_l:0.93 (64-64=0) e_t:4.44s μ_e_t:4.82s t_t:462.37s
+[00:08:54] e:97/4000 μ_l:0.90 (64-64=0) e_t:4.27s μ_e_t:4.81s t_t:466.64s
+[00:08:58] e:98/4000 μ_l:0.99 (64-64=0) e_t:4.36s μ_e_t:4.81s t_t:470.99s
+[00:09:02] e:99/4000 μ_l:0.94 (64-64=0) e_t:4.38s μ_e_t:4.80s t_t:475.37s
+[00:09:07] e:100/4000 μ_l:0.88 (64-64=0) e_t:4.72s μ_e_t:4.80s t_t:480.09s
+avg_roc_auc:0.7479430326183583
+[00:09:31] e:101/4000 μ_l:0.94 (64-64=0) e_t:4.51s μ_e_t:4.80s t_t:484.60s
+[00:09:36] e:102/4000 μ_l:0.84 (64-64=0) e_t:4.60s μ_e_t:4.80s t_t:489.20s
+[00:09:41] e:103/4000 μ_l:0.84 (64-64=0) e_t:4.74s μ_e_t:4.80s t_t:493.94s
+[00:09:45] e:104/4000 μ_l:0.80 (64-64=0) e_t:4.33s μ_e_t:4.79s t_t:498.27s
+[00:09:50] e:105/4000 μ_l:0.83 (64-64=0) e_t:4.70s μ_e_t:4.79s t_t:502.98s
+[00:09:54] e:106/4000 μ_l:0.81 (64-64=0) e_t:4.64s μ_e_t:4.79s t_t:507.61s
+[00:09:59] e:107/4000 μ_l:0.76 (64-64=0) e_t:4.37s μ_e_t:4.78s t_t:511.98s
+[00:10:03] e:108/4000 μ_l:0.87 (64-64=0) e_t:4.65s μ_e_t:4.78s t_t:516.63s
+[00:10:08] e:109/4000 μ_l:0.87 (64-64=0) e_t:4.35s μ_e_t:4.78s t_t:520.98s
+[00:10:12] e:110/4000 μ_l:0.78 (64-64=0) e_t:4.36s μ_e_t:4.78s t_t:525.34s
+[00:10:17] e:111/4000 μ_l:0.87 (64-64=0) e_t:4.71s μ_e_t:4.78s t_t:530.05s
+[00:10:21] e:112/4000 μ_l:0.69 (64-64=0) e_t:4.50s μ_e_t:4.77s t_t:534.55s
+[00:10:26] e:113/4000 μ_l:0.72 (64-64=0) e_t:4.55s μ_e_t:4.77s t_t:539.10s
+[00:10:31] e:114/4000 μ_l:0.86 (64-64=0) e_t:4.70s μ_e_t:4.77s t_t:543.79s
+[00:10:35] e:115/4000 μ_l:0.78 (64-64=0) e_t:4.41s μ_e_t:4.77s t_t:548.20s
+[00:10:40] e:116/4000 μ_l:0.79 (64-64=0) e_t:4.67s μ_e_t:4.77s t_t:552.87s
+[00:10:44] e:117/4000 μ_l:0.84 (64-64=0) e_t:4.55s μ_e_t:4.76s t_t:557.42s
+[00:10:49] e:118/4000 μ_l:0.81 (64-64=0) e_t:4.52s μ_e_t:4.76s t_t:561.94s
+[00:10:53] e:119/4000 μ_l:0.83 (64-64=0) e_t:4.22s μ_e_t:4.76s t_t:566.17s
+[00:10:57] e:120/4000 μ_l:0.89 (64-64=0) e_t:4.51s μ_e_t:4.76s t_t:570.68s
+[00:11:02] e:121/4000 μ_l:0.88 (64-64=0) e_t:4.41s μ_e_t:4.75s t_t:575.09s
+[00:11:06] e:122/4000 μ_l:0.93 (64-64=0) e_t:4.34s μ_e_t:4.75s t_t:579.43s
+[00:11:11] e:123/4000 μ_l:0.82 (64-64=0) e_t:4.52s μ_e_t:4.75s t_t:583.96s
+[00:11:15] e:124/4000 μ_l:0.79 (64-64=0) e_t:4.55s μ_e_t:4.75s t_t:588.50s
+[00:11:20] e:125/4000 μ_l:0.78 (64-64=0) e_t:4.66s μ_e_t:4.75s t_t:593.17s
+[00:11:24] e:126/4000 μ_l:0.79 (64-64=0) e_t:4.49s μ_e_t:4.74s t_t:597.65s
+[00:11:29] e:127/4000 μ_l:0.82 (64-64=0) e_t:4.32s μ_e_t:4.74s t_t:601.97s
+[00:11:34] e:128/4000 μ_l:0.75 (64-64=0) e_t:4.81s μ_e_t:4.74s t_t:606.78s
+[00:11:38] e:129/4000 μ_l:0.84 (64-64=0) e_t:4.47s μ_e_t:4.74s t_t:611.25s
+[00:11:42] e:130/4000 μ_l:0.70 (64-64=0) e_t:4.32s μ_e_t:4.74s t_t:615.57s
+[00:11:47] e:131/4000 μ_l:0.91 (64-64=0) e_t:4.65s μ_e_t:4.73s t_t:620.22s
+[00:11:52] e:132/4000 μ_l:0.80 (64-64=0) e_t:4.58s μ_e_t:4.73s t_t:624.80s
+[00:11:56] e:133/4000 μ_l:0.81 (64-64=0) e_t:4.79s μ_e_t:4.73s t_t:629.59s
+[00:12:01] e:134/4000 μ_l:0.76 (64-64=0) e_t:4.60s μ_e_t:4.73s t_t:634.19s
+[00:12:05] e:135/4000 μ_l:0.87 (64-64=0) e_t:4.27s μ_e_t:4.73s t_t:638.46s
+[00:12:10] e:136/4000 μ_l:0.96 (64-64=0) e_t:4.28s μ_e_t:4.73s t_t:642.73s
+[00:12:14] e:137/4000 μ_l:0.95 (64-64=0) e_t:4.38s μ_e_t:4.72s t_t:647.12s
+[00:12:18] e:138/4000 μ_l:0.75 (64-64=0) e_t:4.42s μ_e_t:4.72s t_t:651.54s
+[00:12:23] e:139/4000 μ_l:0.77 (64-64=0) e_t:4.48s μ_e_t:4.72s t_t:656.02s
+[00:12:27] e:140/4000 μ_l:0.75 (64-64=0) e_t:4.56s μ_e_t:4.72s t_t:660.58s
+[00:12:32] e:141/4000 μ_l:0.82 (64-64=0) e_t:4.31s μ_e_t:4.72s t_t:664.89s
+[00:12:36] e:142/4000 μ_l:0.83 (64-64=0) e_t:4.57s μ_e_t:4.71s t_t:669.46s
+[00:12:41] e:143/4000 μ_l:0.87 (64-64=0) e_t:4.71s μ_e_t:4.71s t_t:674.17s
+[00:12:46] e:144/4000 μ_l:0.98 (64-64=0) e_t:4.61s μ_e_t:4.71s t_t:678.78s
+[00:12:50] e:145/4000 μ_l:0.67 (64-64=0) e_t:4.76s μ_e_t:4.71s t_t:683.53s
+[00:12:55] e:146/4000 μ_l:0.84 (64-64=0) e_t:4.53s μ_e_t:4.71s t_t:688.06s
+[00:13:00] e:147/4000 μ_l:0.81 (64-64=0) e_t:4.80s μ_e_t:4.71s t_t:692.86s
+[00:13:04] e:148/4000 μ_l:0.78 (64-64=0) e_t:4.47s μ_e_t:4.71s t_t:697.32s
+[00:13:09] e:149/4000 μ_l:0.86 (64-64=0) e_t:4.45s μ_e_t:4.71s t_t:701.77s
+[00:13:13] e:150/4000 μ_l:0.90 (64-64=0) e_t:4.35s μ_e_t:4.71s t_t:706.12s
+[00:13:17] e:151/4000 μ_l:0.88 (64-64=0) e_t:4.51s μ_e_t:4.71s t_t:710.63s
+[00:13:22] e:152/4000 μ_l:0.78 (64-64=0) e_t:4.56s μ_e_t:4.71s t_t:715.20s
+[00:13:26] e:153/4000 μ_l:0.75 (64-64=0) e_t:4.44s μ_e_t:4.70s t_t:719.64s
+[00:13:31] e:154/4000 μ_l:0.84 (64-64=0) e_t:4.71s μ_e_t:4.70s t_t:724.35s
+[00:13:36] e:155/4000 μ_l:0.92 (64-64=0) e_t:4.57s μ_e_t:4.70s t_t:728.92s
+[00:13:40] e:156/4000 μ_l:0.91 (64-64=0) e_t:4.15s μ_e_t:4.70s t_t:733.07s
+[00:13:45] e:157/4000 μ_l:0.78 (64-64=0) e_t:4.59s μ_e_t:4.70s t_t:737.66s
+[00:13:49] e:158/4000 μ_l:0.87 (64-64=0) e_t:4.46s μ_e_t:4.70s t_t:742.13s
+[00:13:54] e:159/4000 μ_l:0.61 (64-64=0) e_t:4.82s μ_e_t:4.70s t_t:746.94s
+[00:13:58] e:160/4000 μ_l:0.83 (64-64=0) e_t:4.56s μ_e_t:4.70s t_t:751.50s
+[00:14:03] e:161/4000 μ_l:0.74 (64-64=0) e_t:4.19s μ_e_t:4.69s t_t:755.70s
+[00:14:07] e:162/4000 μ_l:0.83 (64-64=0) e_t:4.47s μ_e_t:4.69s t_t:760.17s
+[00:14:12] e:163/4000 μ_l:0.81 (64-64=0) e_t:4.49s μ_e_t:4.69s t_t:764.66s
+[00:14:16] e:164/4000 μ_l:0.84 (64-64=0) e_t:4.55s μ_e_t:4.69s t_t:769.21s
+[00:14:20] e:165/4000 μ_l:0.71 (64-64=0) e_t:4.25s μ_e_t:4.69s t_t:773.46s
+[00:14:25] e:166/4000 μ_l:0.83 (64-64=0) e_t:4.56s μ_e_t:4.69s t_t:778.02s
+[00:14:29] e:167/4000 μ_l:0.81 (64-64=0) e_t:4.50s μ_e_t:4.69s t_t:782.52s
+[00:14:34] e:168/4000 μ_l:0.79 (64-64=0) e_t:4.60s μ_e_t:4.69s t_t:787.12s
+[00:14:39] e:169/4000 μ_l:0.89 (64-64=0) e_t:4.69s μ_e_t:4.69s t_t:791.81s
+[00:14:43] e:170/4000 μ_l:0.84 (64-64=0) e_t:4.38s μ_e_t:4.68s t_t:796.19s
+[00:14:47] e:171/4000 μ_l:0.86 (64-64=0) e_t:4.37s μ_e_t:4.68s t_t:800.56s
+[00:14:52] e:172/4000 μ_l:0.68 (64-64=0) e_t:4.40s μ_e_t:4.68s t_t:804.96s
+[00:14:57] e:173/4000 μ_l:0.86 (64-64=0) e_t:4.71s μ_e_t:4.68s t_t:809.67s
+[00:15:01] e:174/4000 μ_l:0.83 (64-64=0) e_t:4.55s μ_e_t:4.68s t_t:814.22s
+[00:15:06] e:175/4000 μ_l:0.81 (64-64=0) e_t:4.79s μ_e_t:4.68s t_t:819.02s
+[00:15:10] e:176/4000 μ_l:0.84 (64-64=0) e_t:4.35s μ_e_t:4.68s t_t:823.37s
+[00:15:15] e:177/4000 μ_l:0.78 (64-64=0) e_t:4.37s μ_e_t:4.68s t_t:827.74s
+[00:15:19] e:178/4000 μ_l:0.73 (64-64=0) e_t:4.60s μ_e_t:4.68s t_t:832.34s
+[00:15:24] e:179/4000 μ_l:0.78 (64-64=0) e_t:4.64s μ_e_t:4.68s t_t:836.98s
+[00:15:28] e:180/4000 μ_l:0.91 (64-64=0) e_t:4.39s μ_e_t:4.67s t_t:841.37s
+[00:15:33] e:181/4000 μ_l:0.88 (64-64=0) e_t:4.59s μ_e_t:4.67s t_t:845.96s
+[00:15:37] e:182/4000 μ_l:0.90 (64-64=0) e_t:4.27s μ_e_t:4.67s t_t:850.23s
+[00:15:42] e:183/4000 μ_l:0.75 (64-64=0) e_t:5.04s μ_e_t:4.67s t_t:855.26s
+[00:15:46] e:184/4000 μ_l:0.79 (64-64=0) e_t:4.31s μ_e_t:4.67s t_t:859.57s
+[00:15:51] e:185/4000 μ_l:0.71 (64-64=0) e_t:4.50s μ_e_t:4.67s t_t:864.07s
+[00:15:56] e:186/4000 μ_l:0.77 (64-64=0) e_t:4.77s μ_e_t:4.67s t_t:868.84s
+[00:16:00] e:187/4000 μ_l:0.78 (64-64=0) e_t:4.48s μ_e_t:4.67s t_t:873.32s
+[00:16:05] e:188/4000 μ_l:0.72 (64-64=0) e_t:4.60s μ_e_t:4.67s t_t:877.92s
+[00:16:09] e:189/4000 μ_l:0.87 (64-64=0) e_t:4.59s μ_e_t:4.67s t_t:882.51s
+[00:16:14] e:190/4000 μ_l:0.87 (64-64=0) e_t:4.57s μ_e_t:4.67s t_t:887.08s
+[00:16:18] e:191/4000 μ_l:0.91 (64-64=0) e_t:4.43s μ_e_t:4.67s t_t:891.52s
+[00:16:23] e:192/4000 μ_l:0.73 (64-64=0) e_t:4.24s μ_e_t:4.67s t_t:895.76s
+[00:16:27] e:193/4000 μ_l:0.74 (64-64=0) e_t:4.25s μ_e_t:4.66s t_t:900.01s
+[00:16:31] e:194/4000 μ_l:0.80 (64-64=0) e_t:3.81s μ_e_t:4.66s t_t:903.83s
+[00:16:35] e:195/4000 μ_l:0.80 (64-64=0) e_t:4.48s μ_e_t:4.66s t_t:908.30s
+[00:16:40] e:196/4000 μ_l:0.66 (64-64=0) e_t:4.58s μ_e_t:4.66s t_t:912.89s
+[00:16:44] e:197/4000 μ_l:0.85 (64-64=0) e_t:4.57s μ_e_t:4.66s t_t:917.45s
+[00:16:49] e:198/4000 μ_l:0.77 (64-64=0) e_t:4.25s μ_e_t:4.66s t_t:921.70s
+[00:16:53] e:199/4000 μ_l:0.73 (64-64=0) e_t:4.55s μ_e_t:4.65s t_t:926.25s
+[00:16:57] e:200/4000 μ_l:0.75 (64-64=0) e_t:4.30s μ_e_t:4.65s t_t:930.56s
+avg_roc_auc:0.7778543715535176
+[00:17:22] e:201/4000 μ_l:0.79 (64-64=0) e_t:4.77s μ_e_t:4.65s t_t:935.33s
+[00:17:27] e:202/4000 μ_l:0.80 (64-64=0) e_t:4.86s μ_e_t:4.65s t_t:940.19s
+[00:17:32] e:203/4000 μ_l:0.88 (64-64=0) e_t:4.62s μ_e_t:4.65s t_t:944.81s
+[00:17:36] e:204/4000 μ_l:0.81 (64-64=0) e_t:4.70s μ_e_t:4.65s t_t:949.52s
+[00:17:41] e:205/4000 μ_l:0.81 (64-64=0) e_t:4.78s μ_e_t:4.66s t_t:954.30s
+[00:17:46] e:206/4000 μ_l:0.79 (64-64=0) e_t:4.73s μ_e_t:4.66s t_t:959.03s
+[00:17:51] e:207/4000 μ_l:0.91 (64-64=0) e_t:4.82s μ_e_t:4.66s t_t:963.84s
+[00:17:55] e:208/4000 μ_l:0.79 (64-64=0) e_t:4.67s μ_e_t:4.66s t_t:968.51s
+[00:18:00] e:209/4000 μ_l:0.80 (64-64=0) e_t:4.58s μ_e_t:4.66s t_t:973.09s
+[00:18:05] e:210/4000 μ_l:0.75 (64-64=0) e_t:4.70s μ_e_t:4.66s t_t:977.80s
+[00:18:10] e:211/4000 μ_l:0.78 (64-64=0) e_t:4.77s μ_e_t:4.66s t_t:982.57s
+[00:18:14] e:212/4000 μ_l:0.76 (64-64=0) e_t:4.70s μ_e_t:4.66s t_t:987.27s
+[00:18:19] e:213/4000 μ_l:0.84 (64-64=0) e_t:4.68s μ_e_t:4.66s t_t:991.95s
+[00:18:24] e:214/4000 μ_l:0.86 (64-64=0) e_t:4.66s μ_e_t:4.66s t_t:996.61s
+[00:18:28] e:215/4000 μ_l:0.83 (64-64=0) e_t:4.73s μ_e_t:4.66s t_t:1001.34s
+[00:18:33] e:216/4000 μ_l:0.83 (64-64=0) e_t:4.82s μ_e_t:4.66s t_t:1006.16s
+[00:18:38] e:217/4000 μ_l:0.76 (64-64=0) e_t:4.48s μ_e_t:4.66s t_t:1010.64s
+[00:18:42] e:218/4000 μ_l:0.96 (64-64=0) e_t:4.46s μ_e_t:4.66s t_t:1015.11s
+[00:18:47] e:219/4000 μ_l:0.88 (64-64=0) e_t:4.50s μ_e_t:4.66s t_t:1019.61s
+[00:18:51] e:220/4000 μ_l:0.70 (64-64=0) e_t:4.56s μ_e_t:4.66s t_t:1024.17s
+[00:18:56] e:221/4000 μ_l:0.74 (64-64=0) e_t:4.85s μ_e_t:4.66s t_t:1029.02s
+[00:19:01] e:222/4000 μ_l:0.79 (64-64=0) e_t:4.94s μ_e_t:4.66s t_t:1033.96s
+[00:19:05] e:223/4000 μ_l:0.78 (64-64=0) e_t:4.53s μ_e_t:4.66s t_t:1038.49s
+[00:19:10] e:224/4000 μ_l:0.81 (64-64=0) e_t:4.37s μ_e_t:4.66s t_t:1042.86s
+[00:19:14] e:225/4000 μ_l:0.76 (64-64=0) e_t:4.55s μ_e_t:4.66s t_t:1047.41s
+[00:19:19] e:226/4000 μ_l:0.83 (64-64=0) e_t:4.89s μ_e_t:4.66s t_t:1052.30s
+[00:19:24] e:227/4000 μ_l:0.86 (64-64=0) e_t:4.47s μ_e_t:4.66s t_t:1056.78s
+[00:19:29] e:228/4000 μ_l:0.68 (64-64=0) e_t:4.80s μ_e_t:4.66s t_t:1061.58s
+[00:19:33] e:229/4000 μ_l:0.88 (64-64=0) e_t:4.73s μ_e_t:4.66s t_t:1066.30s
+[00:19:38] e:230/4000 μ_l:0.75 (64-64=0) e_t:4.55s μ_e_t:4.66s t_t:1070.86s
+[00:19:42] e:231/4000 μ_l:0.73 (64-64=0) e_t:4.54s μ_e_t:4.66s t_t:1075.40s
+[00:19:47] e:232/4000 μ_l:0.81 (64-64=0) e_t:4.94s μ_e_t:4.66s t_t:1080.34s
+[00:19:52] e:233/4000 μ_l:0.88 (64-64=0) e_t:4.66s μ_e_t:4.66s t_t:1085.01s
+[00:19:57] e:234/4000 μ_l:0.81 (64-64=0) e_t:4.54s μ_e_t:4.66s t_t:1089.55s
+[00:20:01] e:235/4000 μ_l:0.78 (64-64=0) e_t:4.64s μ_e_t:4.66s t_t:1094.19s
+[00:20:06] e:236/4000 μ_l:0.78 (64-64=0) e_t:4.91s μ_e_t:4.66s t_t:1099.10s
+[00:20:11] e:237/4000 μ_l:0.82 (64-64=0) e_t:4.83s μ_e_t:4.66s t_t:1103.92s
+[00:20:16] e:238/4000 μ_l:0.71 (64-64=0) e_t:4.91s μ_e_t:4.66s t_t:1108.83s
+[00:20:20] e:239/4000 μ_l:0.74 (64-64=0) e_t:4.67s μ_e_t:4.66s t_t:1113.50s
+[00:20:25] e:240/4000 μ_l:0.65 (64-64=0) e_t:4.74s μ_e_t:4.66s t_t:1118.23s
+[00:20:30] e:241/4000 μ_l:0.78 (64-64=0) e_t:4.69s μ_e_t:4.66s t_t:1122.92s
+[00:20:34] e:242/4000 μ_l:0.79 (64-64=0) e_t:4.56s μ_e_t:4.66s t_t:1127.49s
+[00:20:39] e:243/4000 μ_l:0.78 (64-64=0) e_t:4.56s μ_e_t:4.66s t_t:1132.05s
+[00:20:44] e:244/4000 μ_l:0.83 (64-64=0) e_t:4.54s μ_e_t:4.66s t_t:1136.59s
+[00:20:48] e:245/4000 μ_l:0.86 (64-64=0) e_t:4.55s μ_e_t:4.66s t_t:1141.14s
+[00:20:53] e:246/4000 μ_l:0.83 (64-64=0) e_t:4.64s μ_e_t:4.66s t_t:1145.78s
+[00:20:57] e:247/4000 μ_l:0.66 (64-64=0) e_t:4.72s μ_e_t:4.66s t_t:1150.50s
+[00:21:02] e:248/4000 μ_l:0.84 (64-64=0) e_t:4.50s μ_e_t:4.66s t_t:1155.00s
+[00:21:07] e:249/4000 μ_l:0.74 (64-64=0) e_t:4.65s μ_e_t:4.66s t_t:1159.65s
+[00:21:11] e:250/4000 μ_l:0.82 (64-64=0) e_t:4.48s μ_e_t:4.66s t_t:1164.13s
+[00:21:16] e:251/4000 μ_l:0.72 (64-64=0) e_t:4.73s μ_e_t:4.66s t_t:1168.86s
+[00:21:20] e:252/4000 μ_l:0.68 (64-64=0) e_t:4.40s μ_e_t:4.66s t_t:1173.27s
+[00:21:25] e:253/4000 μ_l:0.76 (64-64=0) e_t:4.57s μ_e_t:4.66s t_t:1177.84s
+[00:21:29] e:254/4000 μ_l:0.75 (64-64=0) e_t:4.42s μ_e_t:4.65s t_t:1182.25s
+[00:21:34] e:255/4000 μ_l:0.86 (64-64=0) e_t:4.73s μ_e_t:4.65s t_t:1186.98s
+[00:21:38] e:256/4000 μ_l:0.87 (64-64=0) e_t:4.41s μ_e_t:4.65s t_t:1191.39s
+[00:21:43] e:257/4000 μ_l:0.77 (64-64=0) e_t:4.86s μ_e_t:4.65s t_t:1196.25s
+[00:21:48] e:258/4000 μ_l:0.83 (64-64=0) e_t:4.88s μ_e_t:4.66s t_t:1201.13s
+[00:21:53] e:259/4000 μ_l:0.88 (64-64=0) e_t:4.89s μ_e_t:4.66s t_t:1206.02s
+[00:21:58] e:260/4000 μ_l:0.79 (64-64=0) e_t:4.97s μ_e_t:4.66s t_t:1210.98s
+[00:22:03] e:261/4000 μ_l:0.77 (64-64=0) e_t:4.52s μ_e_t:4.66s t_t:1215.51s
+[00:22:07] e:262/4000 μ_l:0.76 (64-64=0) e_t:4.67s μ_e_t:4.66s t_t:1220.18s
+[00:22:12] e:263/4000 μ_l:0.80 (64-64=0) e_t:4.81s μ_e_t:4.66s t_t:1224.99s
+[00:22:17] e:264/4000 μ_l:0.69 (64-64=0) e_t:5.16s μ_e_t:4.66s t_t:1230.16s
+[00:22:22] e:265/4000 μ_l:0.74 (64-64=0) e_t:4.79s μ_e_t:4.66s t_t:1234.94s
+[00:22:27] e:266/4000 μ_l:0.83 (64-64=0) e_t:4.56s μ_e_t:4.66s t_t:1239.50s
+[00:22:31] e:267/4000 μ_l:0.79 (64-64=0) e_t:4.72s μ_e_t:4.66s t_t:1244.23s
+[00:22:36] e:268/4000 μ_l:0.82 (64-64=0) e_t:5.06s μ_e_t:4.66s t_t:1249.29s
+[00:22:41] e:269/4000 μ_l:0.88 (64-64=0) e_t:4.84s μ_e_t:4.66s t_t:1254.13s
+[00:22:46] e:270/4000 μ_l:0.86 (64-64=0) e_t:4.71s μ_e_t:4.66s t_t:1258.84s
+[00:22:51] e:271/4000 μ_l:0.84 (64-64=0) e_t:4.80s μ_e_t:4.66s t_t:1263.64s
+[00:22:55] e:272/4000 μ_l:0.66 (64-64=0) e_t:4.56s μ_e_t:4.66s t_t:1268.20s
+[00:22:59] e:273/4000 μ_l:0.75 (64-64=0) e_t:4.22s μ_e_t:4.66s t_t:1272.42s
+[00:23:04] e:274/4000 μ_l:0.84 (64-64=0) e_t:4.54s μ_e_t:4.66s t_t:1276.96s
+[00:23:09] e:275/4000 μ_l:0.77 (64-64=0) e_t:4.83s μ_e_t:4.66s t_t:1281.79s
+[00:23:13] e:276/4000 μ_l:0.78 (64-64=0) e_t:4.46s μ_e_t:4.66s t_t:1286.24s
+[00:23:18] e:277/4000 μ_l:0.73 (64-64=0) e_t:4.86s μ_e_t:4.66s t_t:1291.11s
+[00:23:23] e:278/4000 μ_l:0.78 (64-64=0) e_t:4.47s μ_e_t:4.66s t_t:1295.57s
+[00:23:27] e:279/4000 μ_l:0.70 (64-64=0) e_t:4.64s μ_e_t:4.66s t_t:1300.22s
+[00:23:32] e:280/4000 μ_l:0.76 (64-64=0) e_t:4.60s μ_e_t:4.66s t_t:1304.82s
+[00:23:36] e:281/4000 μ_l:0.81 (64-64=0) e_t:4.48s μ_e_t:4.66s t_t:1309.30s
+[00:23:41] e:282/4000 μ_l:0.79 (64-64=0) e_t:4.72s μ_e_t:4.66s t_t:1314.01s
+[00:23:46] e:283/4000 μ_l:0.77 (64-64=0) e_t:4.73s μ_e_t:4.66s t_t:1318.74s
+[00:23:50] e:284/4000 μ_l:0.65 (64-64=0) e_t:4.65s μ_e_t:4.66s t_t:1323.39s
+[00:23:55] e:285/4000 μ_l:0.65 (64-64=0) e_t:4.72s μ_e_t:4.66s t_t:1328.11s
+[00:24:00] e:286/4000 μ_l:0.70 (64-64=0) e_t:4.49s μ_e_t:4.66s t_t:1332.61s
+[00:24:04] e:287/4000 μ_l:0.81 (64-64=0) e_t:4.82s μ_e_t:4.66s t_t:1337.43s
+[00:24:09] e:288/4000 μ_l:0.72 (64-64=0) e_t:4.73s μ_e_t:4.66s t_t:1342.16s
+[00:24:14] e:289/4000 μ_l:0.63 (64-64=0) e_t:4.60s μ_e_t:4.66s t_t:1346.77s
+[00:24:19] e:290/4000 μ_l:0.79 (64-64=0) e_t:4.81s μ_e_t:4.66s t_t:1351.58s
+[00:24:23] e:291/4000 μ_l:0.80 (64-64=0) e_t:4.79s μ_e_t:4.66s t_t:1356.37s
+[00:24:28] e:292/4000 μ_l:0.77 (64-64=0) e_t:4.72s μ_e_t:4.66s t_t:1361.09s
+[00:24:33] e:293/4000 μ_l:0.79 (64-64=0) e_t:4.44s μ_e_t:4.66s t_t:1365.53s
+[00:24:37] e:294/4000 μ_l:0.83 (64-64=0) e_t:4.57s μ_e_t:4.66s t_t:1370.10s
+[00:24:42] e:295/4000 μ_l:0.82 (64-64=0) e_t:4.72s μ_e_t:4.66s t_t:1374.82s
+[00:24:47] e:296/4000 μ_l:0.73 (64-64=0) e_t:4.87s μ_e_t:4.66s t_t:1379.69s
+[00:24:52] e:297/4000 μ_l:0.76 (64-64=0) e_t:4.78s μ_e_t:4.66s t_t:1384.48s
+[00:24:56] e:298/4000 μ_l:0.85 (64-64=0) e_t:4.32s μ_e_t:4.66s t_t:1388.79s
+[00:25:00] e:299/4000 μ_l:0.91 (64-64=0) e_t:4.60s μ_e_t:4.66s t_t:1393.39s
+[00:25:05] e:300/4000 μ_l:0.79 (64-64=0) e_t:4.69s μ_e_t:4.66s t_t:1398.08s
+avg_roc_auc:0.7888849788372267
+[00:25:30] e:301/4000 μ_l:0.69 (64-64=0) e_t:4.54s μ_e_t:4.66s t_t:1402.62s
+[00:25:34] e:302/4000 μ_l:0.76 (64-64=0) e_t:4.50s μ_e_t:4.66s t_t:1407.12s
+[00:25:39] e:303/4000 μ_l:0.83 (64-64=0) e_t:4.49s μ_e_t:4.66s t_t:1411.61s
+[00:25:43] e:304/4000 μ_l:0.66 (64-64=0) e_t:4.41s μ_e_t:4.66s t_t:1416.02s
+[00:25:47] e:305/4000 μ_l:0.79 (64-64=0) e_t:4.49s μ_e_t:4.66s t_t:1420.50s
+[00:25:52] e:306/4000 μ_l:0.78 (64-64=0) e_t:4.79s μ_e_t:4.66s t_t:1425.29s
+[00:25:57] e:307/4000 μ_l:0.67 (64-64=0) e_t:4.27s μ_e_t:4.66s t_t:1429.56s
+[00:26:01] e:308/4000 μ_l:0.63 (64-64=0) e_t:4.68s μ_e_t:4.66s t_t:1434.25s
+[00:26:06] e:309/4000 μ_l:0.80 (64-64=0) e_t:4.49s μ_e_t:4.66s t_t:1438.74s
+[00:26:10] e:310/4000 μ_l:0.66 (64-64=0) e_t:4.46s μ_e_t:4.66s t_t:1443.20s
+[00:26:15] e:311/4000 μ_l:0.84 (64-64=0) e_t:4.57s μ_e_t:4.66s t_t:1447.77s
+[00:26:19] e:312/4000 μ_l:0.84 (64-64=0) e_t:4.27s μ_e_t:4.65s t_t:1452.04s
+[00:26:23] e:313/4000 μ_l:0.91 (64-64=0) e_t:4.20s μ_e_t:4.65s t_t:1456.24s
+[00:26:28] e:314/4000 μ_l:0.72 (64-64=0) e_t:4.30s μ_e_t:4.65s t_t:1460.54s
+[00:26:32] e:315/4000 μ_l:0.82 (64-64=0) e_t:4.59s μ_e_t:4.65s t_t:1465.13s
+[00:26:36] e:316/4000 μ_l:0.73 (64-64=0) e_t:4.37s μ_e_t:4.65s t_t:1469.50s
+[00:26:41] e:317/4000 μ_l:0.75 (64-64=0) e_t:4.37s μ_e_t:4.65s t_t:1473.87s
+[00:26:45] e:318/4000 μ_l:0.76 (64-64=0) e_t:4.25s μ_e_t:4.65s t_t:1478.12s
+[00:26:50] e:319/4000 μ_l:0.78 (64-64=0) e_t:4.60s μ_e_t:4.65s t_t:1482.73s
+[00:26:54] e:320/4000 μ_l:0.78 (64-64=0) e_t:4.38s μ_e_t:4.65s t_t:1487.11s
+[00:26:59] e:321/4000 μ_l:0.80 (64-64=0) e_t:4.61s μ_e_t:4.65s t_t:1491.72s
+[00:27:03] e:322/4000 μ_l:0.75 (64-64=0) e_t:4.49s μ_e_t:4.65s t_t:1496.20s
+[00:27:08] e:323/4000 μ_l:0.78 (64-64=0) e_t:4.36s μ_e_t:4.65s t_t:1500.57s
+[00:27:12] e:324/4000 μ_l:0.82 (64-64=0) e_t:4.26s μ_e_t:4.64s t_t:1504.83s
+[00:27:16] e:325/4000 μ_l:0.79 (64-64=0) e_t:4.29s μ_e_t:4.64s t_t:1509.11s
+[00:27:20] e:326/4000 μ_l:0.68 (64-64=0) e_t:4.17s μ_e_t:4.64s t_t:1513.28s
+[00:27:25] e:327/4000 μ_l:0.83 (64-64=0) e_t:4.61s μ_e_t:4.64s t_t:1517.89s
+[00:27:29] e:328/4000 μ_l:0.78 (64-64=0) e_t:4.34s μ_e_t:4.64s t_t:1522.23s
+[00:27:34] e:329/4000 μ_l:0.72 (64-64=0) e_t:4.40s μ_e_t:4.64s t_t:1526.63s
+[00:27:38] e:330/4000 μ_l:0.89 (64-64=0) e_t:4.39s μ_e_t:4.64s t_t:1531.02s
+[00:27:42] e:331/4000 μ_l:0.68 (64-64=0) e_t:4.38s μ_e_t:4.64s t_t:1535.40s
+[00:27:47] e:332/4000 μ_l:0.84 (64-64=0) e_t:4.55s μ_e_t:4.64s t_t:1539.95s
+[00:27:51] e:333/4000 μ_l:0.77 (64-64=0) e_t:4.53s μ_e_t:4.64s t_t:1544.47s
+[00:27:56] e:334/4000 μ_l:0.76 (64-64=0) e_t:4.34s μ_e_t:4.64s t_t:1548.81s
+[00:28:00] e:335/4000 μ_l:0.77 (64-64=0) e_t:4.43s μ_e_t:4.64s t_t:1553.24s
+[00:28:05] e:336/4000 μ_l:0.80 (64-64=0) e_t:4.43s μ_e_t:4.64s t_t:1557.66s
+[00:28:09] e:337/4000 μ_l:0.73 (64-64=0) e_t:4.38s μ_e_t:4.64s t_t:1562.05s
+[00:28:13] e:338/4000 μ_l:0.78 (64-64=0) e_t:4.38s μ_e_t:4.63s t_t:1566.42s
+[00:28:18] e:339/4000 μ_l:0.77 (64-64=0) e_t:4.35s μ_e_t:4.63s t_t:1570.78s
+[00:28:22] e:340/4000 μ_l:0.81 (64-64=0) e_t:4.04s μ_e_t:4.63s t_t:1574.82s
+[00:28:26] e:341/4000 μ_l:0.86 (64-64=0) e_t:4.62s μ_e_t:4.63s t_t:1579.44s
+[00:28:31] e:342/4000 μ_l:0.81 (64-64=0) e_t:4.20s μ_e_t:4.63s t_t:1583.64s
+[00:28:35] e:343/4000 μ_l:0.76 (64-64=0) e_t:4.18s μ_e_t:4.63s t_t:1587.82s
+[00:28:39] e:344/4000 μ_l:0.74 (64-64=0) e_t:4.21s μ_e_t:4.63s t_t:1592.03s
+[00:28:43] e:345/4000 μ_l:0.75 (64-64=0) e_t:4.24s μ_e_t:4.63s t_t:1596.27s
+[00:28:47] e:346/4000 μ_l:0.73 (64-64=0) e_t:4.09s μ_e_t:4.63s t_t:1600.36s
+[00:28:51] e:347/4000 μ_l:0.79 (64-64=0) e_t:4.01s μ_e_t:4.62s t_t:1604.37s
+[00:28:56] e:348/4000 μ_l:0.69 (64-64=0) e_t:4.14s μ_e_t:4.62s t_t:1608.51s
+[00:29:00] e:349/4000 μ_l:0.91 (64-64=0) e_t:4.44s μ_e_t:4.62s t_t:1612.95s
+[00:29:04] e:350/4000 μ_l:0.66 (64-64=0) e_t:3.89s μ_e_t:4.62s t_t:1616.85s
+[00:29:08] e:351/4000 μ_l:0.90 (64-64=0) e_t:4.26s μ_e_t:4.62s t_t:1621.10s
+[00:29:12] e:352/4000 μ_l:0.84 (64-64=0) e_t:4.33s μ_e_t:4.62s t_t:1625.43s
+[00:29:17] e:353/4000 μ_l:0.79 (64-64=0) e_t:4.42s μ_e_t:4.62s t_t:1629.85s
+[00:29:21] e:354/4000 μ_l:0.78 (64-64=0) e_t:4.12s μ_e_t:4.62s t_t:1633.97s
+[00:29:25] e:355/4000 μ_l:0.75 (64-64=0) e_t:4.35s μ_e_t:4.61s t_t:1638.32s
+[00:29:30] e:356/4000 μ_l:0.79 (64-64=0) e_t:4.44s μ_e_t:4.61s t_t:1642.76s
+[00:29:34] e:357/4000 μ_l:0.61 (64-64=0) e_t:4.37s μ_e_t:4.61s t_t:1647.13s
+[00:29:38] e:358/4000 μ_l:0.73 (64-64=0) e_t:4.27s μ_e_t:4.61s t_t:1651.40s
+[00:29:43] e:359/4000 μ_l:0.72 (64-64=0) e_t:4.33s μ_e_t:4.61s t_t:1655.73s
+[00:29:47] e:360/4000 μ_l:0.73 (64-64=0) e_t:3.99s μ_e_t:4.61s t_t:1659.72s
+[00:29:51] e:361/4000 μ_l:0.77 (64-64=0) e_t:4.38s μ_e_t:4.61s t_t:1664.11s
+[00:29:55] e:362/4000 μ_l:0.71 (64-64=0) e_t:4.32s μ_e_t:4.61s t_t:1668.42s
+[00:29:59] e:363/4000 μ_l:0.84 (64-64=0) e_t:3.99s μ_e_t:4.61s t_t:1672.41s
+[00:30:04] e:364/4000 μ_l:0.76 (64-64=0) e_t:4.17s μ_e_t:4.61s t_t:1676.58s
+[00:30:09] e:365/4000 μ_l:0.91 (64-64=0) e_t:4.96s μ_e_t:4.61s t_t:1681.55s
+[00:30:13] e:366/4000 μ_l:0.80 (64-64=0) e_t:4.22s μ_e_t:4.61s t_t:1685.76s
+[00:30:17] e:367/4000 μ_l:0.75 (64-64=0) e_t:4.04s μ_e_t:4.60s t_t:1689.80s
+[00:30:21] e:368/4000 μ_l:0.82 (64-64=0) e_t:4.29s μ_e_t:4.60s t_t:1694.09s
+[00:30:26] e:369/4000 μ_l:0.71 (64-64=0) e_t:4.44s μ_e_t:4.60s t_t:1698.54s
+[00:30:30] e:370/4000 μ_l:0.79 (64-64=0) e_t:4.24s μ_e_t:4.60s t_t:1702.78s
+[00:30:34] e:371/4000 μ_l:0.63 (64-64=0) e_t:3.93s μ_e_t:4.60s t_t:1706.71s
+[00:30:38] e:372/4000 μ_l:0.80 (64-64=0) e_t:4.55s μ_e_t:4.60s t_t:1711.25s
+[00:30:43] e:373/4000 μ_l:0.78 (64-64=0) e_t:4.56s μ_e_t:4.60s t_t:1715.81s
+[00:30:47] e:374/4000 μ_l:0.79 (64-64=0) e_t:4.27s μ_e_t:4.60s t_t:1720.08s
+[00:30:51] e:375/4000 μ_l:0.73 (64-64=0) e_t:4.07s μ_e_t:4.60s t_t:1724.15s
+[00:30:56] e:376/4000 μ_l:0.86 (64-64=0) e_t:4.62s μ_e_t:4.60s t_t:1728.77s
+[00:31:00] e:377/4000 μ_l:0.62 (64-64=0) e_t:4.45s μ_e_t:4.60s t_t:1733.22s
+[00:31:04] e:378/4000 μ_l:0.89 (64-64=0) e_t:3.77s μ_e_t:4.60s t_t:1737.00s
+[00:31:08] e:379/4000 μ_l:0.79 (64-64=0) e_t:4.40s μ_e_t:4.59s t_t:1741.40s
+[00:31:13] e:380/4000 μ_l:0.71 (64-64=0) e_t:4.50s μ_e_t:4.59s t_t:1745.89s
+[00:31:17] e:381/4000 μ_l:0.67 (64-64=0) e_t:4.22s μ_e_t:4.59s t_t:1750.11s
+[00:31:22] e:382/4000 μ_l:0.77 (64-64=0) e_t:4.39s μ_e_t:4.59s t_t:1754.51s
+[00:31:26] e:383/4000 μ_l:0.71 (64-64=0) e_t:4.53s μ_e_t:4.59s t_t:1759.04s
+[00:31:30] e:384/4000 μ_l:0.71 (64-64=0) e_t:4.36s μ_e_t:4.59s t_t:1763.41s
+[00:31:35] e:385/4000 μ_l:0.86 (64-64=0) e_t:4.42s μ_e_t:4.59s t_t:1767.83s
+[00:31:39] e:386/4000 μ_l:0.76 (64-64=0) e_t:4.27s μ_e_t:4.59s t_t:1772.10s
+[00:31:44] e:387/4000 μ_l:0.86 (64-64=0) e_t:4.59s μ_e_t:4.59s t_t:1776.69s
+[00:31:48] e:388/4000 μ_l:0.80 (64-64=0) e_t:4.53s μ_e_t:4.59s t_t:1781.23s
+[00:31:53] e:389/4000 μ_l:0.72 (64-64=0) e_t:4.43s μ_e_t:4.59s t_t:1785.65s
+[00:31:57] e:390/4000 μ_l:0.72 (64-64=0) e_t:4.59s μ_e_t:4.59s t_t:1790.24s
+[00:32:02] e:391/4000 μ_l:0.95 (64-64=0) e_t:4.54s μ_e_t:4.59s t_t:1794.78s
+[00:32:06] e:392/4000 μ_l:1.01 (64-64=0) e_t:4.17s μ_e_t:4.59s t_t:1798.96s
+[00:32:10] e:393/4000 μ_l:0.68 (64-64=0) e_t:4.36s μ_e_t:4.59s t_t:1803.32s
+[00:32:15] e:394/4000 μ_l:0.78 (64-64=0) e_t:4.64s μ_e_t:4.59s t_t:1807.96s
+[00:32:19] e:395/4000 μ_l:0.70 (64-64=0) e_t:4.25s μ_e_t:4.59s t_t:1812.21s
+[00:32:24] e:396/4000 μ_l:0.75 (64-64=0) e_t:4.20s μ_e_t:4.59s t_t:1816.41s
+[00:32:28] e:397/4000 μ_l:0.78 (64-64=0) e_t:4.35s μ_e_t:4.59s t_t:1820.76s
+[00:32:32] e:398/4000 μ_l:0.83 (64-64=0) e_t:4.45s μ_e_t:4.59s t_t:1825.21s
+[00:32:37] e:399/4000 μ_l:0.77 (64-64=0) e_t:4.51s μ_e_t:4.59s t_t:1829.72s
+[00:32:41] e:400/4000 μ_l:0.74 (64-64=0) e_t:4.40s μ_e_t:4.59s t_t:1834.12s
+avg_roc_auc:0.792508185765722
+[00:33:06] e:401/4000 μ_l:0.74 (64-64=0) e_t:4.93s μ_e_t:4.59s t_t:1839.05s
+[00:33:10] e:402/4000 μ_l:0.85 (64-64=0) e_t:4.59s μ_e_t:4.59s t_t:1843.64s
+[00:33:15] e:403/4000 μ_l:0.75 (64-64=0) e_t:4.71s μ_e_t:4.59s t_t:1848.35s
+[00:33:20] e:404/4000 μ_l:0.74 (64-64=0) e_t:4.61s μ_e_t:4.59s t_t:1852.96s
+[00:33:24] e:405/4000 μ_l:0.75 (64-64=0) e_t:4.57s μ_e_t:4.59s t_t:1857.53s
+[00:33:29] e:406/4000 μ_l:0.92 (64-64=0) e_t:4.58s μ_e_t:4.59s t_t:1862.11s
+[00:33:33] e:407/4000 μ_l:0.86 (64-64=0) e_t:4.50s μ_e_t:4.59s t_t:1866.61s
+[00:33:38] e:408/4000 μ_l:0.80 (64-64=0) e_t:4.53s μ_e_t:4.59s t_t:1871.14s
+[00:33:43] e:409/4000 μ_l:0.79 (64-64=0) e_t:4.90s μ_e_t:4.59s t_t:1876.04s
+[00:33:48] e:410/4000 μ_l:0.76 (64-64=0) e_t:5.04s μ_e_t:4.59s t_t:1881.07s
+[00:33:52] e:411/4000 μ_l:0.76 (64-64=0) e_t:4.56s μ_e_t:4.59s t_t:1885.63s
+[00:33:57] e:412/4000 μ_l:0.78 (64-64=0) e_t:4.61s μ_e_t:4.59s t_t:1890.24s
+[00:34:02] e:413/4000 μ_l:0.67 (64-64=0) e_t:4.55s μ_e_t:4.59s t_t:1894.80s
+[00:34:06] e:414/4000 μ_l:0.66 (64-64=0) e_t:4.54s μ_e_t:4.59s t_t:1899.34s
+[00:34:11] e:415/4000 μ_l:0.75 (64-64=0) e_t:4.79s μ_e_t:4.59s t_t:1904.12s
+[00:34:16] e:416/4000 μ_l:0.70 (64-64=0) e_t:4.89s μ_e_t:4.59s t_t:1909.01s
+[00:34:21] e:417/4000 μ_l:0.72 (64-64=0) e_t:4.87s μ_e_t:4.59s t_t:1913.88s
+[00:34:25] e:418/4000 μ_l:0.76 (64-64=0) e_t:4.54s μ_e_t:4.59s t_t:1918.42s
+[00:34:30] e:419/4000 μ_l:0.69 (64-64=0) e_t:4.99s μ_e_t:4.59s t_t:1923.41s
+[00:34:35] e:420/4000 μ_l:0.72 (64-64=0) e_t:4.59s μ_e_t:4.59s t_t:1928.00s
+[00:34:39] e:421/4000 μ_l:0.71 (64-64=0) e_t:4.53s μ_e_t:4.59s t_t:1932.53s
+[00:34:44] e:422/4000 μ_l:0.90 (64-64=0) e_t:4.40s μ_e_t:4.59s t_t:1936.93s
+[00:34:49] e:423/4000 μ_l:0.84 (64-64=0) e_t:4.83s μ_e_t:4.59s t_t:1941.76s
+[00:34:53] e:424/4000 μ_l:0.80 (64-64=0) e_t:4.71s μ_e_t:4.59s t_t:1946.48s
+[00:34:58] e:425/4000 μ_l:0.77 (64-64=0) e_t:4.70s μ_e_t:4.59s t_t:1951.18s
+[00:35:03] e:426/4000 μ_l:0.68 (64-64=0) e_t:5.17s μ_e_t:4.59s t_t:1956.35s
+[00:35:08] e:427/4000 μ_l:0.75 (64-64=0) e_t:4.92s μ_e_t:4.59s t_t:1961.27s
+[00:35:13] e:428/4000 μ_l:0.70 (64-64=0) e_t:4.65s μ_e_t:4.59s t_t:1965.92s
+[00:35:18] e:429/4000 μ_l:0.78 (64-64=0) e_t:4.84s μ_e_t:4.59s t_t:1970.76s
+[00:35:22] e:430/4000 μ_l:0.81 (64-64=0) e_t:4.76s μ_e_t:4.59s t_t:1975.52s
+[00:35:27] e:431/4000 μ_l:0.81 (64-64=0) e_t:4.78s μ_e_t:4.59s t_t:1980.31s
+[00:35:32] e:432/4000 μ_l:0.78 (64-64=0) e_t:4.54s μ_e_t:4.59s t_t:1984.85s
+[00:35:36] e:433/4000 μ_l:0.79 (64-64=0) e_t:4.69s μ_e_t:4.59s t_t:1989.53s
+[00:35:42] e:434/4000 μ_l:0.85 (64-64=0) e_t:5.10s μ_e_t:4.60s t_t:1994.63s
+[00:35:46] e:435/4000 μ_l:0.72 (64-64=0) e_t:4.69s μ_e_t:4.60s t_t:1999.32s
+[00:35:51] e:436/4000 μ_l:0.74 (64-64=0) e_t:4.57s μ_e_t:4.60s t_t:2003.89s
+[00:35:55] e:437/4000 μ_l:0.81 (64-64=0) e_t:4.67s μ_e_t:4.60s t_t:2008.56s
+[00:36:00] e:438/4000 μ_l:0.79 (64-64=0) e_t:4.82s μ_e_t:4.60s t_t:2013.38s
+[00:36:05] e:439/4000 μ_l:0.78 (64-64=0) e_t:4.58s μ_e_t:4.60s t_t:2017.96s
+[00:36:09] e:440/4000 μ_l:0.80 (64-64=0) e_t:4.41s μ_e_t:4.60s t_t:2022.37s
+[00:36:14] e:441/4000 μ_l:0.72 (64-64=0) e_t:4.27s μ_e_t:4.60s t_t:2026.64s
+[00:36:19] e:442/4000 μ_l:0.79 (64-64=0) e_t:4.99s μ_e_t:4.60s t_t:2031.63s
+[00:36:23] e:443/4000 μ_l:0.88 (64-64=0) e_t:4.56s μ_e_t:4.60s t_t:2036.19s
+[00:36:27] e:444/4000 μ_l:0.71 (64-64=0) e_t:4.39s μ_e_t:4.60s t_t:2040.58s
+[00:36:32] e:445/4000 μ_l:0.74 (64-64=0) e_t:4.62s μ_e_t:4.60s t_t:2045.20s
+[00:36:37] e:446/4000 μ_l:0.70 (64-64=0) e_t:4.57s μ_e_t:4.60s t_t:2049.77s
+[00:36:41] e:447/4000 μ_l:0.73 (64-64=0) e_t:4.47s μ_e_t:4.60s t_t:2054.24s
+[00:36:46] e:448/4000 μ_l:0.68 (64-64=0) e_t:4.65s μ_e_t:4.60s t_t:2058.89s
+[00:36:50] e:449/4000 μ_l:0.76 (64-64=0) e_t:4.48s μ_e_t:4.60s t_t:2063.36s
+[00:36:55] e:450/4000 μ_l:0.84 (64-64=0) e_t:4.41s μ_e_t:4.60s t_t:2067.78s
+[00:36:59] e:451/4000 μ_l:0.86 (64-64=0) e_t:4.56s μ_e_t:4.59s t_t:2072.33s
+[00:37:04] e:452/4000 μ_l:0.79 (64-64=0) e_t:4.65s μ_e_t:4.60s t_t:2076.99s
+[00:37:09] e:453/4000 μ_l:0.76 (64-64=0) e_t:4.75s μ_e_t:4.60s t_t:2081.74s
+[00:37:13] e:454/4000 μ_l:0.80 (64-64=0) e_t:4.52s μ_e_t:4.60s t_t:2086.26s
+[00:37:18] e:455/4000 μ_l:0.86 (64-64=0) e_t:4.93s μ_e_t:4.60s t_t:2091.19s
+[00:37:23] e:456/4000 μ_l:0.83 (64-64=0) e_t:4.88s μ_e_t:4.60s t_t:2096.07s
+[00:37:28] e:457/4000 μ_l:0.76 (64-64=0) e_t:4.58s μ_e_t:4.60s t_t:2100.66s
+[00:37:32] e:458/4000 μ_l:0.70 (64-64=0) e_t:4.27s μ_e_t:4.60s t_t:2104.93s
+[00:37:37] e:459/4000 μ_l:0.64 (64-64=0) e_t:4.84s μ_e_t:4.60s t_t:2109.77s
+[00:37:41] e:460/4000 μ_l:0.86 (64-64=0) e_t:4.74s μ_e_t:4.60s t_t:2114.52s
+[00:37:46] e:461/4000 μ_l:0.79 (64-64=0) e_t:4.71s μ_e_t:4.60s t_t:2119.23s
+[00:37:51] e:462/4000 μ_l:0.82 (64-64=0) e_t:4.48s μ_e_t:4.60s t_t:2123.71s
+[00:37:55] e:463/4000 μ_l:0.83 (64-64=0) e_t:4.74s μ_e_t:4.60s t_t:2128.44s
+[00:38:00] e:464/4000 μ_l:0.70 (64-64=0) e_t:4.59s μ_e_t:4.60s t_t:2133.03s
+[00:38:05] e:465/4000 μ_l:0.66 (64-64=0) e_t:4.81s μ_e_t:4.60s t_t:2137.84s
+[00:38:09] e:466/4000 μ_l:0.75 (64-64=0) e_t:4.57s μ_e_t:4.60s t_t:2142.42s
+[00:38:14] e:467/4000 μ_l:0.70 (64-64=0) e_t:4.80s μ_e_t:4.60s t_t:2147.21s
+[00:38:19] e:468/4000 μ_l:0.79 (64-64=0) e_t:4.81s μ_e_t:4.60s t_t:2152.03s
+[00:38:24] e:469/4000 μ_l:0.71 (64-64=0) e_t:4.56s μ_e_t:4.60s t_t:2156.59s
+[00:38:28] e:470/4000 μ_l:0.77 (64-64=0) e_t:4.78s μ_e_t:4.60s t_t:2161.36s
+[00:38:33] e:471/4000 μ_l:0.81 (64-64=0) e_t:4.72s μ_e_t:4.60s t_t:2166.08s
+[00:38:38] e:472/4000 μ_l:0.77 (64-64=0) e_t:4.75s μ_e_t:4.60s t_t:2170.83s
+[00:38:42] e:473/4000 μ_l:0.82 (64-64=0) e_t:4.62s μ_e_t:4.60s t_t:2175.45s
+[00:38:47] e:474/4000 μ_l:0.81 (64-64=0) e_t:4.82s μ_e_t:4.60s t_t:2180.28s
+[00:38:52] e:475/4000 μ_l:0.83 (64-64=0) e_t:4.94s μ_e_t:4.60s t_t:2185.21s
+[00:38:57] e:476/4000 μ_l:0.71 (64-64=0) e_t:4.90s μ_e_t:4.60s t_t:2190.11s
+[00:39:02] e:477/4000 μ_l:0.77 (64-64=0) e_t:4.66s μ_e_t:4.60s t_t:2194.77s
+[00:39:06] e:478/4000 μ_l:0.77 (64-64=0) e_t:4.64s μ_e_t:4.60s t_t:2199.41s
+[00:39:11] e:479/4000 μ_l:0.81 (64-64=0) e_t:4.60s μ_e_t:4.60s t_t:2204.01s
+[00:39:16] e:480/4000 μ_l:0.66 (64-64=0) e_t:4.76s μ_e_t:4.60s t_t:2208.77s
+[00:39:21] e:481/4000 μ_l:0.86 (64-64=0) e_t:4.90s μ_e_t:4.60s t_t:2213.67s
+[00:39:25] e:482/4000 μ_l:0.76 (64-64=0) e_t:4.51s μ_e_t:4.60s t_t:2218.18s
+[00:39:30] e:483/4000 μ_l:0.80 (64-64=0) e_t:4.60s μ_e_t:4.60s t_t:2222.78s
+[00:39:35] e:484/4000 μ_l:0.72 (64-64=0) e_t:5.13s μ_e_t:4.60s t_t:2227.91s
+[00:39:40] e:485/4000 μ_l:0.73 (64-64=0) e_t:4.90s μ_e_t:4.60s t_t:2232.81s
+[00:39:45] e:486/4000 μ_l:0.86 (64-64=0) e_t:4.81s μ_e_t:4.60s t_t:2237.62s
+[00:39:49] e:487/4000 μ_l:0.80 (64-64=0) e_t:4.72s μ_e_t:4.60s t_t:2242.34s
+[00:39:54] e:488/4000 μ_l:0.85 (64-64=0) e_t:4.88s μ_e_t:4.60s t_t:2247.22s
+[00:39:59] e:489/4000 μ_l:0.76 (64-64=0) e_t:4.78s μ_e_t:4.61s t_t:2251.99s
+[00:40:04] e:490/4000 μ_l:0.80 (64-64=0) e_t:4.77s μ_e_t:4.61s t_t:2256.76s
+[00:40:09] e:491/4000 μ_l:0.76 (64-64=0) e_t:4.83s μ_e_t:4.61s t_t:2261.59s
+[00:40:13] e:492/4000 μ_l:0.80 (64-64=0) e_t:4.92s μ_e_t:4.61s t_t:2266.50s
+[00:40:18] e:493/4000 μ_l:0.75 (64-64=0) e_t:4.81s μ_e_t:4.61s t_t:2271.32s
+[00:40:23] e:494/4000 μ_l:0.81 (64-64=0) e_t:5.05s μ_e_t:4.61s t_t:2276.37s
+[00:40:28] e:495/4000 μ_l:0.83 (64-64=0) e_t:4.92s μ_e_t:4.61s t_t:2281.29s
+[00:40:33] e:496/4000 μ_l:0.82 (64-64=0) e_t:4.74s μ_e_t:4.61s t_t:2286.03s
+[00:40:38] e:497/4000 μ_l:0.70 (64-64=0) e_t:4.81s μ_e_t:4.61s t_t:2290.84s
+[00:40:42] e:498/4000 μ_l:0.72 (64-64=0) e_t:4.53s μ_e_t:4.61s t_t:2295.36s
+[00:40:47] e:499/4000 μ_l:0.79 (64-64=0) e_t:4.85s μ_e_t:4.61s t_t:2300.21s
+[00:40:52] e:500/4000 μ_l:0.72 (64-64=0) e_t:4.57s μ_e_t:4.61s t_t:2304.78s
+avg_roc_auc:0.7960526309268784
+[00:41:16] e:501/4000 μ_l:0.71 (64-64=0) e_t:4.64s μ_e_t:4.61s t_t:2309.42s
+[00:41:21] e:502/4000 μ_l:0.79 (64-64=0) e_t:4.57s μ_e_t:4.61s t_t:2313.99s
+[00:41:25] e:503/4000 μ_l:0.82 (64-64=0) e_t:4.32s μ_e_t:4.61s t_t:2318.31s
+[00:41:30] e:504/4000 μ_l:0.81 (64-64=0) e_t:4.56s μ_e_t:4.61s t_t:2322.87s
+[00:41:35] e:505/4000 μ_l:0.76 (64-64=0) e_t:4.71s μ_e_t:4.61s t_t:2327.58s
+[00:41:39] e:506/4000 μ_l:0.76 (64-64=0) e_t:4.74s μ_e_t:4.61s t_t:2332.32s
+[00:41:44] e:507/4000 μ_l:0.74 (64-64=0) e_t:4.75s μ_e_t:4.61s t_t:2337.08s
+[00:41:49] e:508/4000 μ_l:0.78 (64-64=0) e_t:4.57s μ_e_t:4.61s t_t:2341.64s
+[00:41:53] e:509/4000 μ_l:0.73 (64-64=0) e_t:4.70s μ_e_t:4.61s t_t:2346.35s
+[00:41:58] e:510/4000 μ_l:0.54 (64-64=0) e_t:4.36s μ_e_t:4.61s t_t:2350.71s
+[00:42:02] e:511/4000 μ_l:0.74 (64-64=0) e_t:4.61s μ_e_t:4.61s t_t:2355.32s
+[00:42:07] e:512/4000 μ_l:0.75 (64-64=0) e_t:4.73s μ_e_t:4.61s t_t:2360.05s
+[00:42:12] e:513/4000 μ_l:0.79 (64-64=0) e_t:4.87s μ_e_t:4.61s t_t:2364.92s
+[00:42:16] e:514/4000 μ_l:0.73 (64-64=0) e_t:4.52s μ_e_t:4.61s t_t:2369.44s
+[00:42:21] e:515/4000 μ_l:0.89 (64-64=0) e_t:4.78s μ_e_t:4.61s t_t:2374.21s
+[00:42:25] e:516/4000 μ_l:0.77 (64-64=0) e_t:4.32s μ_e_t:4.61s t_t:2378.53s
+[00:42:30] e:517/4000 μ_l:0.78 (64-64=0) e_t:4.88s μ_e_t:4.61s t_t:2383.41s
+[00:42:35] e:518/4000 μ_l:0.81 (64-64=0) e_t:4.47s μ_e_t:4.61s t_t:2387.88s
+[00:42:40] e:519/4000 μ_l:0.82 (64-64=0) e_t:4.84s μ_e_t:4.61s t_t:2392.72s
+[00:42:44] e:520/4000 μ_l:0.74 (64-64=0) e_t:4.78s μ_e_t:4.61s t_t:2397.50s
+[00:42:49] e:521/4000 μ_l:0.74 (64-64=0) e_t:4.52s μ_e_t:4.61s t_t:2402.02s
+[00:42:53] e:522/4000 μ_l:0.82 (64-64=0) e_t:4.47s μ_e_t:4.61s t_t:2406.49s
+[00:42:58] e:523/4000 μ_l:0.82 (64-64=0) e_t:4.57s μ_e_t:4.61s t_t:2411.07s
+[00:43:03] e:524/4000 μ_l:0.79 (64-64=0) e_t:4.65s μ_e_t:4.61s t_t:2415.71s
+[00:43:07] e:525/4000 μ_l:0.80 (64-64=0) e_t:4.49s μ_e_t:4.61s t_t:2420.20s
+[00:43:12] e:526/4000 μ_l:0.67 (64-64=0) e_t:4.65s μ_e_t:4.61s t_t:2424.85s
+[00:43:16] e:527/4000 μ_l:0.77 (64-64=0) e_t:4.60s μ_e_t:4.61s t_t:2429.46s
+[00:43:21] e:528/4000 μ_l:0.67 (64-64=0) e_t:4.76s μ_e_t:4.61s t_t:2434.22s
+[00:43:26] e:529/4000 μ_l:0.72 (64-64=0) e_t:4.61s μ_e_t:4.61s t_t:2438.83s
+[00:43:31] e:530/4000 μ_l:0.81 (64-64=0) e_t:4.88s μ_e_t:4.61s t_t:2443.71s
+[00:43:35] e:531/4000 μ_l:0.86 (64-64=0) e_t:4.54s μ_e_t:4.61s t_t:2448.25s
+[00:43:40] e:532/4000 μ_l:0.60 (64-64=0) e_t:4.46s μ_e_t:4.61s t_t:2452.72s
+[00:43:44] e:533/4000 μ_l:0.87 (64-64=0) e_t:4.43s μ_e_t:4.61s t_t:2457.15s
+[00:43:49] e:534/4000 μ_l:0.81 (64-64=0) e_t:4.58s μ_e_t:4.61s t_t:2461.73s
+[00:43:53] e:535/4000 μ_l:0.86 (64-64=0) e_t:4.51s μ_e_t:4.61s t_t:2466.25s
+[00:43:58] e:536/4000 μ_l:0.80 (64-64=0) e_t:4.29s μ_e_t:4.61s t_t:2470.54s
+[00:44:02] e:537/4000 μ_l:0.75 (64-64=0) e_t:4.37s μ_e_t:4.61s t_t:2474.90s
+[00:44:06] e:538/4000 μ_l:0.72 (64-64=0) e_t:4.55s μ_e_t:4.61s t_t:2479.46s
+[00:44:11] e:539/4000 μ_l:0.81 (64-64=0) e_t:4.45s μ_e_t:4.61s t_t:2483.91s
+[00:44:15] e:540/4000 μ_l:0.82 (64-64=0) e_t:4.52s μ_e_t:4.61s t_t:2488.43s
+[00:44:20] e:541/4000 μ_l:0.85 (64-64=0) e_t:4.62s μ_e_t:4.61s t_t:2493.05s
+[00:44:25] e:542/4000 μ_l:0.72 (64-64=0) e_t:4.63s μ_e_t:4.61s t_t:2497.68s
+[00:44:29] e:543/4000 μ_l:0.83 (64-64=0) e_t:4.74s μ_e_t:4.61s t_t:2502.43s
+[00:44:34] e:544/4000 μ_l:0.66 (64-64=0) e_t:4.53s μ_e_t:4.61s t_t:2506.96s
+[00:44:39] e:545/4000 μ_l:0.79 (64-64=0) e_t:4.55s μ_e_t:4.61s t_t:2511.51s
+[00:44:43] e:546/4000 μ_l:0.76 (64-64=0) e_t:4.61s μ_e_t:4.61s t_t:2516.12s
+[00:44:48] e:547/4000 μ_l:0.87 (64-64=0) e_t:4.71s μ_e_t:4.61s t_t:2520.83s
+[00:44:52] e:548/4000 μ_l:0.60 (64-64=0) e_t:4.58s μ_e_t:4.61s t_t:2525.41s
+[00:44:57] e:549/4000 μ_l:0.78 (64-64=0) e_t:4.58s μ_e_t:4.61s t_t:2529.99s
+[00:45:02] e:550/4000 μ_l:0.76 (64-64=0) e_t:4.74s μ_e_t:4.61s t_t:2534.74s
+[00:45:06] e:551/4000 μ_l:0.78 (64-64=0) e_t:4.46s μ_e_t:4.61s t_t:2539.20s
+[00:45:11] e:552/4000 μ_l:0.75 (64-64=0) e_t:4.57s μ_e_t:4.61s t_t:2543.77s
+[00:45:15] e:553/4000 μ_l:0.86 (64-64=0) e_t:4.29s μ_e_t:4.61s t_t:2548.07s
+[00:45:20] e:554/4000 μ_l:0.78 (64-64=0) e_t:4.48s μ_e_t:4.61s t_t:2552.54s
+[00:45:24] e:555/4000 μ_l:0.81 (64-64=0) e_t:4.53s μ_e_t:4.61s t_t:2557.07s
+[00:45:29] e:556/4000 μ_l:0.78 (64-64=0) e_t:4.64s μ_e_t:4.61s t_t:2561.72s
+[00:45:33] e:557/4000 μ_l:0.78 (64-64=0) e_t:4.65s μ_e_t:4.61s t_t:2566.37s
+[00:45:38] e:558/4000 μ_l:0.78 (64-64=0) e_t:4.51s μ_e_t:4.61s t_t:2570.88s
+[00:45:43] e:559/4000 μ_l:0.74 (64-64=0) e_t:4.59s μ_e_t:4.61s t_t:2575.47s
+[00:45:47] e:560/4000 μ_l:0.68 (64-64=0) e_t:4.41s μ_e_t:4.61s t_t:2579.88s
+[00:45:51] e:561/4000 μ_l:0.77 (64-64=0) e_t:4.42s μ_e_t:4.61s t_t:2584.29s
+[00:45:56] e:562/4000 μ_l:0.75 (64-64=0) e_t:4.70s μ_e_t:4.61s t_t:2588.99s
+[00:46:01] e:563/4000 μ_l:0.74 (64-64=0) e_t:4.75s μ_e_t:4.61s t_t:2593.75s
+[00:46:05] e:564/4000 μ_l:0.75 (64-64=0) e_t:4.23s μ_e_t:4.61s t_t:2597.97s
+[00:46:10] e:565/4000 μ_l:0.77 (64-64=0) e_t:4.80s μ_e_t:4.61s t_t:2602.77s
+[00:46:15] e:566/4000 μ_l:0.72 (64-64=0) e_t:4.70s μ_e_t:4.61s t_t:2607.47s
+[00:46:19] e:567/4000 μ_l:0.81 (64-64=0) e_t:4.66s μ_e_t:4.61s t_t:2612.13s
+[00:46:24] e:568/4000 μ_l:0.70 (64-64=0) e_t:4.51s μ_e_t:4.61s t_t:2616.64s
+[00:46:28] e:569/4000 μ_l:0.89 (64-64=0) e_t:4.64s μ_e_t:4.61s t_t:2621.28s
+[00:46:33] e:570/4000 μ_l:0.82 (64-64=0) e_t:4.72s μ_e_t:4.61s t_t:2625.99s
+[00:46:38] e:571/4000 μ_l:0.80 (64-64=0) e_t:4.51s μ_e_t:4.61s t_t:2630.51s
+[00:46:42] e:572/4000 μ_l:0.74 (64-64=0) e_t:4.35s μ_e_t:4.61s t_t:2634.86s
+[00:46:46] e:573/4000 μ_l:0.77 (64-64=0) e_t:4.40s μ_e_t:4.61s t_t:2639.26s
+[00:46:51] e:574/4000 μ_l:0.74 (64-64=0) e_t:4.64s μ_e_t:4.61s t_t:2643.90s
+[00:46:55] e:575/4000 μ_l:0.74 (64-64=0) e_t:4.43s μ_e_t:4.61s t_t:2648.33s
+[00:47:00] e:576/4000 μ_l:0.76 (64-64=0) e_t:4.49s μ_e_t:4.61s t_t:2652.82s
+[00:47:05] e:577/4000 μ_l:0.79 (64-64=0) e_t:4.82s μ_e_t:4.61s t_t:2657.64s
+[00:47:09] e:578/4000 μ_l:0.77 (64-64=0) e_t:4.48s μ_e_t:4.61s t_t:2662.12s
+[00:47:14] e:579/4000 μ_l:0.82 (64-64=0) e_t:4.71s μ_e_t:4.61s t_t:2666.83s
+[00:47:18] e:580/4000 μ_l:0.71 (64-64=0) e_t:4.40s μ_e_t:4.61s t_t:2671.23s
+[00:47:23] e:581/4000 μ_l:0.87 (64-64=0) e_t:4.30s μ_e_t:4.61s t_t:2675.54s
+[00:47:27] e:582/4000 μ_l:0.84 (64-64=0) e_t:4.58s μ_e_t:4.61s t_t:2680.12s
+[00:47:32] e:583/4000 μ_l:0.73 (64-64=0) e_t:4.49s μ_e_t:4.60s t_t:2684.60s
+[00:47:36] e:584/4000 μ_l:0.82 (64-64=0) e_t:4.50s μ_e_t:4.60s t_t:2689.10s
+[00:47:41] e:585/4000 μ_l:0.70 (64-64=0) e_t:4.50s μ_e_t:4.60s t_t:2693.61s
+[00:47:45] e:586/4000 μ_l:0.82 (64-64=0) e_t:4.62s μ_e_t:4.60s t_t:2698.23s
+[00:47:50] e:587/4000 μ_l:0.71 (64-64=0) e_t:4.59s μ_e_t:4.60s t_t:2702.82s
+[00:47:55] e:588/4000 μ_l:0.84 (64-64=0) e_t:4.85s μ_e_t:4.60s t_t:2707.67s
+[00:47:59] e:589/4000 μ_l:0.70 (64-64=0) e_t:4.40s μ_e_t:4.60s t_t:2712.07s
+[00:48:04] e:590/4000 μ_l:0.79 (64-64=0) e_t:4.48s μ_e_t:4.60s t_t:2716.55s
+[00:48:08] e:591/4000 μ_l:0.69 (64-64=0) e_t:4.57s μ_e_t:4.60s t_t:2721.12s
+[00:48:13] e:592/4000 μ_l:0.71 (64-64=0) e_t:4.71s μ_e_t:4.60s t_t:2725.83s
+[00:48:18] e:593/4000 μ_l:0.83 (64-64=0) e_t:4.66s μ_e_t:4.60s t_t:2730.49s
+[00:48:22] e:594/4000 μ_l:0.72 (64-64=0) e_t:4.45s μ_e_t:4.60s t_t:2734.94s
+[00:48:27] e:595/4000 μ_l:0.80 (64-64=0) e_t:4.70s μ_e_t:4.60s t_t:2739.64s
+[00:48:31] e:596/4000 μ_l:0.84 (64-64=0) e_t:4.58s μ_e_t:4.60s t_t:2744.23s
+[00:48:36] e:597/4000 μ_l:0.76 (64-64=0) e_t:4.30s μ_e_t:4.60s t_t:2748.53s
+[00:48:40] e:598/4000 μ_l:0.71 (64-64=0) e_t:4.47s μ_e_t:4.60s t_t:2753.00s
+[00:48:45] e:599/4000 μ_l:0.81 (64-64=0) e_t:4.49s μ_e_t:4.60s t_t:2757.49s
+[00:48:49] e:600/4000 μ_l:0.85 (64-64=0) e_t:4.82s μ_e_t:4.60s t_t:2762.31s
+avg_roc_auc:0.801148647746072
+[00:49:14] e:601/4000 μ_l:0.80 (64-64=0) e_t:4.75s μ_e_t:4.60s t_t:2767.06s
+[00:49:19] e:602/4000 μ_l:0.73 (64-64=0) e_t:4.73s μ_e_t:4.60s t_t:2771.79s
+[00:49:24] e:603/4000 μ_l:0.80 (64-64=0) e_t:4.62s μ_e_t:4.60s t_t:2776.41s
+[00:49:28] e:604/4000 μ_l:0.79 (64-64=0) e_t:4.60s μ_e_t:4.60s t_t:2781.01s
+[00:49:33] e:605/4000 μ_l:0.72 (64-64=0) e_t:4.40s μ_e_t:4.60s t_t:2785.41s
+[00:49:38] e:606/4000 μ_l:0.84 (64-64=0) e_t:4.93s μ_e_t:4.60s t_t:2790.34s
+[00:49:42] e:607/4000 μ_l:0.81 (64-64=0) e_t:4.65s μ_e_t:4.60s t_t:2794.99s
+[00:49:47] e:608/4000 μ_l:0.73 (64-64=0) e_t:4.53s μ_e_t:4.60s t_t:2799.52s
+[00:49:51] e:609/4000 μ_l:0.72 (64-64=0) e_t:4.52s μ_e_t:4.60s t_t:2804.04s
+[00:49:56] e:610/4000 μ_l:0.81 (64-64=0) e_t:4.43s μ_e_t:4.60s t_t:2808.47s
+[00:50:00] e:611/4000 μ_l:0.82 (64-64=0) e_t:4.39s μ_e_t:4.60s t_t:2812.86s
+[00:50:05] e:612/4000 μ_l:0.83 (64-64=0) e_t:4.78s μ_e_t:4.60s t_t:2817.65s
+[00:50:10] e:613/4000 μ_l:0.78 (64-64=0) e_t:4.59s μ_e_t:4.60s t_t:2822.23s
+[00:50:14] e:614/4000 μ_l:0.80 (64-64=0) e_t:4.47s μ_e_t:4.60s t_t:2826.70s
+[00:50:19] e:615/4000 μ_l:0.79 (64-64=0) e_t:4.46s μ_e_t:4.60s t_t:2831.16s
+[00:50:23] e:616/4000 μ_l:0.77 (64-64=0) e_t:4.31s μ_e_t:4.60s t_t:2835.48s
+[00:50:28] e:617/4000 μ_l:0.74 (64-64=0) e_t:4.72s μ_e_t:4.60s t_t:2840.19s
+[00:50:32] e:618/4000 μ_l:0.72 (64-64=0) e_t:4.71s μ_e_t:4.60s t_t:2844.91s
+[00:50:37] e:619/4000 μ_l:0.82 (64-64=0) e_t:4.72s μ_e_t:4.60s t_t:2849.63s
+[00:50:41] e:620/4000 μ_l:0.72 (64-64=0) e_t:4.34s μ_e_t:4.60s t_t:2853.97s
+[00:50:46] e:621/4000 μ_l:0.70 (64-64=0) e_t:4.54s μ_e_t:4.60s t_t:2858.51s
+[00:50:51] e:622/4000 μ_l:0.73 (64-64=0) e_t:4.75s μ_e_t:4.60s t_t:2863.25s
+[00:50:55] e:623/4000 μ_l:0.84 (64-64=0) e_t:4.64s μ_e_t:4.60s t_t:2867.90s
+[00:51:00] e:624/4000 μ_l:0.85 (64-64=0) e_t:4.73s μ_e_t:4.60s t_t:2872.63s
+[00:51:05] e:625/4000 μ_l:0.84 (64-64=0) e_t:4.60s μ_e_t:4.60s t_t:2877.23s
+[00:51:09] e:626/4000 μ_l:0.78 (64-64=0) e_t:4.78s μ_e_t:4.60s t_t:2882.01s
+[00:51:14] e:627/4000 μ_l:0.74 (64-64=0) e_t:4.57s μ_e_t:4.60s t_t:2886.59s
+[00:51:19] e:628/4000 μ_l:0.85 (64-64=0) e_t:4.55s μ_e_t:4.60s t_t:2891.14s
+[00:51:23] e:629/4000 μ_l:0.65 (64-64=0) e_t:4.71s μ_e_t:4.60s t_t:2895.85s
+[00:51:28] e:630/4000 μ_l:0.82 (64-64=0) e_t:4.35s μ_e_t:4.60s t_t:2900.20s
+[00:51:32] e:631/4000 μ_l:0.70 (64-64=0) e_t:4.30s μ_e_t:4.60s t_t:2904.50s
+[00:51:36] e:632/4000 μ_l:0.75 (64-64=0) e_t:4.45s μ_e_t:4.60s t_t:2908.95s
+[00:51:41] e:633/4000 μ_l:0.72 (64-64=0) e_t:4.21s μ_e_t:4.60s t_t:2913.16s
+[00:51:45] e:634/4000 μ_l:0.75 (64-64=0) e_t:4.57s μ_e_t:4.60s t_t:2917.74s
+[00:51:50] e:635/4000 μ_l:0.70 (64-64=0) e_t:4.77s μ_e_t:4.60s t_t:2922.51s
+[00:51:54] e:636/4000 μ_l:0.70 (64-64=0) e_t:4.28s μ_e_t:4.60s t_t:2926.79s
+[00:51:59] e:637/4000 μ_l:0.62 (64-64=0) e_t:4.59s μ_e_t:4.60s t_t:2931.38s
+[00:52:03] e:638/4000 μ_l:0.78 (64-64=0) e_t:4.64s μ_e_t:4.60s t_t:2936.02s
+[00:52:08] e:639/4000 μ_l:0.75 (64-64=0) e_t:4.52s μ_e_t:4.60s t_t:2940.54s
+[00:52:13] e:640/4000 μ_l:0.70 (64-64=0) e_t:4.59s μ_e_t:4.60s t_t:2945.13s
+[00:52:17] e:641/4000 μ_l:0.73 (64-64=0) e_t:4.44s μ_e_t:4.60s t_t:2949.57s
+[00:52:22] e:642/4000 μ_l:0.74 (64-64=0) e_t:4.65s μ_e_t:4.60s t_t:2954.22s
+[00:52:26] e:643/4000 μ_l:0.91 (64-64=0) e_t:4.36s μ_e_t:4.60s t_t:2958.58s
+[00:52:30] e:644/4000 μ_l:0.81 (64-64=0) e_t:4.47s μ_e_t:4.60s t_t:2963.05s
+[00:52:35] e:645/4000 μ_l:0.70 (64-64=0) e_t:4.60s μ_e_t:4.60s t_t:2967.65s
+[00:52:40] e:646/4000 μ_l:0.80 (64-64=0) e_t:4.60s μ_e_t:4.60s t_t:2972.25s
+[00:52:44] e:647/4000 μ_l:0.85 (64-64=0) e_t:4.41s μ_e_t:4.60s t_t:2976.66s
+[00:52:49] e:648/4000 μ_l:0.72 (64-64=0) e_t:4.57s μ_e_t:4.60s t_t:2981.23s
+[00:52:53] e:649/4000 μ_l:0.77 (64-64=0) e_t:4.75s μ_e_t:4.60s t_t:2985.98s
+[00:52:58] e:650/4000 μ_l:0.71 (64-64=0) e_t:4.50s μ_e_t:4.60s t_t:2990.49s
+[00:53:03] e:651/4000 μ_l:0.81 (64-64=0) e_t:4.71s μ_e_t:4.60s t_t:2995.20s
+[00:53:07] e:652/4000 μ_l:0.67 (64-64=0) e_t:4.70s μ_e_t:4.60s t_t:2999.90s
+[00:53:12] e:653/4000 μ_l:0.85 (64-64=0) e_t:4.45s μ_e_t:4.60s t_t:3004.35s
+[00:53:17] e:654/4000 μ_l:0.78 (64-64=0) e_t:4.88s μ_e_t:4.60s t_t:3009.23s
+[00:53:21] e:655/4000 μ_l:0.79 (64-64=0) e_t:4.59s μ_e_t:4.60s t_t:3013.81s
+[00:53:26] e:656/4000 μ_l:0.68 (64-64=0) e_t:4.56s μ_e_t:4.60s t_t:3018.37s
+[00:53:30] e:657/4000 μ_l:0.84 (64-64=0) e_t:4.38s μ_e_t:4.60s t_t:3022.75s
+[00:53:35] e:658/4000 μ_l:0.81 (64-64=0) e_t:4.44s μ_e_t:4.60s t_t:3027.19s
+[00:53:39] e:659/4000 μ_l:0.69 (64-64=0) e_t:4.66s μ_e_t:4.60s t_t:3031.85s
+[00:53:44] e:660/4000 μ_l:0.79 (64-64=0) e_t:4.50s μ_e_t:4.60s t_t:3036.34s
+[00:53:48] e:661/4000 μ_l:0.72 (64-64=0) e_t:4.63s μ_e_t:4.60s t_t:3040.97s
+[00:53:53] e:662/4000 μ_l:0.72 (64-64=0) e_t:4.58s μ_e_t:4.60s t_t:3045.56s
+[00:53:58] e:663/4000 μ_l:0.83 (64-64=0) e_t:4.64s μ_e_t:4.60s t_t:3050.20s
+[00:54:03] e:664/4000 μ_l:0.75 (64-64=0) e_t:4.86s μ_e_t:4.60s t_t:3055.06s
+[00:54:07] e:665/4000 μ_l:0.75 (64-64=0) e_t:4.81s μ_e_t:4.60s t_t:3059.87s
+[00:54:12] e:666/4000 μ_l:0.71 (64-64=0) e_t:4.40s μ_e_t:4.60s t_t:3064.27s
+[00:54:16] e:667/4000 μ_l:0.73 (64-64=0) e_t:4.27s μ_e_t:4.60s t_t:3068.54s
+[00:54:20] e:668/4000 μ_l:0.77 (64-64=0) e_t:4.27s μ_e_t:4.60s t_t:3072.80s
+[00:54:25] e:669/4000 μ_l:0.71 (64-64=0) e_t:4.52s μ_e_t:4.60s t_t:3077.33s
+[00:54:29] e:670/4000 μ_l:0.70 (64-64=0) e_t:4.57s μ_e_t:4.60s t_t:3081.89s
+[00:54:34] e:671/4000 μ_l:0.80 (64-64=0) e_t:4.18s μ_e_t:4.60s t_t:3086.08s
+[00:54:38] e:672/4000 μ_l:0.80 (64-64=0) e_t:4.52s μ_e_t:4.60s t_t:3090.60s
+[00:54:42] e:673/4000 μ_l:0.79 (64-64=0) e_t:4.18s μ_e_t:4.60s t_t:3094.78s
+[00:54:47] e:674/4000 μ_l:0.78 (64-64=0) e_t:4.49s μ_e_t:4.60s t_t:3099.27s
+[00:54:51] e:675/4000 μ_l:0.75 (64-64=0) e_t:4.18s μ_e_t:4.60s t_t:3103.46s
+[00:54:55] e:676/4000 μ_l:0.78 (64-64=0) e_t:4.16s μ_e_t:4.60s t_t:3107.62s
+[00:54:59] e:677/4000 μ_l:0.79 (64-64=0) e_t:4.07s μ_e_t:4.60s t_t:3111.68s
+[00:55:04] e:678/4000 μ_l:0.81 (64-64=0) e_t:4.40s μ_e_t:4.60s t_t:3116.08s
+[00:55:08] e:679/4000 μ_l:0.72 (64-64=0) e_t:4.37s μ_e_t:4.60s t_t:3120.45s
+[00:55:12] e:680/4000 μ_l:0.77 (64-64=0) e_t:4.35s μ_e_t:4.60s t_t:3124.80s
+[00:55:17] e:681/4000 μ_l:0.81 (64-64=0) e_t:4.27s μ_e_t:4.59s t_t:3129.07s
+[00:55:21] e:682/4000 μ_l:0.68 (64-64=0) e_t:4.21s μ_e_t:4.59s t_t:3133.28s
+[00:55:25] e:683/4000 μ_l:0.79 (64-64=0) e_t:4.57s μ_e_t:4.59s t_t:3137.85s
+[00:55:30] e:684/4000 μ_l:0.76 (64-64=0) e_t:4.47s μ_e_t:4.59s t_t:3142.32s
+[00:55:34] e:685/4000 μ_l:0.70 (64-64=0) e_t:4.36s μ_e_t:4.59s t_t:3146.67s
+[00:55:38] e:686/4000 μ_l:0.68 (64-64=0) e_t:3.97s μ_e_t:4.59s t_t:3150.64s
+[00:55:42] e:687/4000 μ_l:0.74 (64-64=0) e_t:4.30s μ_e_t:4.59s t_t:3154.95s
+[00:55:47] e:688/4000 μ_l:0.75 (64-64=0) e_t:4.36s μ_e_t:4.59s t_t:3159.31s
+[00:55:52] e:689/4000 μ_l:0.65 (64-64=0) e_t:4.98s μ_e_t:4.59s t_t:3164.28s
+[00:55:56] e:690/4000 μ_l:0.74 (64-64=0) e_t:4.62s μ_e_t:4.59s t_t:3168.90s
+[00:56:01] e:691/4000 μ_l:0.74 (64-64=0) e_t:4.29s μ_e_t:4.59s t_t:3173.20s
+[00:56:05] e:692/4000 μ_l:0.81 (64-64=0) e_t:4.16s μ_e_t:4.59s t_t:3177.36s
+[00:56:09] e:693/4000 μ_l:0.78 (64-64=0) e_t:4.64s μ_e_t:4.59s t_t:3182.00s
+[00:56:14] e:694/4000 μ_l:0.78 (64-64=0) e_t:4.55s μ_e_t:4.59s t_t:3186.55s
+[00:56:18] e:695/4000 μ_l:0.71 (64-64=0) e_t:4.39s μ_e_t:4.59s t_t:3190.94s
+[00:56:23] e:696/4000 μ_l:0.73 (64-64=0) e_t:4.39s μ_e_t:4.59s t_t:3195.34s
+[00:56:27] e:697/4000 μ_l:0.68 (64-64=0) e_t:4.64s μ_e_t:4.59s t_t:3199.98s
+[00:56:32] e:698/4000 μ_l:0.73 (64-64=0) e_t:4.30s μ_e_t:4.59s t_t:3204.28s
+[00:56:36] e:699/4000 μ_l:0.85 (64-64=0) e_t:4.48s μ_e_t:4.59s t_t:3208.76s
+[00:56:41] e:700/4000 μ_l:0.78 (64-64=0) e_t:4.65s μ_e_t:4.59s t_t:3213.41s
+avg_roc_auc:0.8047948061617075
+[00:57:05] e:701/4000 μ_l:0.87 (64-64=0) e_t:4.55s μ_e_t:4.59s t_t:3217.96s
+[00:57:10] e:702/4000 μ_l:0.88 (64-64=0) e_t:4.60s μ_e_t:4.59s t_t:3222.57s
+[00:57:14] e:703/4000 μ_l:0.78 (64-64=0) e_t:4.34s μ_e_t:4.59s t_t:3226.90s
+[00:57:19] e:704/4000 μ_l:0.77 (64-64=0) e_t:4.84s μ_e_t:4.59s t_t:3231.74s
+[00:57:24] e:705/4000 μ_l:0.75 (64-64=0) e_t:4.41s μ_e_t:4.59s t_t:3236.15s
+[00:57:28] e:706/4000 μ_l:0.75 (64-64=0) e_t:4.57s μ_e_t:4.59s t_t:3240.73s
+[00:57:33] e:707/4000 μ_l:0.79 (64-64=0) e_t:4.49s μ_e_t:4.59s t_t:3245.21s
+[00:57:37] e:708/4000 μ_l:0.67 (64-64=0) e_t:4.54s μ_e_t:4.59s t_t:3249.76s
+[00:57:42] e:709/4000 μ_l:0.78 (64-64=0) e_t:4.60s μ_e_t:4.59s t_t:3254.35s
+[00:57:46] e:710/4000 μ_l:0.88 (64-64=0) e_t:4.51s μ_e_t:4.59s t_t:3258.87s
+[00:57:51] e:711/4000 μ_l:0.80 (64-64=0) e_t:4.53s μ_e_t:4.59s t_t:3263.40s
+[00:57:56] e:712/4000 μ_l:0.86 (64-64=0) e_t:4.78s μ_e_t:4.59s t_t:3268.18s
+[00:58:00] e:713/4000 μ_l:0.70 (64-64=0) e_t:4.43s μ_e_t:4.59s t_t:3272.61s
+[00:58:05] e:714/4000 μ_l:0.73 (64-64=0) e_t:4.62s μ_e_t:4.59s t_t:3277.23s
+[00:58:09] e:715/4000 μ_l:0.75 (64-64=0) e_t:4.74s μ_e_t:4.59s t_t:3281.97s
+[00:58:14] e:716/4000 μ_l:0.80 (64-64=0) e_t:4.61s μ_e_t:4.59s t_t:3286.58s
+[00:58:18] e:717/4000 μ_l:0.74 (64-64=0) e_t:4.31s μ_e_t:4.59s t_t:3290.89s
+[00:58:23] e:718/4000 μ_l:0.82 (64-64=0) e_t:4.44s μ_e_t:4.59s t_t:3295.33s
+[00:58:27] e:719/4000 μ_l:0.84 (64-64=0) e_t:4.27s μ_e_t:4.59s t_t:3299.60s
+[00:58:32] e:720/4000 μ_l:0.79 (64-64=0) e_t:4.74s μ_e_t:4.59s t_t:3304.33s
+[00:58:36] e:721/4000 μ_l:0.66 (64-64=0) e_t:4.44s μ_e_t:4.59s t_t:3308.78s
+[00:58:41] e:722/4000 μ_l:0.84 (64-64=0) e_t:4.52s μ_e_t:4.59s t_t:3313.30s
+[00:58:45] e:723/4000 μ_l:0.68 (64-64=0) e_t:4.54s μ_e_t:4.59s t_t:3317.84s
+[00:58:50] e:724/4000 μ_l:0.79 (64-64=0) e_t:4.52s μ_e_t:4.59s t_t:3322.36s
+[00:58:54] e:725/4000 μ_l:0.66 (64-64=0) e_t:4.42s μ_e_t:4.59s t_t:3326.79s
+[00:58:59] e:726/4000 μ_l:0.76 (64-64=0) e_t:4.69s μ_e_t:4.59s t_t:3331.47s
+[00:59:03] e:727/4000 μ_l:0.86 (64-64=0) e_t:4.34s μ_e_t:4.59s t_t:3335.81s
+[00:59:08] e:728/4000 μ_l:0.86 (64-64=0) e_t:5.00s μ_e_t:4.59s t_t:3340.80s
+[00:59:13] e:729/4000 μ_l:0.76 (64-64=0) e_t:4.61s μ_e_t:4.59s t_t:3345.41s
+[00:59:17] e:730/4000 μ_l:0.82 (64-64=0) e_t:4.49s μ_e_t:4.59s t_t:3349.90s
+[00:59:22] e:731/4000 μ_l:0.74 (64-64=0) e_t:4.34s μ_e_t:4.59s t_t:3354.24s
+[00:59:26] e:732/4000 μ_l:0.70 (64-64=0) e_t:4.59s μ_e_t:4.59s t_t:3358.83s
+[00:59:31] e:733/4000 μ_l:0.74 (64-64=0) e_t:4.91s μ_e_t:4.59s t_t:3363.74s
+[00:59:36] e:734/4000 μ_l:0.78 (64-64=0) e_t:4.47s μ_e_t:4.59s t_t:3368.21s
+[00:59:40] e:735/4000 μ_l:0.74 (64-64=0) e_t:4.34s μ_e_t:4.59s t_t:3372.55s
+[00:59:45] e:736/4000 μ_l:0.71 (64-64=0) e_t:4.58s μ_e_t:4.59s t_t:3377.13s
+[00:59:49] e:737/4000 μ_l:0.70 (64-64=0) e_t:4.55s μ_e_t:4.59s t_t:3381.68s
+[00:59:54] e:738/4000 μ_l:0.74 (64-64=0) e_t:4.63s μ_e_t:4.59s t_t:3386.31s
+[00:59:58] e:739/4000 μ_l:0.75 (64-64=0) e_t:4.45s μ_e_t:4.59s t_t:3390.75s
+[01:00:03] e:740/4000 μ_l:0.73 (64-64=0) e_t:4.53s μ_e_t:4.59s t_t:3395.28s
+[01:00:08] e:741/4000 μ_l:0.80 (64-64=0) e_t:4.90s μ_e_t:4.59s t_t:3400.18s
+[01:00:12] e:742/4000 μ_l:0.86 (64-64=0) e_t:4.47s μ_e_t:4.59s t_t:3404.65s
+[01:00:17] e:743/4000 μ_l:0.74 (64-64=0) e_t:4.55s μ_e_t:4.59s t_t:3409.20s
+[01:00:21] e:744/4000 μ_l:0.85 (64-64=0) e_t:4.61s μ_e_t:4.59s t_t:3413.81s
+[01:00:26] e:745/4000 μ_l:0.77 (64-64=0) e_t:4.41s μ_e_t:4.59s t_t:3418.22s
+[01:00:30] e:746/4000 μ_l:0.74 (64-64=0) e_t:4.39s μ_e_t:4.59s t_t:3422.61s
+[01:00:35] e:747/4000 μ_l:0.75 (64-64=0) e_t:4.33s μ_e_t:4.59s t_t:3426.94s
+[01:00:39] e:748/4000 μ_l:0.77 (64-64=0) e_t:4.57s μ_e_t:4.59s t_t:3431.51s
+[01:00:44] e:749/4000 μ_l:0.75 (64-64=0) e_t:4.64s μ_e_t:4.59s t_t:3436.15s
+[01:00:48] e:750/4000 μ_l:0.76 (64-64=0) e_t:4.52s μ_e_t:4.59s t_t:3440.67s
+[01:00:53] e:751/4000 μ_l:0.73 (64-64=0) e_t:4.66s μ_e_t:4.59s t_t:3445.34s
+[01:00:58] e:752/4000 μ_l:0.72 (64-64=0) e_t:4.71s μ_e_t:4.59s t_t:3450.04s
+[01:01:02] e:753/4000 μ_l:0.76 (64-64=0) e_t:4.60s μ_e_t:4.59s t_t:3454.65s
+[01:01:07] e:754/4000 μ_l:0.80 (64-64=0) e_t:4.53s μ_e_t:4.59s t_t:3459.18s
+[01:01:11] e:755/4000 μ_l:0.84 (64-64=0) e_t:4.32s μ_e_t:4.59s t_t:3463.50s
+[01:01:16] e:756/4000 μ_l:0.81 (64-64=0) e_t:4.48s μ_e_t:4.59s t_t:3467.97s
+[01:01:20] e:757/4000 μ_l:0.67 (64-64=0) e_t:4.74s μ_e_t:4.59s t_t:3472.72s
+[01:01:25] e:758/4000 μ_l:0.85 (64-64=0) e_t:4.61s μ_e_t:4.59s t_t:3477.33s
+[01:01:30] e:759/4000 μ_l:0.68 (64-64=0) e_t:4.84s μ_e_t:4.59s t_t:3482.16s
+[01:01:34] e:760/4000 μ_l:0.75 (64-64=0) e_t:4.42s μ_e_t:4.59s t_t:3486.58s
+[01:01:39] e:761/4000 μ_l:0.70 (64-64=0) e_t:4.40s μ_e_t:4.59s t_t:3490.98s
+[01:01:43] e:762/4000 μ_l:0.76 (64-64=0) e_t:4.64s μ_e_t:4.59s t_t:3495.62s
+[01:01:47] e:763/4000 μ_l:0.74 (64-64=0) e_t:4.29s μ_e_t:4.59s t_t:3499.91s
+[01:01:52] e:764/4000 μ_l:0.61 (64-64=0) e_t:4.60s μ_e_t:4.59s t_t:3504.51s
+[01:01:56] e:765/4000 μ_l:0.76 (64-64=0) e_t:4.29s μ_e_t:4.59s t_t:3508.80s
+[01:02:01] e:766/4000 μ_l:0.93 (64-64=0) e_t:4.59s μ_e_t:4.59s t_t:3513.39s
+[01:02:05] e:767/4000 μ_l:0.76 (64-64=0) e_t:4.37s μ_e_t:4.59s t_t:3517.76s
+[01:02:10] e:768/4000 μ_l:0.93 (64-64=0) e_t:4.59s μ_e_t:4.59s t_t:3522.35s
+[01:02:14] e:769/4000 μ_l:0.76 (64-64=0) e_t:4.44s μ_e_t:4.59s t_t:3526.79s
+[01:02:19] e:770/4000 μ_l:0.67 (64-64=0) e_t:4.40s μ_e_t:4.59s t_t:3531.20s
+[01:02:23] e:771/4000 μ_l:0.71 (64-64=0) e_t:4.14s μ_e_t:4.59s t_t:3535.34s
+[01:02:28] e:772/4000 μ_l:0.58 (64-64=0) e_t:4.71s μ_e_t:4.59s t_t:3540.05s
+[01:02:32] e:773/4000 μ_l:0.61 (64-64=0) e_t:4.72s μ_e_t:4.59s t_t:3544.77s
+[01:02:37] e:774/4000 μ_l:0.70 (64-64=0) e_t:4.44s μ_e_t:4.59s t_t:3549.21s
+[01:02:41] e:775/4000 μ_l:0.79 (64-64=0) e_t:4.60s μ_e_t:4.59s t_t:3553.81s
+[01:02:46] e:776/4000 μ_l:0.91 (64-64=0) e_t:4.64s μ_e_t:4.59s t_t:3558.45s
+[01:02:51] e:777/4000 μ_l:0.72 (64-64=0) e_t:4.54s μ_e_t:4.59s t_t:3562.99s
+[01:02:55] e:778/4000 μ_l:0.76 (64-64=0) e_t:4.55s μ_e_t:4.59s t_t:3567.54s
+[01:03:00] e:779/4000 μ_l:0.75 (64-64=0) e_t:4.61s μ_e_t:4.59s t_t:3572.15s
+[01:03:04] e:780/4000 μ_l:0.81 (64-64=0) e_t:4.46s μ_e_t:4.59s t_t:3576.61s
+[01:03:09] e:781/4000 μ_l:0.73 (64-64=0) e_t:4.36s μ_e_t:4.59s t_t:3580.97s
+[01:03:13] e:782/4000 μ_l:0.75 (64-64=0) e_t:4.72s μ_e_t:4.59s t_t:3585.69s
+[01:03:18] e:783/4000 μ_l:0.67 (64-64=0) e_t:4.38s μ_e_t:4.59s t_t:3590.08s
+[01:03:22] e:784/4000 μ_l:0.83 (64-64=0) e_t:4.37s μ_e_t:4.58s t_t:3594.45s
+[01:03:27] e:785/4000 μ_l:0.69 (64-64=0) e_t:4.44s μ_e_t:4.58s t_t:3598.89s
+[01:03:31] e:786/4000 μ_l:0.81 (64-64=0) e_t:4.52s μ_e_t:4.58s t_t:3603.41s
+[01:03:35] e:787/4000 μ_l:0.77 (64-64=0) e_t:4.45s μ_e_t:4.58s t_t:3607.86s
+[01:03:40] e:788/4000 μ_l:0.67 (64-64=0) e_t:4.42s μ_e_t:4.58s t_t:3612.28s
+[01:03:45] e:789/4000 μ_l:0.69 (64-64=0) e_t:4.66s μ_e_t:4.58s t_t:3616.94s
+[01:03:49] e:790/4000 μ_l:0.80 (64-64=0) e_t:4.66s μ_e_t:4.58s t_t:3621.60s
+[01:03:54] e:791/4000 μ_l:0.83 (64-64=0) e_t:4.60s μ_e_t:4.58s t_t:3626.20s
+[01:03:58] e:792/4000 μ_l:0.77 (64-64=0) e_t:4.63s μ_e_t:4.58s t_t:3630.83s
+[01:04:03] e:793/4000 μ_l:0.67 (64-64=0) e_t:4.59s μ_e_t:4.58s t_t:3635.42s
+[01:04:08] e:794/4000 μ_l:0.68 (64-64=0) e_t:4.60s μ_e_t:4.58s t_t:3640.02s
+[01:04:12] e:795/4000 μ_l:0.77 (64-64=0) e_t:4.68s μ_e_t:4.58s t_t:3644.69s
+[01:04:17] e:796/4000 μ_l:0.64 (64-64=0) e_t:4.48s μ_e_t:4.58s t_t:3649.17s
+[01:04:21] e:797/4000 μ_l:0.76 (64-64=0) e_t:4.64s μ_e_t:4.58s t_t:3653.81s
+[01:04:26] e:798/4000 μ_l:0.71 (64-64=0) e_t:4.29s μ_e_t:4.58s t_t:3658.11s
+[01:04:30] e:799/4000 μ_l:0.79 (64-64=0) e_t:4.75s μ_e_t:4.58s t_t:3662.86s
+[01:04:35] e:800/4000 μ_l:0.69 (64-64=0) e_t:4.81s μ_e_t:4.58s t_t:3667.67s
+avg_roc_auc:0.8066150760617252
+[01:04:59] e:801/4000 μ_l:0.66 (64-64=0) e_t:4.36s μ_e_t:4.58s t_t:3672.03s
+[01:05:03] e:802/4000 μ_l:0.59 (64-64=0) e_t:4.45s μ_e_t:4.58s t_t:3676.49s
+[01:05:08] e:803/4000 μ_l:0.85 (64-64=0) e_t:4.46s μ_e_t:4.58s t_t:3680.94s
+[01:05:13] e:804/4000 μ_l:0.89 (64-64=0) e_t:4.70s μ_e_t:4.58s t_t:3685.64s
+[01:05:17] e:805/4000 μ_l:0.72 (64-64=0) e_t:4.29s μ_e_t:4.58s t_t:3689.94s
+[01:05:21] e:806/4000 μ_l:0.77 (64-64=0) e_t:3.98s μ_e_t:4.58s t_t:3693.91s
+[01:05:25] e:807/4000 μ_l:0.80 (64-64=0) e_t:4.52s μ_e_t:4.58s t_t:3698.43s
+[01:05:30] e:808/4000 μ_l:0.84 (64-64=0) e_t:4.58s μ_e_t:4.58s t_t:3703.01s
+[01:05:34] e:809/4000 μ_l:0.80 (64-64=0) e_t:4.40s μ_e_t:4.58s t_t:3707.41s
+[01:05:39] e:810/4000 μ_l:0.72 (64-64=0) e_t:4.45s μ_e_t:4.58s t_t:3711.86s
+[01:05:43] e:811/4000 μ_l:0.73 (64-64=0) e_t:4.50s μ_e_t:4.58s t_t:3716.36s
+[01:05:47] e:812/4000 μ_l:0.74 (64-64=0) e_t:4.06s μ_e_t:4.58s t_t:3720.42s
+[01:05:52] e:813/4000 μ_l:0.65 (64-64=0) e_t:4.56s μ_e_t:4.58s t_t:3724.97s
+[01:05:57] e:814/4000 μ_l:0.73 (64-64=0) e_t:4.66s μ_e_t:4.58s t_t:3729.63s
+[01:06:01] e:815/4000 μ_l:0.78 (64-64=0) e_t:4.57s μ_e_t:4.58s t_t:3734.20s
+[01:06:06] e:816/4000 μ_l:0.76 (64-64=0) e_t:4.34s μ_e_t:4.58s t_t:3738.54s
+[01:06:10] e:817/4000 μ_l:0.70 (64-64=0) e_t:4.27s μ_e_t:4.58s t_t:3742.81s
+[01:06:14] e:818/4000 μ_l:0.67 (64-64=0) e_t:4.39s μ_e_t:4.58s t_t:3747.20s
+[01:06:19] e:819/4000 μ_l:0.71 (64-64=0) e_t:4.54s μ_e_t:4.58s t_t:3751.74s
+[01:06:23] e:820/4000 μ_l:0.72 (64-64=0) e_t:4.55s μ_e_t:4.58s t_t:3756.29s
+[01:06:27] e:821/4000 μ_l:0.77 (64-64=0) e_t:4.14s μ_e_t:4.58s t_t:3760.43s
+[01:06:32] e:822/4000 μ_l:0.70 (64-64=0) e_t:4.28s μ_e_t:4.58s t_t:3764.72s
+[01:06:36] e:823/4000 μ_l:0.68 (64-64=0) e_t:4.01s μ_e_t:4.58s t_t:3768.73s
+[01:06:40] e:824/4000 μ_l:0.81 (64-64=0) e_t:4.40s μ_e_t:4.58s t_t:3773.13s
+[01:06:44] e:825/4000 μ_l:0.71 (64-64=0) e_t:4.28s μ_e_t:4.58s t_t:3777.41s
+[01:06:49] e:826/4000 μ_l:0.73 (64-64=0) e_t:4.75s μ_e_t:4.58s t_t:3782.16s
+[01:06:54] e:827/4000 μ_l:0.73 (64-64=0) e_t:4.37s μ_e_t:4.58s t_t:3786.53s
+[01:06:58] e:828/4000 μ_l:0.88 (64-64=0) e_t:4.60s μ_e_t:4.58s t_t:3791.13s
+[01:07:03] e:829/4000 μ_l:0.68 (64-64=0) e_t:4.61s μ_e_t:4.58s t_t:3795.73s
+[01:07:07] e:830/4000 μ_l:0.76 (64-64=0) e_t:4.08s μ_e_t:4.58s t_t:3799.81s
+[01:07:11] e:831/4000 μ_l:0.67 (64-64=0) e_t:4.55s μ_e_t:4.58s t_t:3804.37s
+[01:07:15] e:832/4000 μ_l:0.73 (64-64=0) e_t:4.12s μ_e_t:4.58s t_t:3808.49s
+[01:07:20] e:833/4000 μ_l:0.76 (64-64=0) e_t:4.40s μ_e_t:4.58s t_t:3812.89s
+[01:07:24] e:834/4000 μ_l:0.83 (64-64=0) e_t:4.59s μ_e_t:4.58s t_t:3817.48s
+[01:07:29] e:835/4000 μ_l:0.70 (64-64=0) e_t:4.43s μ_e_t:4.58s t_t:3821.90s
+[01:07:33] e:836/4000 μ_l:0.72 (64-64=0) e_t:4.56s μ_e_t:4.58s t_t:3826.46s
+[01:07:38] e:837/4000 μ_l:0.70 (64-64=0) e_t:4.63s μ_e_t:4.58s t_t:3831.10s
+[01:07:42] e:838/4000 μ_l:0.74 (64-64=0) e_t:4.27s μ_e_t:4.58s t_t:3835.37s
+[01:07:47] e:839/4000 μ_l:0.78 (64-64=0) e_t:4.67s μ_e_t:4.58s t_t:3840.04s
+[01:07:52] e:840/4000 μ_l:0.73 (64-64=0) e_t:4.61s μ_e_t:4.58s t_t:3844.65s
+[01:07:56] e:841/4000 μ_l:0.75 (64-64=0) e_t:4.46s μ_e_t:4.58s t_t:3849.11s
+[01:08:01] e:842/4000 μ_l:0.73 (64-64=0) e_t:4.58s μ_e_t:4.58s t_t:3853.69s
+[01:08:05] e:843/4000 μ_l:0.69 (64-64=0) e_t:4.73s μ_e_t:4.58s t_t:3858.42s
+[01:08:10] e:844/4000 μ_l:0.75 (64-64=0) e_t:4.28s μ_e_t:4.58s t_t:3862.70s
+[01:08:14] e:845/4000 μ_l:0.88 (64-64=0) e_t:4.43s μ_e_t:4.58s t_t:3867.13s
+[01:08:19] e:846/4000 μ_l:0.67 (64-64=0) e_t:4.35s μ_e_t:4.58s t_t:3871.48s
+[01:08:23] e:847/4000 μ_l:0.72 (64-64=0) e_t:4.48s μ_e_t:4.58s t_t:3875.96s
+[01:08:28] e:848/4000 μ_l:0.72 (64-64=0) e_t:4.68s μ_e_t:4.58s t_t:3880.65s
+[01:08:32] e:849/4000 μ_l:0.82 (64-64=0) e_t:4.30s μ_e_t:4.58s t_t:3884.95s
+[01:08:36] e:850/4000 μ_l:0.84 (64-64=0) e_t:4.22s μ_e_t:4.58s t_t:3889.17s
+[01:08:41] e:851/4000 μ_l:0.71 (64-64=0) e_t:4.82s μ_e_t:4.58s t_t:3893.99s
+[01:08:45] e:852/4000 μ_l:0.71 (64-64=0) e_t:4.31s μ_e_t:4.58s t_t:3898.30s
+[01:08:50] e:853/4000 μ_l:0.72 (64-64=0) e_t:4.66s μ_e_t:4.58s t_t:3902.96s
+[01:08:54] e:854/4000 μ_l:0.67 (64-64=0) e_t:4.29s μ_e_t:4.58s t_t:3907.25s
+[01:08:59] e:855/4000 μ_l:0.72 (64-64=0) e_t:4.23s μ_e_t:4.57s t_t:3911.48s
+[01:09:03] e:856/4000 μ_l:0.69 (64-64=0) e_t:4.38s μ_e_t:4.57s t_t:3915.86s
+[01:09:07] e:857/4000 μ_l:0.66 (64-64=0) e_t:4.43s μ_e_t:4.57s t_t:3920.28s
+[01:09:12] e:858/4000 μ_l:0.73 (64-64=0) e_t:4.46s μ_e_t:4.57s t_t:3924.74s
+[01:09:16] e:859/4000 μ_l:0.79 (64-64=0) e_t:4.34s μ_e_t:4.57s t_t:3929.09s
+[01:09:20] e:860/4000 μ_l:0.76 (64-64=0) e_t:4.33s μ_e_t:4.57s t_t:3933.42s
+[01:09:25] e:861/4000 μ_l:0.72 (64-64=0) e_t:4.51s μ_e_t:4.57s t_t:3937.92s
+[01:09:29] e:862/4000 μ_l:0.76 (64-64=0) e_t:4.27s μ_e_t:4.57s t_t:3942.19s
+[01:09:33] e:863/4000 μ_l:0.80 (64-64=0) e_t:4.22s μ_e_t:4.57s t_t:3946.41s
+[01:09:38] e:864/4000 μ_l:0.76 (64-64=0) e_t:4.17s μ_e_t:4.57s t_t:3950.58s
+[01:09:42] e:865/4000 μ_l:0.63 (64-64=0) e_t:4.21s μ_e_t:4.57s t_t:3954.79s
+[01:09:46] e:866/4000 μ_l:0.62 (64-64=0) e_t:4.53s μ_e_t:4.57s t_t:3959.32s
+[01:09:51] e:867/4000 μ_l:0.76 (64-64=0) e_t:4.78s μ_e_t:4.57s t_t:3964.10s
+[01:09:55] e:868/4000 μ_l:0.69 (64-64=0) e_t:4.22s μ_e_t:4.57s t_t:3968.32s
+[01:10:00] e:869/4000 μ_l:0.76 (64-64=0) e_t:4.41s μ_e_t:4.57s t_t:3972.73s
+[01:10:04] e:870/4000 μ_l:0.77 (64-64=0) e_t:4.33s μ_e_t:4.57s t_t:3977.07s
+[01:10:09] e:871/4000 μ_l:0.75 (64-64=0) e_t:4.77s μ_e_t:4.57s t_t:3981.83s
+[01:10:13] e:872/4000 μ_l:0.77 (64-64=0) e_t:4.46s μ_e_t:4.57s t_t:3986.29s
+[01:10:18] e:873/4000 μ_l:0.74 (64-64=0) e_t:4.32s μ_e_t:4.57s t_t:3990.60s
+[01:10:22] e:874/4000 μ_l:0.80 (64-64=0) e_t:4.35s μ_e_t:4.57s t_t:3994.95s
+[01:10:26] e:875/4000 μ_l:0.73 (64-64=0) e_t:4.34s μ_e_t:4.57s t_t:3999.29s
+[01:10:31] e:876/4000 μ_l:0.73 (64-64=0) e_t:4.62s μ_e_t:4.57s t_t:4003.91s
+[01:10:35] e:877/4000 μ_l:0.69 (64-64=0) e_t:4.52s μ_e_t:4.57s t_t:4008.43s
+[01:10:40] e:878/4000 μ_l:0.73 (64-64=0) e_t:4.09s μ_e_t:4.57s t_t:4012.52s
+[01:10:44] e:879/4000 μ_l:0.73 (64-64=0) e_t:4.35s μ_e_t:4.57s t_t:4016.87s
+[01:10:48] e:880/4000 μ_l:0.71 (64-64=0) e_t:4.16s μ_e_t:4.57s t_t:4021.03s
+[01:10:53] e:881/4000 μ_l:0.80 (64-64=0) e_t:4.43s μ_e_t:4.57s t_t:4025.46s
+[01:10:57] e:882/4000 μ_l:0.82 (64-64=0) e_t:4.64s μ_e_t:4.57s t_t:4030.09s
+[01:11:02] e:883/4000 μ_l:0.79 (64-64=0) e_t:4.64s μ_e_t:4.57s t_t:4034.73s
+[01:11:06] e:884/4000 μ_l:0.69 (64-64=0) e_t:4.27s μ_e_t:4.57s t_t:4039.00s
+[01:11:10] e:885/4000 μ_l:0.75 (64-64=0) e_t:4.36s μ_e_t:4.57s t_t:4043.37s
+[01:11:15] e:886/4000 μ_l:0.75 (64-64=0) e_t:4.38s μ_e_t:4.57s t_t:4047.75s
+[01:11:19] e:887/4000 μ_l:0.76 (64-64=0) e_t:4.44s μ_e_t:4.57s t_t:4052.18s
+[01:11:24] e:888/4000 μ_l:0.74 (64-64=0) e_t:4.29s μ_e_t:4.57s t_t:4056.47s
+[01:11:28] e:889/4000 μ_l:0.75 (64-64=0) e_t:4.48s μ_e_t:4.57s t_t:4060.95s
+[01:11:32] e:890/4000 μ_l:0.90 (64-64=0) e_t:4.35s μ_e_t:4.57s t_t:4065.30s
+[01:11:37] e:891/4000 μ_l:0.70 (64-64=0) e_t:4.57s μ_e_t:4.57s t_t:4069.87s
+[01:11:41] e:892/4000 μ_l:0.84 (64-64=0) e_t:4.37s μ_e_t:4.57s t_t:4074.23s
+[01:11:45] e:893/4000 μ_l:0.75 (64-64=0) e_t:4.06s μ_e_t:4.57s t_t:4078.29s
+[01:11:50] e:894/4000 μ_l:0.62 (64-64=0) e_t:4.43s μ_e_t:4.57s t_t:4082.73s
+[01:11:54] e:895/4000 μ_l:0.82 (64-64=0) e_t:4.32s μ_e_t:4.57s t_t:4087.04s
+[01:11:58] e:896/4000 μ_l:0.69 (64-64=0) e_t:4.18s μ_e_t:4.57s t_t:4091.23s
+[01:12:03] e:897/4000 μ_l:0.71 (64-64=0) e_t:4.30s μ_e_t:4.57s t_t:4095.52s
+[01:12:07] e:898/4000 μ_l:0.77 (64-64=0) e_t:4.66s μ_e_t:4.57s t_t:4100.18s
+[01:12:12] e:899/4000 μ_l:0.68 (64-64=0) e_t:4.36s μ_e_t:4.57s t_t:4104.54s
+[01:12:16] e:900/4000 μ_l:0.71 (64-64=0) e_t:4.38s μ_e_t:4.57s t_t:4108.92s
+avg_roc_auc:0.8054309462805616
+[01:12:40] e:901/4000 μ_l:0.83 (64-64=0) e_t:4.32s μ_e_t:4.57s t_t:4113.24s
+avg_roc_auc:0.8052410483310815
+[01:13:04] e:902/4000 μ_l:0.77 (64-64=0) e_t:4.66s μ_e_t:4.57s t_t:4117.90s
+avg_roc_auc:0.8057984512540466
+[01:13:28] e:903/4000 μ_l:0.78 (64-64=0) e_t:4.52s μ_e_t:4.57s t_t:4122.42s
+avg_roc_auc:0.8036602482083716
+[01:13:52] e:904/4000 μ_l:0.75 (64-64=0) e_t:4.35s μ_e_t:4.57s t_t:4126.77s
+avg_roc_auc:0.804857224070096
+[01:14:15] e:905/4000 μ_l:0.81 (64-64=0) e_t:4.65s μ_e_t:4.57s t_t:4131.42s
+avg_roc_auc:0.8063862075363882
+[01:14:39] e:906/4000 μ_l:0.74 (64-64=0) e_t:4.50s μ_e_t:4.57s t_t:4135.92s
+avg_roc_auc:0.8053977033011638
+[01:15:03] e:907/4000 μ_l:0.80 (64-64=0) e_t:4.46s μ_e_t:4.56s t_t:4140.38s
+avg_roc_auc:0.8063891965661707
+[01:15:27] e:908/4000 μ_l:0.71 (64-64=0) e_t:4.21s μ_e_t:4.56s t_t:4144.60s
+avg_roc_auc:0.806568428435124
+[01:15:51] e:909/4000 μ_l:0.70 (64-64=0) e_t:4.51s μ_e_t:4.56s t_t:4149.11s
+avg_roc_auc:0.807049796328378
+====================================================================================================
+datasets seen: 58176
+====================================================================================================
+config:
+  type: classification
+  experiments_dir: workdir/experiments
+  classification_dump: workdir/dumps/dump-d256000b1r1000c20-8.h5
+  seed: 11
+  batch_size: 1
+  lr: 0.0001
+  steps: 64
+  epochs: 4000
+  a: 6
+  e: 192
+  h: 768
+  l: 6
+  o: 8
+  eval_every: 100
+  eval_probe_start: 900
+  eval_probe_end: 1000
+  eval_probe_every: 1
+  eval_folds: 5
+  eval_subsample_samples: 1000
+  eval_subsample_features: 100
+  jackpot: 0.8068462330697953
+====================================================================================================
+peak memory allocated: 5905 MiB
+peak memory reserved: 19452 MiB
+experiment done: 260202-000029-41eba9e8

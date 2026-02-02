@@ -23,7 +23,6 @@ import torch
 import torch.nn.functional as F
 from openml.tasks import TaskType
 from sklearn.compose import ColumnTransformer
-from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import StratifiedKFold, train_test_split
@@ -53,8 +52,8 @@ class Config:
     l: int = 6
     o: int | None = None
     eval_every: int = 100
-    eval_probe_start: int | None = 1200
-    eval_probe_end: int | None = 1300
+    eval_probe_start: int | None = 900
+    eval_probe_end: int | None = 1000
     eval_probe_every: int = 1
     eval_folds: int = 5
     eval_subsample_samples: int | None = 1000
@@ -141,6 +140,67 @@ TABARENA_CLASSIFICATION_TASKS = [
     363711,  # (  1699,  112) MIC
     363712,  # ( 10885,   22) jm1
 ]
+
+
+# -----------------------------------------------------------------------------
+# muon
+
+
+def zeropower_via_svd(G, steps=None):
+    U, S, V = G.svd()
+    return U @ V.T
+
+@torch.compile
+def zeropower_via_newtonschulz5(G, steps=10, eps=1e-7):
+    assert len(G.shape) == 2
+    a, b, c = (3.4445, -4.7750,  2.0315)
+    X = G.bfloat16() # TODO: try with L40S
+    X /= (X.norm() + eps) # ensure top singular value <= 1
+    if G.size(0) > G.size(1):
+        X = X.T
+    for _ in range(steps):
+        A = X @ X.T
+        B = A @ X
+        X = a * X + b * B + c * A @ B
+    if G.size(0) > G.size(1):
+        X = X.T
+    return X.to(G.dtype)
+
+zeropower_backends = dict(svd=zeropower_via_svd, newtonschulz5=zeropower_via_newtonschulz5)
+
+class Muon(torch.optim.Optimizer):
+    """
+    code adapted from: https://github.com/KellerJordan/modded-nanogpt/commit/b356a1f
+    """
+    def __init__(self, params, lr=3e-4, momentum=0.95, nesterov=True, backend='newtonschulz5', backend_steps=5):
+        defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, backend=backend, backend_steps=backend_steps)
+        super().__init__(params, defaults)
+
+    def step(self):
+        for group in self.param_groups:
+            lr = group['lr']
+            momentum = group['momentum']
+            zeropower_backend = zeropower_backends[group['backend']]
+            for p in group['params']:
+                g = p.grad
+                if g is None:
+                    continue
+                state = self.state[p]
+                if 'momentum_buffer' not in state:
+                    state['momentum_buffer'] = torch.zeros_like(g)
+                buf = state['momentum_buffer']
+                buf.mul_(momentum).add_(g)
+                if group['nesterov']:
+                    g = g.add(buf, alpha=momentum)
+                if g.size(0) == 3 * g.size(1): # split grouped QKV parameters
+                    g = torch.cat([zeropower_backend(g1, steps=group['backend_steps']) for g1 in g.split(g.size(1))])
+                    scale = g.size(1)**0.5
+                else:
+                    g = zeropower_backend(g, steps=group['backend_steps'])
+                    scale = max(g.size(0), g.size(1))**0.5 # scale to have update.square().mean() == 1
+                p.data.add_(g, alpha=-lr * scale)
+
+
 
 
 # -----------------------------------------------------------------------------
@@ -423,27 +483,6 @@ class NanoTabPFNClassifier:
             return probabilities.to("cpu").numpy()
 
 
-class RandomForestBaseline:
-    def __init__(self, random_state: int | None = None):
-        self.random_state = random_state
-        self.feature_preprocessor = None
-        self.clf = None
-
-    def fit(self, X_train: np.ndarray, y_train: np.ndarray):
-        self.feature_preprocessor = get_feature_preprocessor(X_train)
-        X_train = self.feature_preprocessor.fit_transform(X_train)
-        self.clf = RandomForestClassifier(random_state=self.random_state, n_jobs=-1)
-        self.clf.fit(X_train, y_train)
-
-    def predict(self, X_test: np.ndarray) -> np.ndarray:
-        X_test = self.feature_preprocessor.transform(X_test)
-        return self.clf.predict(X_test)
-
-    def predict_proba(self, X_test: np.ndarray) -> np.ndarray:
-        X_test = self.feature_preprocessor.transform(X_test)
-        return self.clf.predict_proba(X_test)
-
-
 # -----------------------------------------------------------------------------
 # main
 
@@ -458,7 +497,20 @@ c.o = prior.max_num_classes
 
 model = NanoTabPFNModel(l=c.l, a=c.a, e=c.e, h=c.h, o=c.o).to(device)
 
-optimizer = schedulefree.AdamWScheduleFree(model.parameters(), lr=c.lr, weight_decay=0.0, warmup_steps=1000)
+muon_params = []
+adam_params = []
+for name, p in model.named_parameters():
+    if p.ndim != 2:
+        adam_params.append(p)
+    elif "transformer_encoder" in name:
+        muon_params.append(p)
+    else:
+        adam_params.append(p)
+
+optimizer_muon = Muon(muon_params, lr=0.1*c.lr, momentum=0.95)
+optimizer_adam = schedulefree.AdamWScheduleFree(adam_params, lr=c.lr, weight_decay=0.0, warmup_steps=1000)
+
+optimizers = [optimizer_muon, optimizer_adam]
 
 criterion = nn.CrossEntropyLoss()
 
@@ -479,7 +531,7 @@ for epoch in range(1, c.epochs + 1):
     torch.cuda.synchronize()
     t0 = time.perf_counter()
     model.train()
-    optimizer.train()
+    optimizer_adam.train()
     total_loss = 0.0
     num_valid = 0
     for i, full_data in enumerate(prior):
@@ -492,7 +544,8 @@ for epoch in range(1, c.epochs + 1):
             continue
         num_valid += 1
 
-        optimizer.zero_grad(set_to_none=True)
+        for opt in optimizers:
+            opt.zero_grad(set_to_none=True)
 
         output = model((x, y), sep=sep)
         output = output.reshape(-1, output.shape[-1])
@@ -504,7 +557,8 @@ for epoch in range(1, c.epochs + 1):
         total_loss += loss.detach().cpu().item()
 
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
+        for opt in optimizers:
+            opt.step()
 
     torch.cuda.synchronize()
     e_t = time.perf_counter() - t0  # epoch time
@@ -522,14 +576,11 @@ for epoch in range(1, c.epochs + 1):
     )
 
     model.eval()
-    optimizer.eval()
+    optimizer_adam.eval()
 
     if should_eval(epoch):
         clf = NanoTabPFNClassifier(model)
         aucs = []
-        run_rf_baseline = epoch == 1
-        rf_clf = RandomForestBaseline(random_state=c.seed) if run_rf_baseline else None
-        rf_aucs = [] if run_rf_baseline else None
 
         for task_id in TABARENA_CLASSIFICATION_TASKS:
             task = openml.tasks.get_task(task_id, download_splits=False)
@@ -555,8 +606,6 @@ for epoch in range(1, c.epochs + 1):
 
             targets = []
             probabilities = []
-            rf_targets = [] if run_rf_baseline else None
-            rf_probabilities = [] if run_rf_baseline else None
 
             for _, (train_indices, test_indices) in enumerate(cv.split(X, y)):
                 X_train = X.iloc[train_indices].to_numpy()
@@ -575,14 +624,6 @@ for epoch in range(1, c.epochs + 1):
                     y_proba = y_proba[:, 1]
                 probabilities.append(y_proba)
 
-                if run_rf_baseline:
-                    rf_clf.fit(X_train, y_train)
-                    rf_y_proba = rf_clf.predict_proba(X_test)
-                    if rf_y_proba.shape[1] == 2:
-                        rf_y_proba = rf_y_proba[:, 1]
-                    rf_targets.append(y_test)
-                    rf_probabilities.append(rf_y_proba)
-
             y_true = np.concatenate(targets, axis=0)
             y_proba = np.concatenate(probabilities, axis=0) if len(probabilities) > 0 else None
 
@@ -593,20 +634,8 @@ for epoch in range(1, c.epochs + 1):
             )
             aucs.append(auc)
 
-            if run_rf_baseline:
-                rf_y_true = np.concatenate(rf_targets, axis=0)
-                rf_y_proba = np.concatenate(rf_probabilities, axis=0) if len(rf_probabilities) > 0 else None
-                rf_auc = (
-                    roc_auc_score(rf_y_true, rf_y_proba, multi_class="ovr")
-                    if getattr(rf_y_proba, "ndim", 1) > 1
-                    else roc_auc_score(rf_y_true, rf_y_proba)
-                )
-                rf_aucs.append(rf_auc)
         avg_auc = (sum(aucs) / len(aucs)) if len(aucs) > 0 else float("nan")
         print0(f"avg_roc_auc:{avg_auc}", console=True)
-        if run_rf_baseline:
-            avg_rf_auc = (sum(rf_aucs) / len(rf_aucs)) if len(rf_aucs) > 0 else float("nan")
-            print0(f"avg_rf_roc_auc:{avg_rf_auc}", console=True)
 
         if avg_auc >= c.jackpot:
             ckpt = {
