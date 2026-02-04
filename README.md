@@ -43,11 +43,11 @@ Evaluation is on all of 38 TabArena classification tasks.
 
 - Subsampling:
   - if >100 features, randomly select 100
-  - if >1000 rows, randomly select 1000
+  - if >1000 rows, randomly select 1000 (stratiﬁed by class labels)
 - Cross-validation:
   - 5-fold StratifiedKFold with shuffling
   - class labels are encoded with integers per fold
-- Preprocessing:
+- Preprocessing (per fold, fit on train only):
   - constant columns: dropped
   - numeric columns: numeric coercion + mean imputation
   - categorical columns: ordinal encoding + most-frequent imputation

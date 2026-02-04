@@ -587,9 +587,6 @@ for epoch in range(1, c.epochs + 1):
         for task_id in TABARENA_CLASSIFICATION_TASKS:
             task = openml.tasks.get_task(task_id, download_splits=False)
 
-            if task.task_type_id != TaskType.SUPERVISED_CLASSIFICATION:
-                continue
-
             dataset = task.get_dataset(download_data=False)
             X, y, _, _ = dataset.get_data(target=task.target_name, dataset_format="dataframe")
 
