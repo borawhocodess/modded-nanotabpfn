@@ -1,6 +1,6 @@
 # modded-nanoTabPFN
 
-This repository hosts the nanoTabPFN speedrun, in which we search for the fastest way to use 1 NVIDIA L40S to train a tabular foundation model (nanoTabPFN) that beats Random Forest on [TabArena](https://github.com/autogluon/tabarena).
+This repository hosts the nanoTabPFN speedrun, in which we search for the fastest way to use 1 NVIDIA L40S to train a tabular foundation model (nanoTabPFN) that beats Random Forest on [TabArena](https://github.com/autogluon/tabarena) datasets.
 
 The code is derived from [nanoTabPFN](https://github.com/automl/nanoTabPFN) with the inspiration of [modded-nanogpt](https://github.com/KellerJordan/modded-nanogpt).
 
