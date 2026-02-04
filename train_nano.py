@@ -21,7 +21,6 @@ import pandas as pd
 import schedulefree
 import torch
 import torch.nn.functional as F
-from openml.tasks import TaskType
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import roc_auc_score
@@ -45,7 +44,7 @@ class Config:
     seed: int = 11
     batch_size: int = 1
     lr: float = 1e-4
-    steps: int = 64  # step size
+    steps: int = 64
     epochs: int = 4000
     a: int = 6
     e: int = 192
@@ -53,14 +52,14 @@ class Config:
     l: int = 6
     o: int | None = None
     eval_every: int = 100
-    eval_probe_start: int | None = 900
+    eval_probe_start: int | None = 700
     eval_probe_end: int | None = 1000
     eval_probe_every: int = 1
     eval_folds: int = 5
     eval_subsample_samples: int | None = 1000
     eval_subsample_features: int | None = 100
     max_train_mins: float = 74.25
-    jackpot: float = 0.8068462330697953  # random forest baseline
+    jackpot: float = 0.8068462330697953
 
 
 c = Config()
@@ -148,16 +147,12 @@ TABARENA_CLASSIFICATION_TASKS = [
 # muon
 
 
-def zeropower_via_svd(G, steps=None):
-    U, S, V = G.svd()
-    return U @ V.T
-
 @torch.compile
 def zeropower_via_newtonschulz5(G, steps=10, eps=1e-7):
     assert len(G.shape) == 2
     a, b, c = (3.4445, -4.7750,  2.0315)
     X = G.bfloat16()
-    X /= (X.norm() + eps) # ensure top singular value <= 1
+    X /= (X.norm() + eps)
     if G.size(0) > G.size(1):
         X = X.T
     for _ in range(steps):
@@ -168,21 +163,18 @@ def zeropower_via_newtonschulz5(G, steps=10, eps=1e-7):
         X = X.T
     return X.to(G.dtype)
 
-zeropower_backends = dict(svd=zeropower_via_svd, newtonschulz5=zeropower_via_newtonschulz5)
-
 class Muon(torch.optim.Optimizer):
     """
     code adapted from: https://github.com/KellerJordan/modded-nanogpt/commit/b356a1f
     """
-    def __init__(self, params, lr=3e-4, momentum=0.95, nesterov=True, backend='newtonschulz5', backend_steps=5):
-        defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, backend=backend, backend_steps=backend_steps)
+    def __init__(self, params, lr=3e-4, momentum=0.95, nesterov=True, backend_steps=5):
+        defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, backend_steps=backend_steps)
         super().__init__(params, defaults)
 
     def step(self):
         for group in self.param_groups:
             lr = group['lr']
             momentum = group['momentum']
-            zeropower_backend = zeropower_backends[group['backend']]
             for p in group['params']:
                 g = p.grad
                 if g is None:
@@ -194,12 +186,12 @@ class Muon(torch.optim.Optimizer):
                 buf.mul_(momentum).add_(g)
                 if group['nesterov']:
                     g = g.add(buf, alpha=momentum)
-                if g.size(0) == 3 * g.size(1): # split grouped QKV parameters
-                    g = torch.cat([zeropower_backend(g1, steps=group['backend_steps']) for g1 in g.split(g.size(1))])
+                if g.size(0) == 3 * g.size(1):
+                    g = torch.cat([zeropower_via_newtonschulz5(g1, steps=group['backend_steps']) for g1 in g.split(g.size(1))])
                     scale = g.size(1)**0.5
                 else:
-                    g = zeropower_backend(g, steps=group['backend_steps'])
-                    scale = max(g.size(0), g.size(1))**0.5 # scale to have update.square().mean() == 1
+                    g = zeropower_via_newtonschulz5(g, steps=group['backend_steps'])
+                    scale = max(g.size(0), g.size(1))**0.5
                 p.data.add_(g, alpha=-lr * scale)
 
 
@@ -351,7 +343,6 @@ class PriorDumpDataLoader(DataLoader):
         with h5py.File(self.filename, "r") as f:
             self.max_num_classes = f["max_num_classes"][0] if "max_num_classes" in f else None
             self.problem_type = f["problem_type"][()].decode("utf-8")
-            # X = (num_datasets, max_num_datapoints, max_num_features)
             self.datasets = f["X"].shape[0]
             self.max_rows = f["X"].shape[1]
             self.max_cols = f["X"].shape[2]
@@ -559,9 +550,9 @@ for epoch in range(1, c.epochs + 1):
             opt.step()
 
     torch.cuda.synchronize()
-    e_t = time.perf_counter() - t0  # epoch time
-    t_t += e_t  # train time
-    mu_e_t = t_t / epoch  # mean epoch time
+    e_t = time.perf_counter() - t0
+    t_t += e_t
+    mu_e_t = t_t / epoch
 
     mean_loss = total_loss / max(num_valid, 1)
 
@@ -574,7 +565,7 @@ for epoch in range(1, c.epochs + 1):
     )
 
     if t_t > c.max_train_mins * 60:
-        print0("baseline exceeded", console=True)
+        print0("exceeded max train time", console=True)
         sys.exit(0)
 
     model.eval()
