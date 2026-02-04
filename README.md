@@ -62,3 +62,5 @@ Evaluation is on all of 38 TabArena classification tasks.
 2. [N. Hollmann et al. TabPFN: “A Transformer That Solves Small Tabular Classification Problems in a Second”. Presented at ICLR (2022)](https://arxiv.org/abs/2207.01848)
 3. [N. Hollmann et al. Accurate predictions on small data with a tabular foundation model. Nature 637, 319–326 (2025).](https://doi.org/10.1038/s41586-024-08328-6)
 4. [N. Erickson et al. TabArena: A Living Benchmark for Machine Learning on Tabular Data. arXiv preprint (2025).](https://arxiv.org/abs/2506.16791)
+5. [A. Pfefferle et al. nanoTabPFN: A Lightweight and Educational Reimplementation of TabPFN. arXiv preprint (2025).](https://arxiv.org/abs/2511.03634)
+6. [K. Jordan et al. Muon: An optimizer for hidden layers in neural networks (2024).](https://kellerjordan.github.io/posts/muon/)
