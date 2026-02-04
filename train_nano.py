@@ -58,6 +58,7 @@ class Config:
     eval_folds: int = 5
     eval_subsample_samples: int | None = 1000
     eval_subsample_features: int | None = 100
+    max_train_mins: float = 74.25
     jackpot: float = 0.8068462330697953  # random forest baseline
 
 
@@ -570,6 +571,10 @@ for epoch in range(1, c.epochs + 1):
         f"e_t:{e_t:.2f}s μ_e_t:{mu_e_t:.2f}s t_t:{t_t:.2f}s",
         console=True,
     )
+
+    if t_t > c.max_train_mins * 60:
+        print0("baseline exceeded", console=True)
+        sys.exit(0)
 
     model.eval()
     optimizer_adam.eval()
