@@ -41,6 +41,7 @@ class Config:
     type: str = "classification"
     experiments_dir: str = "workdir/experiments"
     classification_dump: str = "workdir/dumps/dump-d256000b1r1000c20-8.h5"
+    # wget -c https://salihboraozturk.com/other/ufr/dump-d256000b1r1000c20-8.h5
     seed: int = 11
     batch_size: int = 1
     lr: float = 1e-4
