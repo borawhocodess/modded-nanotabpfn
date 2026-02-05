@@ -73,7 +73,8 @@ assert torch.cuda.is_available()
 
 device = "cuda"
 
-ts = datetime.now().strftime("%y%m%d-%H%M%S")
+start_ts = datetime.now()
+ts = start_ts.strftime("%y%m%d-%H%M%S")
 uid = uuid.uuid4().hex[:8]
 e_name = args.name.strip()
 e_id = f"{ts}-{uid}-{e_name}" if e_name else f"{ts}-{uid}"
@@ -95,6 +96,7 @@ def print0(s, console=False):
 
 print0(code)
 print0("=" * 100)
+print0(f"start timestamp: {start_ts.strftime('%Y-%m-%d %H:%M:%S')}", console=True)
 print0(f"host: {socket.gethostname()}")
 print0(f"platform: {platform.platform()}")
 print0(f"python: {sys.version}")
@@ -647,4 +649,8 @@ print0(f"params: {total_params:,} (trainable: {trainable_params:,})", console=Tr
 print0("=" * 100)
 print0(f"peak memory allocated: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB", console=True)
 print0(f"peak memory reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB", console=True)
+print0("=" * 100)
+end_ts = datetime.now()
+print0(f"end timestamp: {end_ts.strftime('%Y-%m-%d %H:%M:%S')}", console=True)
+print0(f"script runtime: {(end_ts - start_ts).total_seconds() / 60:.2f} mins", console=True)
 print0(f"experiment done: {e_id}", console=True)
