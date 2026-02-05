@@ -548,14 +548,6 @@ for epoch in range(1, c.epochs + 1):
 
     mean_loss = total_loss / max(num_valid, 1)
 
-    print0(
-        f"[{datetime.now().strftime('%H:%M:%S')}] "
-        f"e:{epoch}/{c.epochs} μ_l:{mean_loss:.2f} "
-        f"({c.steps}-{num_valid}={c.steps - num_valid}) "
-        f"e_t:{e_t:.2f}s μ_e_t:{mu_e_t:.2f}s t_t:{t_t:.2f}s",
-        console=True,
-    )
-
     if t_t > c.max_train_mins * 60:
         print0("exceeded max train time", console=True)
         sys.exit(0)
@@ -616,7 +608,15 @@ for epoch in range(1, c.epochs + 1):
         aucs.append(auc)
 
     avg_auc = (sum(aucs) / len(aucs)) if len(aucs) > 0 else float("nan")
-    print0(f"avg_roc_auc:{avg_auc}", console=True)
+
+    print0(
+        f"[{datetime.now().strftime('%H:%M:%S')}] "
+        f"e:{epoch}/{c.epochs} μ_l:{mean_loss:.2f} "
+        f"({c.steps}-{num_valid}={c.steps - num_valid}) "
+        f"e_t:{e_t:.2f}s μ_e_t:{mu_e_t:.2f}s t_t:{t_t:.2f}s "
+        f"avg_roc_auc:{avg_auc}",
+        console=True,
+    )
 
     if avg_auc >= c.jackpot:
         ckpt = {
