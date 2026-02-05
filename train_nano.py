@@ -52,7 +52,6 @@ class Config:
     h: int = 768
     l: int = 6
     o: int | None = None
-    eval_every: int = 1
     eval_folds: int = 5
     eval_subsample_samples: int | None = 1000
     eval_subsample_features: int | None = 100
@@ -564,81 +563,80 @@ for epoch in range(1, c.epochs + 1):
     model.eval()
     optimizer_adam.eval()
 
-    if (epoch % c.eval_every) == 0:
-        clf = NanoTabPFNClassifier(model)
-        aucs = []
+    clf = NanoTabPFNClassifier(model)
+    aucs = []
 
-        for task_id in TABARENA_CLASSIFICATION_TASKS:
-            task = openml.tasks.get_task(task_id, download_splits=False)
+    for task_id in TABARENA_CLASSIFICATION_TASKS:
+        task = openml.tasks.get_task(task_id, download_splits=False)
 
-            dataset = task.get_dataset(download_data=False)
-            X, y, _, _ = dataset.get_data(target=task.target_name, dataset_format="dataframe")
+        dataset = task.get_dataset(download_data=False)
+        X, y, _, _ = dataset.get_data(target=task.target_name, dataset_format="dataframe")
 
-            len_features = X.shape[1]
-            if c.eval_subsample_features is not None and len_features > c.eval_subsample_features:
-                rng = np.random.default_rng(c.seed)
-                feature_choices = rng.choice(len_features, size=c.eval_subsample_features, replace=False)
-                X = X.iloc[:, feature_choices]
+        len_features = X.shape[1]
+        if c.eval_subsample_features is not None and len_features > c.eval_subsample_features:
+            rng = np.random.default_rng(c.seed)
+            feature_choices = rng.choice(len_features, size=c.eval_subsample_features, replace=False)
+            X = X.iloc[:, feature_choices]
 
-            if c.eval_subsample_samples is not None and len(X) > c.eval_subsample_samples:
-                _, X, _, y = train_test_split(X, y, test_size=c.eval_subsample_samples, stratify=y, random_state=c.seed)
-                X = X.reset_index(drop=True)
-                y = y.reset_index(drop=True)
+        if c.eval_subsample_samples is not None and len(X) > c.eval_subsample_samples:
+            _, X, _, y = train_test_split(X, y, test_size=c.eval_subsample_samples, stratify=y, random_state=c.seed)
+            X = X.reset_index(drop=True)
+            y = y.reset_index(drop=True)
 
-            cv = StratifiedKFold(n_splits=c.eval_folds, shuffle=True, random_state=c.seed)
+        cv = StratifiedKFold(n_splits=c.eval_folds, shuffle=True, random_state=c.seed)
 
-            targets = []
-            probabilities = []
+        targets = []
+        probabilities = []
 
-            for _, (train_indices, test_indices) in enumerate(cv.split(X, y)):
-                X_train = X.iloc[train_indices].to_numpy()
-                y_train = y.iloc[train_indices].to_numpy()
-                X_test = X.iloc[test_indices].to_numpy()
-                y_test = y.iloc[test_indices].to_numpy()
+        for _, (train_indices, test_indices) in enumerate(cv.split(X, y)):
+            X_train = X.iloc[train_indices].to_numpy()
+            y_train = y.iloc[train_indices].to_numpy()
+            X_test = X.iloc[test_indices].to_numpy()
+            y_test = y.iloc[test_indices].to_numpy()
 
-                label_encoder = LabelEncoder()
-                y_train = label_encoder.fit_transform(y_train)
-                y_test = label_encoder.transform(y_test)
-                targets.append(y_test)
+            label_encoder = LabelEncoder()
+            y_train = label_encoder.fit_transform(y_train)
+            y_test = label_encoder.transform(y_test)
+            targets.append(y_test)
 
-                clf.fit(X_train, y_train)
-                y_proba = clf.predict_proba(X_test)
-                if y_proba.shape[1] == 2:
-                    y_proba = y_proba[:, 1]
-                probabilities.append(y_proba)
+            clf.fit(X_train, y_train)
+            y_proba = clf.predict_proba(X_test)
+            if y_proba.shape[1] == 2:
+                y_proba = y_proba[:, 1]
+            probabilities.append(y_proba)
 
-            y_true = np.concatenate(targets, axis=0)
-            y_proba = np.concatenate(probabilities, axis=0) if len(probabilities) > 0 else None
+        y_true = np.concatenate(targets, axis=0)
+        y_proba = np.concatenate(probabilities, axis=0) if len(probabilities) > 0 else None
 
-            auc = (
-                roc_auc_score(y_true, y_proba, multi_class="ovr")
-                if getattr(y_proba, "ndim", 1) > 1
-                else roc_auc_score(y_true, y_proba)
-            )
-            aucs.append(auc)
+        auc = (
+            roc_auc_score(y_true, y_proba, multi_class="ovr")
+            if getattr(y_proba, "ndim", 1) > 1
+            else roc_auc_score(y_true, y_proba)
+        )
+        aucs.append(auc)
 
-        avg_auc = (sum(aucs) / len(aucs)) if len(aucs) > 0 else float("nan")
-        print0(f"avg_roc_auc:{avg_auc}", console=True)
+    avg_auc = (sum(aucs) / len(aucs)) if len(aucs) > 0 else float("nan")
+    print0(f"avg_roc_auc:{avg_auc}", console=True)
 
-        if avg_auc >= c.jackpot:
-            ckpt = {
-                "version": version,
-                "timestamp": ts,
-                "uid": uid,
-                "type": c.type,
-                "arch": {
-                    "e": model.e,
-                    "a": model.a,
-                    "h": model.h,
-                    "l": model.l,
-                    "o": model.o,
-                },
-                "model": model.state_dict(),
-            }
-            torch.save(ckpt, ckpt_path)
-            print0("=" * 100)
-            print0(f"datasets seen: {epoch * c.batch_size * c.steps}", console=True)
-            break
+    if avg_auc >= c.jackpot:
+        ckpt = {
+            "version": version,
+            "timestamp": ts,
+            "uid": uid,
+            "type": c.type,
+            "arch": {
+                "e": model.e,
+                "a": model.a,
+                "h": model.h,
+                "l": model.l,
+                "o": model.o,
+            },
+            "model": model.state_dict(),
+        }
+        torch.save(ckpt, ckpt_path)
+        print0("=" * 100)
+        print0(f"datasets seen: {epoch * c.batch_size * c.steps}", console=True)
+        break
 
 print0("=" * 100)
 print0("config:")
