@@ -636,6 +636,7 @@ for epoch in range(1, c.epochs + 1):
         torch.save(ckpt, ckpt_path)
         print0("=" * 100)
         print0(f"datasets seen: {epoch * c.batch_size * c.steps}", console=True)
+        print0(f"record time in mins: {t_t / 60:.2f}", console=True)
         break
 
 print0("=" * 100)
