@@ -1,3 +1,4 @@
+import argparse
 import os
 import sys
 
@@ -62,6 +63,10 @@ class Config:
     jackpot: float = 0.8068462330697953
 
 
+parser = argparse.ArgumentParser(description="Train Nano model.")
+parser.add_argument("--name", default="")
+args = parser.parse_args()
+
 c = Config()
 
 random.seed(c.seed)
@@ -74,7 +79,8 @@ device = "cuda"
 
 ts = datetime.now().strftime("%y%m%d-%H%M%S")
 uid = uuid.uuid4().hex[:8]
-e_id = f"{ts}-{uid}"
+e_name = args.name.strip()
+e_id = f"{ts}-{uid}-{e_name}" if e_name else f"{ts}-{uid}"
 e_dir = os.path.join(c.experiments_dir, e_id)
 os.makedirs(e_dir, exist_ok=True)
 log_path = os.path.join(e_dir, f"{e_id}-log.txt")
