@@ -612,7 +612,6 @@ for epoch in range(1, c.epochs + 1):
     print0(
         f"[{datetime.now().strftime('%H:%M:%S')}] "
         f"e:{epoch}/{c.epochs} μ_l:{mean_loss:.2f} "
-        f"({c.steps}-{num_valid}={c.steps - num_valid}) "
         f"e_t:{e_t:.2f}s μ_e_t:{mu_e_t:.2f}s t_t:{t_t:.2f}s "
         f"avg_roc_auc:{avg_auc}",
         console=True,
