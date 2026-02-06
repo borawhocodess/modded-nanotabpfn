@@ -9,7 +9,7 @@ README_MEAN_RE = re.compile(r"\bmean\b\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)\s*s\b", re
 VAL_RE = re.compile(r"\bavg_roc_auc[:=]\s*([0-9]+(?:\.[0-9]+)?)\b")
 EPOCH_RE = re.compile(r"\be:(\d+)/\d+\b")
 STEPS_RE = re.compile(r"\((\d+)-")
-CONFIG_INT_RE = re.compile(r"^\s*(batch_size|steps):\s*(\d+)\s*$")
+CONFIG_INT_RE = re.compile(r"^\s*(batch_size|steps):(?:\s*int\s*=\s*|\s*)(\d+)\s*$")
 LOSS_RE = re.compile(r"\bμ_l:([0-9]+(?:\.[0-9]+)?)\b")
 
 
@@ -89,6 +89,7 @@ def parse_metric_series(log_path, x_mode, metric_re):
     last_epoch = None
     steps = None
     batch_size = None
+    pending_dataset_points = []
 
     try:
         with log_path.open("r", encoding="utf-8", errors="ignore") as f:
@@ -105,6 +106,11 @@ def parse_metric_series(log_path, x_mode, metric_re):
                             batch_size = value
                         elif key == "steps":
                             steps = value
+                    if x_mode == "datasets" and steps is not None and pending_dataset_points:
+                        bs = batch_size if batch_size is not None else 1
+                        for epoch, val in pending_dataset_points:
+                            series.append((epoch * bs * steps, val))
+                        pending_dataset_points = []
 
                 match = EPOCH_RE.search(line)
                 if match:
@@ -149,9 +155,12 @@ def parse_metric_series(log_path, x_mode, metric_re):
                         continue
                     x_value = None
                     if x_mode == "datasets":
-                        if last_epoch is not None and steps is not None:
-                            bs = batch_size if batch_size is not None else 1
-                            x_value = last_epoch * bs * steps
+                        if last_epoch is not None:
+                            if steps is not None:
+                                bs = batch_size if batch_size is not None else 1
+                                x_value = last_epoch * bs * steps
+                            else:
+                                pending_dataset_points.append((last_epoch, val))
                     elif x_mode == "wallclock":
                         if current_clock is not None and first_clock is not None:
                             x_value = current_clock - first_clock
