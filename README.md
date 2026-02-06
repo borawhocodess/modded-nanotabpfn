@@ -5,8 +5,8 @@ This repository hosts the nanoTabPFN speedrun, in which we search for the fastes
 The code is derived from [nanoTabPFN](https://github.com/automl/nanoTabPFN) with the inspiration of [modded-nanogpt](https://github.com/KellerJordan/modded-nanogpt).
 
 This repo now contains a training algorithm which attains the target performance in:
-* 54.41 minutes on 1xL40S (baseline needed 74.32)
-* 45824 synthetic datasets (baseline needed 80576)
+* 10.10 minutes on 1xL40S (baseline needed 74.32)
+* 13184 synthetic datasets (baseline needed 80576)
 
 with the help of the following techniques:
 * Muon optimizer
@@ -34,10 +34,11 @@ The following is the historical progression of speed records for the following t
 
 Note: The 0.8068462330697953 target was selected to match the performance of Random Forest on the same subsampled TabArena evaluation.
 
-| # | Record time | Date | Description | Log |
-| - | - | - | - | - |
-| 1 | 74.32m minutes | 31/01/26 | Baseline | [log](records/20260131baseline/260205-223919-fad38238-baseline-log.txt) |
-| 2 | 54.41m minutes | 02/02/26 | Muon optimizer | [log](records/20260131baseline/260205-224113-34e556ea-muon-log.txt) |
+| # | Record time | Date | Description | Log | Contributors
+| - | - | - | - | - | - |
+| 1 | 74.32 minutes | 31/01/26 | Baseline | [log](records/20260131baseline/260205-223919-fad38238-baseline-log.txt) | @borawhocodess, nanotabpfn contributors |
+| 2 | 54.41 minutes | 02/02/26 | Muon optimizer | [log](records/20260131baseline/260205-224113-34e556ea-muon-log.txt) | @borawhocodess |
+| 3 | 10.10 minutes | 04/02/26 | SDPA, bf16, higher LR, wider embeddings, fewer heads | [log](records/20260204carter/260205-225951-d60000eb-carter-log.txt) | @carterprince |
 
 
 ## Evaluation details
