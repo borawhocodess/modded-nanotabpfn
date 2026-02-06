@@ -360,10 +360,8 @@ def main():
         mu = mean(stats_values)
         sigma = pstdev(stats_values)
         med = median(stats_values)
-        print("\nstatistics:")
-        print(f"mean: {mu:.2f}s")
-        print(f"std: {sigma:.2f}s")
-        print(f"median: {med:.2f}s")
+        print()
+        print(f"stats: mean: {mu:.2f}s ({mu / 60:.2f}m) std: {sigma:.2f}s median: {med:.2f}s ({med / 60:.2f}m)")
 
     if args.plot:
         ts = datetime.now().strftime("%y%m%d-%H%M%S")
