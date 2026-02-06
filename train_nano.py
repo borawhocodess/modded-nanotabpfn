@@ -44,11 +44,11 @@ class Config:
     # wget -c https://salihboraozturk.com/other/ufr/dump-d256000b1r1000c20-8.h5
     seed: int = 11
     batch_size: int = 1
-    lr: float = 1e-4
+    lr: float = 0.001
     steps: int = 64
     epochs: int = 4000
-    a: int = 6
-    e: int = 192
+    a: int = 4
+    e: int = 256
     h: int = 768
     l: int = 6
     o: int | None = None
@@ -68,6 +68,7 @@ c = Config()
 random.seed(c.seed)
 np.random.seed(c.seed)
 torch.manual_seed(c.seed)
+torch.set_float32_matmul_precision('high')
 
 assert torch.cuda.is_available()
 
@@ -289,39 +290,67 @@ class TransformerEncoderStack(nn.Module):
 
 
 class TransformerEncoderLayer(nn.Module):
-    def __init__(self, a, e, h, eps=1e-5, batch_first=True, device=None, dtype=None):
+    def __init__(self, a, e, h, eps=1e-5):
         super().__init__()
-        self.a_datapoints = nn.MultiheadAttention(e, a, batch_first=batch_first, device=device, dtype=dtype)
-        self.a_features = nn.MultiheadAttention(e, a, batch_first=batch_first, device=device, dtype=dtype)
+        self.num_heads = a
+        self.head_dim = e // a
+        assert e % a == 0, "Embedding size must be divisible by heads"
+        
+        self.qkv_datapoints = nn.Linear(e, 3 * e)
+        self.qkv_features = nn.Linear(e, 3 * e)
 
-        self.linear1 = nn.Linear(e, h, device=device, dtype=dtype)
-        self.linear2 = nn.Linear(h, e, device=device, dtype=dtype)
+        self.linear1 = nn.Linear(e, h)
+        self.linear2 = nn.Linear(h, e)
 
-        self.norm1 = nn.LayerNorm(e, eps=eps, device=device, dtype=dtype)
-        self.norm2 = nn.LayerNorm(e, eps=eps, device=device, dtype=dtype)
-        self.norm3 = nn.LayerNorm(e, eps=eps, device=device, dtype=dtype)
+        self.norm1 = nn.LayerNorm(e, eps=eps)
+        self.norm2 = nn.LayerNorm(e, eps=eps)
+        self.norm3 = nn.LayerNorm(e, eps=eps)
 
     def forward(self, src, sep):
-        batch_size, rows_size, col_size, e = src.shape
-        src = src.reshape(batch_size * rows_size, col_size, e)
+        b, r, c, e = src.shape
+        
+        x = src.reshape(b * r, c, e)
+        res = x
+        x = self.norm1(x)
+        
+        qkv = self.qkv_features(x)
+        qkv = qkv.reshape(b * r, c, 3, self.num_heads, self.head_dim)
+        qkv = qkv.permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+        
+        x = F.scaled_dot_product_attention(q, k, v)
+        x = x.transpose(1, 2).reshape(b * r, c, e)
+        
+        src = res + x
+        src = src.reshape(b, r, c, e)
 
-        src = self.a_features(src, src, src)[0] + src
-        src = src.reshape(batch_size, rows_size, col_size, e)
-        src = self.norm1(src)
-        src = src.transpose(1, 2)
-        src = src.reshape(batch_size * col_size, rows_size, e)
+        x = src.transpose(1, 2).reshape(b * c, r, e)
+        res = x
+        x = self.norm2(x)
+        
+        qkv = self.qkv_datapoints(x)
+        qkv = qkv.reshape(b * c, r, 3, self.num_heads, self.head_dim)
+        qkv = qkv.permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]
 
-        x_left = self.a_datapoints(src[:, :sep], src[:, :sep], src[:, :sep])[0]
-        x_right = self.a_datapoints(src[:, sep:], src[:, :sep], src[:, :sep])[0]
-        src = torch.cat([x_left, x_right], dim=1) + src
-        src = src.reshape(batch_size, col_size, rows_size, e)
-        src = src.transpose(2, 1)
-        src = self.norm2(src)
-        src = src.reshape(-1, e)
+        q_left, q_right = q.split([sep, r - sep], dim=2)
+        
+        k_train = k[:, :, :sep, :]
+        v_train = v[:, :, :sep, :]
+        
+        x_left = F.scaled_dot_product_attention(q_left, k_train, v_train)
+        x_right = F.scaled_dot_product_attention(q_right, k_train, v_train)
+        
+        x = torch.cat([x_left, x_right], dim=2)
+        x = x.transpose(1, 2).reshape(b * c, r, e)
+        
+        src = res + x
+        src = src.reshape(b, c, r, e).transpose(2, 1)
 
-        src = self.linear2(F.gelu(self.linear1(src))) + src
-        src = src.reshape(batch_size, rows_size, col_size, e)
-        src = self.norm3(src)
+        x = self.norm3(src)
+        x = self.linear2(F.gelu(self.linear1(x)))
+        src = src + x
+        
         return src
 
 
@@ -470,9 +499,12 @@ class NanoTabPFNClassifier:
         with torch.no_grad():
             x = torch.from_numpy(x).unsqueeze(0).to(torch.float).to(self.device)
             y = torch.from_numpy(y).unsqueeze(0).to(torch.float).to(self.device)
-            out = self.model((x, y), sep=len(self.X_train)).squeeze(0)
-            out = out[:, : self.num_classes]
-            probabilities = F.softmax(out, dim=1)
+            
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                out = self.model((x, y), sep=len(self.X_train)).squeeze(0)
+                out = out[:, : self.num_classes]
+                probabilities = F.softmax(out, dim=1)
+                
             return probabilities.to("cpu").numpy()
 
 
@@ -530,14 +562,15 @@ for epoch in range(1, c.epochs + 1):
         for opt in optimizers:
             opt.zero_grad(set_to_none=True)
 
-        output = model((x, y), sep=sep)
-        output = output.reshape(-1, output.shape[-1])
-        targets = targets.reshape((-1,)).to(torch.long)
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            output = model((x, y), sep=sep)
+            output = output.reshape(-1, output.shape[-1])
+            targets = targets.reshape((-1,)).to(torch.long)
+            loss = criterion(output, targets)
 
-        loss = criterion(output, targets)
         loss.backward()
 
-        total_loss += loss.detach().cpu().item()
+        total_loss += loss.detach()
 
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         for opt in optimizers:
@@ -548,7 +581,7 @@ for epoch in range(1, c.epochs + 1):
     t_t += e_t
     mu_e_t = t_t / epoch
 
-    mean_loss = total_loss / max(num_valid, 1)
+    mean_loss = (total_loss / num_valid).cpu().item()
 
     if t_t > c.max_train_mins * 60:
         print0("exceeded max train time", console=True)
