@@ -9,6 +9,10 @@ HOST_RE = re.compile(r"^\s*host:\s*(.+?)\s*$")
 TT_RE = re.compile(r"\bt_t:([0-9]+(?:\.[0-9]+)?)s\b")
 TOTAL_RE = re.compile(r"\b(total time|total_time|elapsed|duration)\b\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)s\b", re.IGNORECASE)
 TIME_BRACKET_RE = re.compile(r"\[(\d{2}):(\d{2}):(\d{2})\]")
+ROC_RE = re.compile(r"\bavg_roc_auc\s*:\s*([0-9]+(?:\.[0-9]+)?)\b")
+MU_E_T_RE = re.compile(r"μ_e_t:([0-9]+(?:\.[0-9]+)?)s")
+EPOCH_RE = re.compile(r"\be:(\d+)(?:/\d+)?\b")
+DATASETS_RE = re.compile(r"\bdatasets seen\s*:\s*(\d+)\b", re.IGNORECASE)
 
 COLUMNS = [
     {
@@ -35,15 +39,44 @@ COLUMNS = [
         "attr": "mins",
         "header": "in_mins",
     },
+    {
+        "key": "roc_auc",
+        "flag": "--roc-auc",
+        "attr": "roc_auc",
+        "header": "roc_auc",
+    },
+    {
+        "key": "epoch",
+        "flag": "--epoch",
+        "attr": "epoch",
+        "header": "epoch",
+    },
+    {
+        "key": "mean_epoch_time",
+        "flag": "--mean-epoch-time",
+        "attr": "mean_epoch_time",
+        "header": "μ_epoch_t",
+    },
+    {
+        "key": "datasets",
+        "flag": "--datasets",
+        "attr": "datasets",
+        "header": "datasets",
+    },
 ]
 
 COLUMN_BY_KEY = {col["key"]: col for col in COLUMNS}
 FLAG_TO_KEY = {col["flag"]: col["key"] for col in COLUMNS}
+DIR_FLAGS = {"--experiments-dir", "--dir", "-d"}
 
 
 def parse_log(log_path):
     hostname = None
     total_time = None
+    roc_auc = None
+    mean_epoch_time = None
+    epoch = None
+    datasets = None
     last_t_t = None
     first_clock = None
     last_clock = None
@@ -71,6 +104,34 @@ def parse_log(log_path):
                         except ValueError:
                             pass
 
+                match = ROC_RE.search(line)
+                if match:
+                    try:
+                        roc_auc = float(match.group(1))
+                    except ValueError:
+                        pass
+
+                match = MU_E_T_RE.search(line)
+                if match:
+                    try:
+                        mean_epoch_time = float(match.group(1))
+                    except ValueError:
+                        pass
+
+                match = EPOCH_RE.search(line)
+                if match:
+                    try:
+                        epoch = int(match.group(1))
+                    except ValueError:
+                        pass
+
+                match = DATASETS_RE.search(line)
+                if match:
+                    try:
+                        datasets = int(match.group(1))
+                    except ValueError:
+                        pass
+
                 match = TIME_BRACKET_RE.search(line)
                 if match:
                     h = int(match.group(1))
@@ -81,7 +142,7 @@ def parse_log(log_path):
                         first_clock = seconds
                     last_clock = seconds
     except FileNotFoundError:
-        return None, None
+        return None, None, None, None, None, None
 
     if total_time is None:
         total_time = last_t_t
@@ -91,7 +152,7 @@ def parse_log(log_path):
             last_clock += 24 * 3600
         total_time = float(last_clock - first_clock)
 
-    return hostname, total_time
+    return hostname, total_time, roc_auc, mean_epoch_time, epoch, datasets
 
 
 def pick_log_file(exp_dir):
@@ -126,8 +187,10 @@ def extract_order(argv):
         if skip_next:
             skip_next = False
             continue
-        if token == "--experiments-dir":
+        if token in DIR_FLAGS:
             skip_next = True
+            continue
+        if any(token.startswith(flag + "=") for flag in DIR_FLAGS if flag.startswith("--")):
             continue
         key = FLAG_TO_KEY.get(token)
         if key:
@@ -145,13 +208,17 @@ def unique(items):
     return out
 
 
-def column_values(exp_id, hostname, total_time):
+def column_values(exp_id, hostname, total_time, roc_auc, mean_epoch_time, epoch, datasets):
     total_time_min = "-" if total_time is None else f"{total_time / 60:.2f}m"
     return {
         "experiment_id": exp_id,
         "hostname": hostname or "-",
         "total_time": "-" if total_time is None else f"{total_time:.2f}s",
         "total_time_min": total_time_min,
+        "roc_auc": "-" if roc_auc is None else f"{roc_auc:.6f}",
+        "epoch": "-" if epoch is None else str(epoch),
+        "mean_epoch_time": "-" if mean_epoch_time is None else f"{mean_epoch_time:.2f}s",
+        "datasets": "-" if datasets is None else str(datasets),
     }
 
 
@@ -248,7 +315,7 @@ def add_stat_lines(plt, values):
 
 def main():
     parser = argparse.ArgumentParser(description="Summarize experiment logs.")
-    parser.add_argument("--experiments-dir", default="workdir/experiments")
+    parser.add_argument("--experiments-dir", "--dir", "-d", default="workdir/experiments")
     for col in COLUMNS:
         parser.add_argument(col["flag"], action="store_true")
     parser.add_argument("--plot", action="store_true")
@@ -279,10 +346,14 @@ def main():
         log_path = pick_log_file(exp_dir)
         hostname = None
         total_time = None
+        roc_auc = None
+        mean_epoch_time = None
+        epoch = None
+        datasets = None
         if log_path is not None:
-            hostname, total_time = parse_log(log_path)
+            hostname, total_time, roc_auc, mean_epoch_time, epoch, datasets = parse_log(log_path)
 
-        values = column_values(exp_id, hostname, total_time)
+        values = column_values(exp_id, hostname, total_time, roc_auc, mean_epoch_time, epoch, datasets)
         rows.append((total_time, [str(idx)] + [values[key] for key in columns]))
         times.append(total_time)
         if hostname:
@@ -306,10 +377,8 @@ def main():
         mu = mean(stats_values)
         sigma = pstdev(stats_values)
         med = median(stats_values)
-        print("\nstatistics:")
-        print(f"mean: {mu:.2f}s")
-        print(f"std: {sigma:.2f}s")
-        print(f"median: {med:.2f}s")
+        print()
+        print(f"stats: mean: {mu:.2f}s ({mu / 60:.2f}m) std: {sigma:.2f}s median: {med:.2f}s ({med / 60:.2f}m)")
 
     if args.plot:
         ts = datetime.now().strftime("%y%m%d-%H%M%S")
