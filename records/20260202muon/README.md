@@ -9,23 +9,19 @@ This record was obtained by implementing the Muon optimizer.
 Only one run's log is included here for reference. The median run is the one added to the general record table.
 
 
-## Runs
+```
+#  experiment_id                hostname   total_time  in_mins  roc_auc   epoch  μ_epoch_t  datasets
+-  ---------------------------  ---------  ----------  -------  --------  -----  ---------  --------
+1  260205-224049-50405f6e-muon  dlc2gpu15  3299.03s    54.98m   0.807814  716    4.61s      45824
+2  260205-224054-32eb381a-muon  dlc2gpu03  3261.69s    54.36m   0.807814  716    4.56s      45824
+3  260205-224054-582e18e2-muon  dlc2gpu08  3246.90s    54.12m   0.807814  716    4.53s      45824
+4  260205-224100-117c1dc1-muon  dlc2gpu08  3273.00s    54.55m   0.807814  716    4.57s      45824
+5  260205-224113-34e556ea-muon  dlc2gpu08  3264.89s    54.41m   0.807814  716    4.56s      45824
 
-| experiment_id          | hostname  | total_time | in_mins |
-|------------------------|-----------|------------|---------|
-| 260202-000029-00405a29 | dlc2gpu01 | 4170.85s   | 69.51m  |
-| 260202-000029-41eba9e8 | dlc2gpu01 | 4149.11s   | 69.15m  |
-| 260202-000029-d1dc95ff | dlc2gpu02 | 4102.73s   | 68.38m  |
-
-
-## Statistics
-
-- Mean: 4140.90 s
-- Standard deviation: 28.41 s
-- Median: 4149.11 s
-
+stats: mean: 3269.10s (54.49m) std: 17.18s median: 3264.89s (54.41m)
+```
 
 ## Plots
 
-![Experiment plot](./260202-155454-records-plot-x-datasets-y-val.png)
-![Host plot](./260202-155618-records-plot-x-time-y-val.png)
+![val vs datasets plot](./260206-135105-records-plot-x-datasets-y-val.png)
+![val vs time plot](./260206-134506-records-plot-x-time-y-val.png)

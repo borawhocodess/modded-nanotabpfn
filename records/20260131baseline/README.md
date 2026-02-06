@@ -1,31 +1,23 @@
 # Baseline
 
-Baseline was obtained by averaging 10 runs across the cluster. Only one run's log is included here for reference.
+Baseline was obtained by averaging 5 runs across the cluster. Only one run's log is included here for reference.
 
-## Runs
+```
+#  experiment_id                    hostname   total_time  in_mins  roc_auc   epoch  μ_epoch_t  datasets
+-  -------------------------------  ---------  ----------  -------  --------  -----  ---------  --------
+1  260205-223919-fad38238-baseline  dlc2gpu03  4475.83s    74.60m   0.806861  1259   3.56s      80576
+2  260205-224029-0623835f-baseline  dlc2gpu15  4427.70s    73.80m   0.806861  1259   3.52s      80576
+3  260205-224029-1a8e142d-baseline  dlc2gpu09  4534.00s    75.57m   0.806861  1259   3.60s      80576
+4  260205-224029-9fbc2550-baseline  dlc2gpu14  4483.19s    74.72m   0.806861  1259   3.56s      80576
+5  260205-224029-fdfe9f9f-baseline  dlc2gpu09  4374.70s    72.91m   0.806861  1259   3.47s      80576
 
-| experiment_id          | hostname  | total_time | in_mins |
-|------------------------|-----------|------------|---------|
-| 260131-174351-6457d9b3 | dlc2gpu01 | 4399.57s   | 73.33m  |
-| 260131-060945-077cd1f7 | dlc2gpu14 | 4400.78s   | 73.35m  |
-| 260131-064352-968877f5 | dlc2gpu12 | 4404.92s   | 73.42m  |
-| 260131-050507-4f5e023b | dlc2gpu12 | 4437.75s   | 73.96m  |
-| 260131-131258-5de1b7c5 | dlc2gpu06 | 4456.02s   | 74.27m  |
-| 260131-061903-260a7d0f | dlc2gpu16 | 4456.11s   | 74.27m  |
-| 260131-055813-dd967ff5 | dlc2gpu14 | 4456.49s   | 74.27m  |
-| 260131-131258-54de6af9 | dlc2gpu06 | 4495.87s   | 74.93m  |
-| 260131-061123-49a06028 | dlc2gpu14 | 4501.90s   | 75.03m  |
-| 260131-174351-5d34b53f | dlc2gpu01 | 4541.68s   | 75.69m  |
+stats: mean: 4459.08s (74.32m) std: 54.00s median: 4475.83s (74.60m)
+```
 
-## Statistics
-
-- Mean: 4455.11 s
-- Standard deviation: 44.95 s
-- Median: 4456.07 s
 
 ## Plots
 
 The blue line denotes the mean across the 10 runs, the dashed lines indicate ±1 and ±2 standard deviations. The purple dotted line denotes the median.
 
-![Experiment plot](./260131-231744-expplot.png)
-![Host plot](./260131-231748-hostplot.png)
+![Experiment plot](./260206-124839-expplot.png)
+![Host plot](./260206-133740-hostplot.png)
