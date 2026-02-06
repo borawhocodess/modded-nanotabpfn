@@ -60,6 +60,7 @@ COLUMNS = [
 
 COLUMN_BY_KEY = {col["key"]: col for col in COLUMNS}
 FLAG_TO_KEY = {col["flag"]: col["key"] for col in COLUMNS}
+DIR_FLAGS = {"--experiments-dir", "--dir", "-d"}
 
 
 def parse_log(log_path):
@@ -171,8 +172,10 @@ def extract_order(argv):
         if skip_next:
             skip_next = False
             continue
-        if token == "--experiments-dir":
+        if token in DIR_FLAGS:
             skip_next = True
+            continue
+        if any(token.startswith(flag + "=") for flag in DIR_FLAGS if flag.startswith("--")):
             continue
         key = FLAG_TO_KEY.get(token)
         if key:
@@ -296,7 +299,7 @@ def add_stat_lines(plt, values):
 
 def main():
     parser = argparse.ArgumentParser(description="Summarize experiment logs.")
-    parser.add_argument("--experiments-dir", default="workdir/experiments")
+    parser.add_argument("--experiments-dir", "--dir", "-d", default="workdir/experiments")
     for col in COLUMNS:
         parser.add_argument(col["flag"], action="store_true")
     parser.add_argument("--plot", action="store_true")
