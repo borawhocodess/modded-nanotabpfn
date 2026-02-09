@@ -365,9 +365,9 @@ def main():
         help="x axis for lossplot",
     )
     parser.add_argument("--ma", type=int, default=1, help="moving average window for plots")
-    parser.add_argument("--point-size", type=float, default=25.0, help="marker size for plots")
-    parser.add_argument("--line-width", type=float, default=1.2, help="line width for plots")
-    parser.add_argument("--start-y-axis-at", type=float, default=None, help="y-axis lower bound")
+    parser.add_argument("--point-size", type=float, default=10.0, help="marker size for plots")
+    parser.add_argument("--line-width", type=float, default=1.0, help="line width for plots")
+    parser.add_argument("--start-y-axis-at", type=float, default=0.72, help="y-axis lower bound")
     args = parser.parse_args()
 
     records_dir = Path(args.records_dir)
