@@ -10,7 +10,7 @@ This repo now contains a training algorithm which attains the target performance
 
 with the help of the following techniques:
 * Muon optimizer
-* SDPA attention rewrite with explicit QKV
+* Scaled Dot-Product Attention rewrite with explicit QKV
 * Pre-norm transformer blocks
 * bfloat16 autocast in training and inference
 * Set float32 matmul precision to high
