@@ -10,6 +10,13 @@ This repo now contains a training algorithm which attains the target performance
 
 with the help of the following techniques:
 * Muon optimizer
+* SDPA attention rewrite with explicit QKV
+* Pre-norm transformer blocks
+* bfloat16 autocast in training and inference
+* Set float32 matmul precision to high
+* Increase learning rate from 1e-4 to 1e-3
+* Increase embedding size from 192 to 256
+* Reduce attention heads from 6 to 4
 
 also these were tried but did not lead to improvements:
 * Xavier initialization
@@ -68,3 +75,6 @@ Evaluation is on all of 38 TabArena classification tasks.
 4. [N. Erickson et al. TabArena: A Living Benchmark for Machine Learning on Tabular Data. arXiv preprint (2025).](https://arxiv.org/abs/2506.16791)
 5. [A. Pfefferle et al. nanoTabPFN: A Lightweight and Educational Reimplementation of TabPFN. arXiv preprint (2025).](https://arxiv.org/abs/2511.03634)
 6. [K. Jordan et al. Muon: An optimizer for hidden layers in neural networks (2024).](https://kellerjordan.github.io/posts/muon/)
+7. [PyTorch docs: `torch.nn.functional.scaled_dot_product_attention`.](https://pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html)
+8. [PyTorch docs: Automatic Mixed Precision (`torch.autocast`).](https://pytorch.org/docs/stable/amp.html)
+9. [PyTorch docs: `torch.set_float32_matmul_precision`.](https://pytorch.org/docs/stable/generated/torch.set_float32_matmul_precision.html)
