@@ -1,4 +1,5 @@
 import argparse
+import fnmatch
 import re
 from pathlib import Path
 
@@ -188,6 +189,37 @@ def iter_records(records_dir):
     return sorted([p for p in records_dir.iterdir() if p.is_dir()])
 
 
+def parse_name_patterns(pattern_args):
+    patterns = []
+    for value in pattern_args or []:
+        for part in value.split(","):
+            part = part.strip()
+            if part:
+                patterns.append(part)
+    return patterns
+
+
+def name_matches_patterns(name, patterns):
+    name_l = name.lower()
+    for pattern in patterns:
+        pattern_l = pattern.lower()
+        if fnmatch.fnmatch(name_l, pattern_l) or pattern_l in name_l:
+            return True
+    return False
+
+
+def filter_record_dirs(record_dirs, only_patterns, exclude_patterns):
+    out = []
+    for record_dir in record_dirs:
+        name = record_dir.name
+        if only_patterns and not name_matches_patterns(name, only_patterns):
+            continue
+        if exclude_patterns and name_matches_patterns(name, exclude_patterns):
+            continue
+        out.append(record_dir)
+    return out
+
+
 def make_table(headers, rows):
     widths = [len(h) for h in headers]
     for row in rows:
@@ -305,6 +337,18 @@ def resolve_record_time(record_dir):
 def main():
     parser = argparse.ArgumentParser(description="Summarize record performance.")
     parser.add_argument("--records-dir", default="records")
+    parser.add_argument(
+        "--only",
+        action="append",
+        default=[],
+        help="include only matching record names (repeatable, comma-separated, supports glob patterns)",
+    )
+    parser.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        help="exclude matching record names (repeatable, comma-separated, supports glob patterns)",
+    )
     parser.add_argument("--baseline", default="", help="record name to use as baseline")
     parser.add_argument("--valplot", action="store_true", help="plot validation scores vs wallclock")
     parser.add_argument("--lossplot", action="store_true", help="plot training loss vs x-axis")
@@ -328,6 +372,9 @@ def main():
 
     records_dir = Path(args.records_dir)
     record_dirs = iter_records(records_dir)
+    only_patterns = parse_name_patterns(args.only)
+    exclude_patterns = parse_name_patterns(args.exclude)
+    record_dirs = filter_record_dirs(record_dirs, only_patterns, exclude_patterns)
     if not record_dirs:
         print("No records found.")
         return 1
