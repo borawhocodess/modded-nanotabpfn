@@ -295,7 +295,7 @@ class TransformerEncoderLayer(nn.Module):
         self.num_heads = a
         self.head_dim = e // a
         assert e % a == 0, "Embedding size must be divisible by heads"
-        
+
         self.qkv_datapoints = nn.Linear(e, 3 * e)
         self.qkv_features = nn.Linear(e, 3 * e)
 
@@ -308,49 +308,49 @@ class TransformerEncoderLayer(nn.Module):
 
     def forward(self, src, sep):
         b, r, c, e = src.shape
-        
+
         x = src.reshape(b * r, c, e)
         res = x
         x = self.norm1(x)
-        
+
         qkv = self.qkv_features(x)
         qkv = qkv.reshape(b * r, c, 3, self.num_heads, self.head_dim)
         qkv = qkv.permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
-        
+
         x = F.scaled_dot_product_attention(q, k, v)
         x = x.transpose(1, 2).reshape(b * r, c, e)
-        
+
         src = res + x
         src = src.reshape(b, r, c, e)
 
         x = src.transpose(1, 2).reshape(b * c, r, e)
         res = x
         x = self.norm2(x)
-        
+
         qkv = self.qkv_datapoints(x)
         qkv = qkv.reshape(b * c, r, 3, self.num_heads, self.head_dim)
         qkv = qkv.permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
 
         q_left, q_right = q.split([sep, r - sep], dim=2)
-        
+
         k_train = k[:, :, :sep, :]
         v_train = v[:, :, :sep, :]
-        
+
         x_left = F.scaled_dot_product_attention(q_left, k_train, v_train)
         x_right = F.scaled_dot_product_attention(q_right, k_train, v_train)
-        
+
         x = torch.cat([x_left, x_right], dim=2)
         x = x.transpose(1, 2).reshape(b * c, r, e)
-        
+
         src = res + x
         src = src.reshape(b, c, r, e).transpose(2, 1)
 
         x = self.norm3(src)
         x = self.linear2(F.gelu(self.linear1(x)))
         src = src + x
-        
+
         return src
 
 
@@ -499,12 +499,12 @@ class NanoTabPFNClassifier:
         with torch.no_grad():
             x = torch.from_numpy(x).unsqueeze(0).to(torch.float).to(self.device)
             y = torch.from_numpy(y).unsqueeze(0).to(torch.float).to(self.device)
-            
+
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 out = self.model((x, y), sep=len(self.X_train)).squeeze(0)
                 out = out[:, : self.num_classes]
                 probabilities = F.softmax(out, dim=1)
-                
+
             return probabilities.to("cpu").numpy()
 
 
