@@ -69,6 +69,8 @@ random.seed(c.seed)
 np.random.seed(c.seed)
 torch.manual_seed(c.seed)
 torch.set_float32_matmul_precision('high')
+import torch._dynamo
+torch._dynamo.config.cache_size_limit = 128
 
 assert torch.cuda.is_available()
 
@@ -152,6 +154,10 @@ TABARENA_CLASSIFICATION_TASKS = [
 # muon
 
 
+def zeropower_via_svd(G, steps=None):
+    U, S, V = G.svd()
+    return U @ V.T
+
 @torch.compile
 def zeropower_via_newtonschulz5(G, steps=10, eps=1e-7):
     assert len(G.shape) == 2
@@ -168,18 +174,36 @@ def zeropower_via_newtonschulz5(G, steps=10, eps=1e-7):
         X = X.T
     return X.to(G.dtype)
 
+@torch.compile
+def zeropower_via_newtonschulz5_batched(G, steps=10, eps=1e-7):
+    a, b, c = (3.4445, -4.7750,  2.0315)
+    X = G.bfloat16()
+    X /= (X.norm(dim=(1, 2), keepdim=True) + eps)
+    if X.size(1) > X.size(2):
+        X = X.transpose(1, 2)
+    for _ in range(steps):
+        A = X @ X.transpose(1, 2)
+        B = A @ X
+        X = a * X + b * B + c * A @ B
+    if G.size(1) > G.size(2):
+        X = X.transpose(1, 2)
+    return X.to(G.dtype)
+
+zeropower_backends = dict(svd=zeropower_via_svd, newtonschulz5=zeropower_via_newtonschulz5)
+
 class Muon(torch.optim.Optimizer):
     """
     code adapted from: https://github.com/KellerJordan/modded-nanogpt/commit/b356a1f
     """
-    def __init__(self, params, lr=3e-4, momentum=0.95, nesterov=True, backend_steps=5):
-        defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, backend_steps=backend_steps)
+    def __init__(self, params, lr=3e-4, momentum=0.95, nesterov=True, backend='newtonschulz5', backend_steps=5):
+        defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, backend=backend, backend_steps=backend_steps)
         super().__init__(params, defaults)
 
     def step(self):
         for group in self.param_groups:
             lr = group['lr']
             momentum = group['momentum']
+            zeropower_backend = zeropower_backends[group['backend']]
             for p in group['params']:
                 g = p.grad
                 if g is None:
@@ -192,10 +216,12 @@ class Muon(torch.optim.Optimizer):
                 if group['nesterov']:
                     g = g.add(buf, alpha=momentum)
                 if g.size(0) == 3 * g.size(1):
-                    g = torch.cat([zeropower_via_newtonschulz5(g1, steps=group['backend_steps']) for g1 in g.split(g.size(1))])
+                    g_batched = g.view(3, g.size(1), g.size(1))
+                    g_new = zeropower_via_newtonschulz5_batched(g_batched, steps=group['backend_steps'])
+                    g = g_new.view(3 * g.size(1), g.size(1))
                     scale = g.size(1)**0.5
                 else:
-                    g = zeropower_via_newtonschulz5(g, steps=group['backend_steps'])
+                    g = zeropower_backend(g, steps=group['backend_steps'])
                     scale = max(g.size(0), g.size(1))**0.5
                 p.data.add_(g, alpha=-lr * scale)
 
@@ -306,6 +332,7 @@ class TransformerEncoderLayer(nn.Module):
         self.norm2 = nn.LayerNorm(e, eps=eps)
         self.norm3 = nn.LayerNorm(e, eps=eps)
 
+    @torch.compile(dynamic=True)
     def forward(self, src, sep):
         b, r, c, e = src.shape
         
