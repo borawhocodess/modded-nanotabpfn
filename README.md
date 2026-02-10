@@ -8,7 +8,7 @@ This repo now contains a training algorithm which attains the target performance
 * 10.10 minutes on 1xL40S (baseline needed 74.32)
 * 13184 synthetic datasets (baseline needed 80576)
 
-with the help of the following techniques:
+This improvement in training speed has been brought about by the following techniques:
 * Muon optimizer
 * Scaled Dot-Product Attention rewrite with explicit QKV
 * Pre-norm transformer blocks
@@ -18,7 +18,7 @@ with the help of the following techniques:
 * Increase embedding size from 192 to 256
 * Reduce attention heads from 6 to 4
 
-also these were tried but did not lead to improvements:
+The following techniques were evaluated but did not lead to improvements:
 * Xavier initialization
 
 
