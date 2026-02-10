@@ -10,6 +10,7 @@ This repo now contains a training algorithm which attains the target performance
 
 with the help of the following techniques:
 * Muon optimizer
+* Batched Muon zeropower update for grouped QKV matrices
 * Scaled Dot-Product Attention rewrite with explicit QKV
 * Pre-norm transformer blocks
 * bfloat16 autocast in training and inference
@@ -17,6 +18,8 @@ with the help of the following techniques:
 * Increase learning rate from 1e-4 to 1e-3
 * Increase embedding size from 192 to 256
 * Reduce attention heads from 6 to 4
+
+As well as some systems optimizations.
 
 also these were tried but did not lead to improvements:
 * Xavier initialization
@@ -46,7 +49,7 @@ Note: The 0.8068462330697953 target was selected to match the performance of Ran
 | 1 | 74.32 minutes | 31/01/26 | Baseline | [log](records/20260131baseline/260205-223919-fad38238-baseline-log.txt) | @borawhocodess, nanotabpfn contributors |
 | 2 | 54.41 minutes | 02/02/26 | Muon optimizer | [log](records/20260131baseline/260205-224113-34e556ea-muon-log.txt) | @borawhocodess |
 | 3 | 10.10 minutes | 04/02/26 | SDPA, bf16, higher LR, wider embeddings, fewer heads | [log](records/20260204carter/260205-225951-d60000eb-carter-log.txt) | @carterprince |
-| 4 | 9.26 minutes  | 08/02/26 | Batched Muon | [log](records/20260208batchedmuon/260209-204142-79d70f03-log.txt) | @carterprince |
+| 4 | 9.26 minutes  | 08/02/26 | Batched Muon, compiled forward | [log](records/20260208batchedmuon/260209-204142-79d70f03-log.txt) | @carterprince |
 
 
 ## Evaluation details
@@ -79,3 +82,5 @@ Evaluation is on all of 38 TabArena classification tasks.
 7. [PyTorch docs: `torch.nn.functional.scaled_dot_product_attention`.](https://pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html)
 8. [PyTorch docs: Automatic Mixed Precision (`torch.autocast`).](https://pytorch.org/docs/stable/amp.html)
 9. [PyTorch docs: `torch.set_float32_matmul_precision`.](https://pytorch.org/docs/stable/generated/torch.set_float32_matmul_precision.html)
+10. [PyTorch docs: `torch.compile`.](https://pytorch.org/docs/stable/generated/torch.compile.html)
+11. [PyTorch docs: Dealing with Recompilations.](https://docs.pytorch.org/docs/stable/user_guide/torch_compiler/compile/programming_model.recompilation.html)
