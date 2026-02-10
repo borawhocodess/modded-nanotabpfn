@@ -48,6 +48,16 @@ Note: The 0.8068462330697953 target was selected to match the performance of Ran
 | 3 | 10.10 minutes | 04/02/26 | SDPA, bf16, higher LR, wider embeddings, fewer heads | [log](records/20260204carter/260205-225951-d60000eb-carter-log.txt) | @carterprince |
 
 
+## Rules
+
+New records must:
+- Not modify the evaluation pipeline.
+- Not load any pretrained weights.
+- Run faster than prior record when baselined on the same hardware.
+
+Other than that, anything and everything is fair game!
+
+
 ## Evaluation details
 
 Evaluation is on all of 38 TabArena classification tasks.
