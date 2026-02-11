@@ -269,6 +269,21 @@ def smooth_series(values, window):
     return out
 
 
+def parse_figsize(value):
+    text = value.strip().lower().replace("x", ",")
+    parts = [part.strip() for part in text.split(",") if part.strip()]
+    if len(parts) != 2:
+        raise argparse.ArgumentTypeError("figsize must be in format W,H (e.g. 14,8)")
+    try:
+        width = float(parts[0])
+        height = float(parts[1])
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("figsize values must be numbers") from exc
+    if width <= 0 or height <= 0:
+        raise argparse.ArgumentTypeError("figsize values must be > 0")
+    return (width, height)
+
+
 def save_metric_plot(
     series_by_record,
     out_path,
@@ -278,6 +293,7 @@ def save_metric_plot(
     point_size,
     line_width,
     y_min,
+    figsize,
 ):
     series_by_record = {k: v for k, v in series_by_record.items() if v}
     if not series_by_record:
@@ -287,7 +303,7 @@ def save_metric_plot(
     except Exception:
         return None
 
-    plt.figure(figsize=(9, 4.5))
+    plt.figure(figsize=figsize)
     for record_name, series in sorted(series_by_record.items()):
         if x_mode == "datasets":
             xs = [t for t, _ in series]
@@ -378,6 +394,13 @@ def main():
     parser.add_argument("--point-size", type=float, default=10.0, help="marker size for plots")
     parser.add_argument("--line-width", type=float, default=1.0, help="line width for plots")
     parser.add_argument("--start-y-axis-at", type=float, default=0.72, help="y-axis lower bound")
+    parser.add_argument(
+        "--figsize",
+        type=parse_figsize,
+        default=(9.0, 4.5),
+        metavar="W,H",
+        help="plot size in inches, e.g. 14,8 or 14x8",
+    )
     args = parser.parse_args()
 
     records_dir = Path(args.records_dir)
@@ -445,6 +468,7 @@ def main():
             args.point_size,
             args.line_width,
             args.start_y_axis_at,
+            args.figsize,
         )
         if saved:
             print(f"valplot: {saved}")
@@ -465,6 +489,7 @@ def main():
             args.point_size,
             args.line_width,
             args.start_y_axis_at,
+            args.figsize,
         )
         if saved:
             print(f"lossplot: {saved}")
