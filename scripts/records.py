@@ -309,6 +309,11 @@ def save_metric_plot(
     figsize,
     legend_size,
     tick_size,
+    hline_y,
+    hline_label,
+    hline_color,
+    hline_style,
+    hline_width,
 ):
     series_by_record = {k: v for k, v in series_by_record.items() if v}
     if not series_by_record:
@@ -337,6 +342,14 @@ def save_metric_plot(
                 linewidth=line_width,
                 label=record_name,
             )
+    if hline_y is not None:
+        plt.axhline(
+            y=hline_y,
+            color=hline_color,
+            linestyle=hline_style,
+            linewidth=hline_width,
+            label=hline_label,
+        )
     if x_mode == "datasets":
         plt.xlabel("datasets_seen")
     elif x_mode == "wallclock":
@@ -349,7 +362,7 @@ def save_metric_plot(
         plt.yticks(fontsize=tick_size)
     if y_min is not None:
         plt.ylim(bottom=y_min)
-    if len(series_by_record) > 1:
+    if len(series_by_record) > 1 or hline_y is not None:
         plt.legend(loc="best", fontsize=legend_size)
     plt.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -431,6 +444,33 @@ def main():
         default=None,
         help="x/y tick label font size (e.g. 12); default keeps matplotlib setting",
     )
+    parser.add_argument(
+        "--rf-line-y",
+        type=float,
+        default=None,
+        help="draw horizontal Random Forest reference line at this y value (valplot)",
+    )
+    parser.add_argument(
+        "--rf-line-label",
+        default="Random Forest",
+        help="label for Random Forest reference line",
+    )
+    parser.add_argument(
+        "--rf-line-color",
+        default="black",
+        help="color for Random Forest reference line",
+    )
+    parser.add_argument(
+        "--rf-line-style",
+        default="--",
+        help="linestyle for Random Forest reference line (e.g. --, -, :, -.)",
+    )
+    parser.add_argument(
+        "--rf-line-width",
+        type=float,
+        default=1.0,
+        help="line width for Random Forest reference line",
+    )
     args = parser.parse_args()
 
     records_dir = Path(args.records_dir)
@@ -501,6 +541,11 @@ def main():
             args.figsize,
             args.legend_size,
             args.tick_size,
+            args.rf_line_y,
+            args.rf_line_label,
+            args.rf_line_color,
+            args.rf_line_style,
+            args.rf_line_width,
         )
         if saved:
             print(f"valplot: {saved}")
@@ -524,6 +569,11 @@ def main():
             args.figsize,
             args.legend_size,
             args.tick_size,
+            None,
+            args.rf_line_label,
+            args.rf_line_color,
+            args.rf_line_style,
+            args.rf_line_width,
         )
         if saved:
             print(f"lossplot: {saved}")
