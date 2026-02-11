@@ -1,6 +1,6 @@
 # modded-nanoTabPFN
 
-This repository hosts the nanoTabPFN speedrun, in which we search for the fastest way to use 1 NVIDIA L40S to train a tabular foundation model (nanoTabPFN) that beats Random Forest on [TabArena](https://github.com/autogluon/tabarena) datasets.
+This repository hosts the *nanoTabPFN speedrun*, in which we (collaboratively|competitively) search for the fastest way to use 1 NVIDIA L40S to train a tabular foundation model (nanoTabPFN) that beats Random Forest on [TabArena](https://github.com/autogluon/tabarena) datasets.
 
 The code is derived from [nanoTabPFN](https://github.com/automl/nanoTabPFN) with the inspiration of [modded-nanogpt](https://github.com/KellerJordan/modded-nanogpt).
 
@@ -37,7 +37,7 @@ uv sync
 
 ## Record history
 
-The following is the historical progression of speed records for the following task:
+The following is the historical progression of speed records for the following competitive task:
 
 > *Pretrain a neural network to ≤0.8068462330697953 validation average ROC AUC on subsampled TabArena using 1 NVIDIA L40S.*
 
