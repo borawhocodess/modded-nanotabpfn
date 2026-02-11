@@ -13,13 +13,12 @@ with the help of the following techniques:
 * Batched Muon zeropower update for grouped QKV matrices
 * Scaled Dot-Product Attention rewrite with explicit QKV
 * Pre-norm transformer blocks
+* Compile TransformerEncoderLayer forward
 * bfloat16 autocast in training and inference
 * Set float32 matmul precision to high
 * Increase learning rate from 1e-4 to 1e-3
 * Increase embedding size from 192 to 256
 * Reduce attention heads from 6 to 4
-
-As well as some systems optimizations.
 
 also these were tried but did not lead to improvements:
 * Xavier initialization
