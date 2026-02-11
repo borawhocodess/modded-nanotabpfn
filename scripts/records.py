@@ -284,6 +284,19 @@ def parse_figsize(value):
     return (width, height)
 
 
+def parse_fontsize(value):
+    text = value.strip()
+    if not text:
+        raise argparse.ArgumentTypeError("font size cannot be empty")
+    try:
+        size = float(text)
+    except ValueError:
+        return text
+    if size <= 0:
+        raise argparse.ArgumentTypeError("font size must be > 0")
+    return size
+
+
 def save_metric_plot(
     series_by_record,
     out_path,
@@ -294,6 +307,8 @@ def save_metric_plot(
     line_width,
     y_min,
     figsize,
+    legend_size,
+    tick_size,
 ):
     series_by_record = {k: v for k, v in series_by_record.items() if v}
     if not series_by_record:
@@ -329,10 +344,13 @@ def save_metric_plot(
     else:
         plt.xlabel("time (mins)")
     plt.ylabel(ylabel)
+    if tick_size is not None:
+        plt.xticks(fontsize=tick_size)
+        plt.yticks(fontsize=tick_size)
     if y_min is not None:
         plt.ylim(bottom=y_min)
     if len(series_by_record) > 1:
-        plt.legend(loc="best", fontsize="small")
+        plt.legend(loc="best", fontsize=legend_size)
     plt.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(out_path)
@@ -400,6 +418,18 @@ def main():
         default=(9.0, 4.5),
         metavar="W,H",
         help="plot size in inches, e.g. 14,8 or 14x8",
+    )
+    parser.add_argument(
+        "--legend-size",
+        type=parse_fontsize,
+        default="small",
+        help="legend font size (e.g. small, medium, 12)",
+    )
+    parser.add_argument(
+        "--tick-size",
+        type=float,
+        default=None,
+        help="x/y tick label font size (e.g. 12); default keeps matplotlib setting",
     )
     args = parser.parse_args()
 
@@ -469,6 +499,8 @@ def main():
             args.line_width,
             args.start_y_axis_at,
             args.figsize,
+            args.legend_size,
+            args.tick_size,
         )
         if saved:
             print(f"valplot: {saved}")
@@ -490,6 +522,8 @@ def main():
             args.line_width,
             args.start_y_axis_at,
             args.figsize,
+            args.legend_size,
+            args.tick_size,
         )
         if saved:
             print(f"lossplot: {saved}")
