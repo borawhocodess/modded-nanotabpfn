@@ -1,4 +1,5 @@
 import argparse
+import fnmatch
 import re
 from pathlib import Path
 
@@ -188,6 +189,37 @@ def iter_records(records_dir):
     return sorted([p for p in records_dir.iterdir() if p.is_dir()])
 
 
+def parse_name_patterns(pattern_args):
+    patterns = []
+    for value in pattern_args or []:
+        for part in value.split(","):
+            part = part.strip()
+            if part:
+                patterns.append(part)
+    return patterns
+
+
+def name_matches_patterns(name, patterns):
+    name_l = name.lower()
+    for pattern in patterns:
+        pattern_l = pattern.lower()
+        if fnmatch.fnmatch(name_l, pattern_l) or pattern_l in name_l:
+            return True
+    return False
+
+
+def filter_record_dirs(record_dirs, only_patterns, exclude_patterns):
+    out = []
+    for record_dir in record_dirs:
+        name = record_dir.name
+        if only_patterns and not name_matches_patterns(name, only_patterns):
+            continue
+        if exclude_patterns and name_matches_patterns(name, exclude_patterns):
+            continue
+        out.append(record_dir)
+    return out
+
+
 def make_table(headers, rows):
     widths = [len(h) for h in headers]
     for row in rows:
@@ -292,19 +324,41 @@ def save_metric_plot(
     return out_path
 
 
-def resolve_record_time(record_dir):
-    readme_mean = parse_readme_mean(record_dir / "README.md")
-    if readme_mean is not None:
-        return readme_mean
+def resolve_record_time(record_dir, use_readme_mean):
+    if use_readme_mean:
+        readme_mean = parse_readme_mean(record_dir / "README.md")
+        if readme_mean is not None:
+            return readme_mean
     log_path = pick_log_file(record_dir)
     if log_path is None:
         return None
     return parse_log_total_time(log_path)
 
 
+def choose_baseline_name(record_names, requested_baseline):
+    if requested_baseline and requested_baseline in record_names:
+        return requested_baseline
+    for name in record_names:
+        if "baseline" in name.lower():
+            return name
+    return record_names[0] if record_names else None
+
+
 def main():
     parser = argparse.ArgumentParser(description="Summarize record performance.")
     parser.add_argument("--records-dir", default="records")
+    parser.add_argument(
+        "--only",
+        action="append",
+        default=[],
+        help="include only matching record names (repeatable, comma-separated, supports glob patterns)",
+    )
+    parser.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        help="exclude matching record names (repeatable, comma-separated, supports glob patterns)",
+    )
     parser.add_argument("--baseline", default="", help="record name to use as baseline")
     parser.add_argument("--valplot", action="store_true", help="plot validation scores vs wallclock")
     parser.add_argument("--lossplot", action="store_true", help="plot training loss vs x-axis")
@@ -321,18 +375,26 @@ def main():
         help="x axis for lossplot",
     )
     parser.add_argument("--ma", type=int, default=1, help="moving average window for plots")
-    parser.add_argument("--point-size", type=float, default=25.0, help="marker size for plots")
-    parser.add_argument("--line-width", type=float, default=1.2, help="line width for plots")
-    parser.add_argument("--start-y-axis-at", type=float, default=None, help="y-axis lower bound")
+    parser.add_argument("--point-size", type=float, default=10.0, help="marker size for plots")
+    parser.add_argument("--line-width", type=float, default=1.0, help="line width for plots")
+    parser.add_argument("--start-y-axis-at", type=float, default=0.72, help="y-axis lower bound")
     args = parser.parse_args()
 
     records_dir = Path(args.records_dir)
     record_dirs = iter_records(records_dir)
+    only_patterns = parse_name_patterns(args.only)
+    exclude_patterns = parse_name_patterns(args.exclude)
+    record_dirs = filter_record_dirs(record_dirs, only_patterns, exclude_patterns)
     if not record_dirs:
         print("No records found.")
         return 1
 
-    records = [(record_dir.name, resolve_record_time(record_dir)) for record_dir in record_dirs]
+    record_names = [record_dir.name for record_dir in record_dirs]
+    baseline_name = choose_baseline_name(record_names, args.baseline)
+    records = [
+        (record_dir.name, resolve_record_time(record_dir, record_dir.name == baseline_name))
+        for record_dir in record_dirs
+    ]
     val_series_by_record = {}
     if args.valplot:
         for record_dir in record_dirs:
@@ -347,20 +409,6 @@ def main():
             series = parse_metric_series(log_path, args.lossplot_x, LOSS_RE)
             if series:
                 loss_series_by_record[record_dir.name] = series
-
-    baseline_name = None
-    if args.baseline:
-        for name, _ in records:
-            if name == args.baseline:
-                baseline_name = name
-                break
-    if baseline_name is None:
-        for name, _ in records:
-            if "baseline" in name.lower():
-                baseline_name = name
-                break
-    if baseline_name is None:
-        baseline_name = records[0][0] if records else None
 
     baseline_time = None
     for name, total_time in records:
