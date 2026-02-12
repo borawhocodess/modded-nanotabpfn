@@ -269,6 +269,34 @@ def smooth_series(values, window):
     return out
 
 
+def parse_figsize(value):
+    text = value.strip().lower().replace("x", ",")
+    parts = [part.strip() for part in text.split(",") if part.strip()]
+    if len(parts) != 2:
+        raise argparse.ArgumentTypeError("figsize must be in format W,H (e.g. 14,8)")
+    try:
+        width = float(parts[0])
+        height = float(parts[1])
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("figsize values must be numbers") from exc
+    if width <= 0 or height <= 0:
+        raise argparse.ArgumentTypeError("figsize values must be > 0")
+    return (width, height)
+
+
+def parse_fontsize(value):
+    text = value.strip()
+    if not text:
+        raise argparse.ArgumentTypeError("font size cannot be empty")
+    try:
+        size = float(text)
+    except ValueError:
+        return text
+    if size <= 0:
+        raise argparse.ArgumentTypeError("font size must be > 0")
+    return size
+
+
 def save_metric_plot(
     series_by_record,
     out_path,
@@ -278,6 +306,14 @@ def save_metric_plot(
     point_size,
     line_width,
     y_min,
+    figsize,
+    legend_size,
+    tick_size,
+    hline_y,
+    hline_label,
+    hline_color,
+    hline_style,
+    hline_width,
 ):
     series_by_record = {k: v for k, v in series_by_record.items() if v}
     if not series_by_record:
@@ -287,7 +323,7 @@ def save_metric_plot(
     except Exception:
         return None
 
-    plt.figure(figsize=(9, 4.5))
+    plt.figure(figsize=figsize)
     for record_name, series in sorted(series_by_record.items()):
         if x_mode == "datasets":
             xs = [t for t, _ in series]
@@ -306,6 +342,14 @@ def save_metric_plot(
                 linewidth=line_width,
                 label=record_name,
             )
+    if hline_y is not None:
+        plt.axhline(
+            y=hline_y,
+            color=hline_color,
+            linestyle=hline_style,
+            linewidth=hline_width,
+            label=hline_label,
+        )
     if x_mode == "datasets":
         plt.xlabel("datasets_seen")
     elif x_mode == "wallclock":
@@ -313,10 +357,13 @@ def save_metric_plot(
     else:
         plt.xlabel("time (mins)")
     plt.ylabel(ylabel)
+    if tick_size is not None:
+        plt.xticks(fontsize=tick_size)
+        plt.yticks(fontsize=tick_size)
     if y_min is not None:
         plt.ylim(bottom=y_min)
-    if len(series_by_record) > 1:
-        plt.legend(loc="best", fontsize="small")
+    if len(series_by_record) > 1 or hline_y is not None:
+        plt.legend(loc="best", fontsize=legend_size)
     plt.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(out_path)
@@ -378,6 +425,52 @@ def main():
     parser.add_argument("--point-size", type=float, default=10.0, help="marker size for plots")
     parser.add_argument("--line-width", type=float, default=1.0, help="line width for plots")
     parser.add_argument("--start-y-axis-at", type=float, default=0.72, help="y-axis lower bound")
+    parser.add_argument(
+        "--figsize",
+        type=parse_figsize,
+        default=(9.0, 4.5),
+        metavar="W,H",
+        help="plot size in inches, e.g. 14,8 or 14x8",
+    )
+    parser.add_argument(
+        "--legend-size",
+        type=parse_fontsize,
+        default="small",
+        help="legend font size (e.g. small, medium, 12)",
+    )
+    parser.add_argument(
+        "--tick-size",
+        type=float,
+        default=None,
+        help="x/y tick label font size (e.g. 12); default keeps matplotlib setting",
+    )
+    parser.add_argument(
+        "--rf-line-y",
+        type=float,
+        default=None,
+        help="draw horizontal Random Forest reference line at this y value (valplot)",
+    )
+    parser.add_argument(
+        "--rf-line-label",
+        default="Random Forest",
+        help="label for Random Forest reference line",
+    )
+    parser.add_argument(
+        "--rf-line-color",
+        default="black",
+        help="color for Random Forest reference line",
+    )
+    parser.add_argument(
+        "--rf-line-style",
+        default="--",
+        help="linestyle for Random Forest reference line (e.g. --, -, :, -.)",
+    )
+    parser.add_argument(
+        "--rf-line-width",
+        type=float,
+        default=1.0,
+        help="line width for Random Forest reference line",
+    )
     args = parser.parse_args()
 
     records_dir = Path(args.records_dir)
@@ -445,6 +538,14 @@ def main():
             args.point_size,
             args.line_width,
             args.start_y_axis_at,
+            args.figsize,
+            args.legend_size,
+            args.tick_size,
+            args.rf_line_y,
+            args.rf_line_label,
+            args.rf_line_color,
+            args.rf_line_style,
+            args.rf_line_width,
         )
         if saved:
             print(f"valplot: {saved}")
@@ -465,6 +566,14 @@ def main():
             args.point_size,
             args.line_width,
             args.start_y_axis_at,
+            args.figsize,
+            args.legend_size,
+            args.tick_size,
+            None,
+            args.rf_line_label,
+            args.rf_line_color,
+            args.rf_line_style,
+            args.rf_line_width,
         )
         if saved:
             print(f"lossplot: {saved}")
