@@ -22,6 +22,7 @@ import pandas as pd
 import schedulefree
 import torch
 import torch.nn.functional as F
+from golu.golu_activation import GoLU
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import roc_auc_score
@@ -327,6 +328,7 @@ class TransformerEncoderLayer(nn.Module):
 
         self.linear1 = nn.Linear(e, h)
         self.linear2 = nn.Linear(h, e)
+        self.golu = GoLU()
 
         self.norm1 = nn.LayerNorm(e, eps=eps)
         self.norm2 = nn.LayerNorm(e, eps=eps)
@@ -375,7 +377,7 @@ class TransformerEncoderLayer(nn.Module):
         src = src.reshape(b, c, r, e).transpose(2, 1)
 
         x = self.norm3(src)
-        x = self.linear2(F.gelu(self.linear1(x)))
+        x = self.linear2(self.golu(self.linear1(x)))
         src = src + x
 
         return src
@@ -386,9 +388,10 @@ class Decoder(nn.Module):
         super().__init__()
         self.linear1 = nn.Linear(e, h)
         self.linear2 = nn.Linear(h, o)
+        self.golu = GoLU()
 
     def forward(self, x):
-        return self.linear2(F.gelu(self.linear1(x)))
+        return self.linear2(self.golu(self.linear1(x)))
 
 
 # -----------------------------------------------------------------------------
