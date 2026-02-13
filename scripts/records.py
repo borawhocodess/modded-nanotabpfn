@@ -407,12 +407,13 @@ def main():
         help="exclude matching record names (repeatable, comma-separated, supports glob patterns)",
     )
     parser.add_argument("--baseline", default="", help="record name to use as baseline")
-    parser.add_argument("--valplot", action="store_true", help="plot validation scores vs wallclock")
+    parser.add_argument("--valplot", action="store_true", default=True, help="plot validation scores vs wallclock")
+    parser.add_argument("--no-valplot", action="store_false", dest="valplot", help="disable validation plot")
     parser.add_argument("--lossplot", action="store_true", help="plot training loss vs x-axis")
     parser.add_argument(
         "--valplot-x",
         choices=["total_time", "wallclock", "datasets"],
-        default="total_time",
+        default="datasets",
         help="x axis for valplot",
     )
     parser.add_argument(
@@ -428,36 +429,36 @@ def main():
     parser.add_argument(
         "--figsize",
         type=parse_figsize,
-        default=(9.0, 4.5),
+        default=(18.0, 9.0),
         metavar="W,H",
         help="plot size in inches, e.g. 14,8 or 14x8",
     )
     parser.add_argument(
         "--legend-size",
         type=parse_fontsize,
-        default="small",
+        default=18.0,
         help="legend font size (e.g. small, medium, 12)",
     )
     parser.add_argument(
         "--tick-size",
         type=float,
-        default=None,
+        default=14.0,
         help="x/y tick label font size (e.g. 12); default keeps matplotlib setting",
     )
     parser.add_argument(
         "--rf-line-y",
         type=float,
-        default=None,
+        default=0.8068462330697953,
         help="draw horizontal Random Forest reference line at this y value (valplot)",
     )
     parser.add_argument(
         "--rf-line-label",
-        default="Random Forest",
+        default="RF baseline",
         help="label for Random Forest reference line",
     )
     parser.add_argument(
         "--rf-line-color",
-        default="black",
+        default="gray",
         help="color for Random Forest reference line",
     )
     parser.add_argument(
@@ -468,7 +469,7 @@ def main():
     parser.add_argument(
         "--rf-line-width",
         type=float,
-        default=1.0,
+        default=2.0,
         help="line width for Random Forest reference line",
     )
     args = parser.parse_args()
