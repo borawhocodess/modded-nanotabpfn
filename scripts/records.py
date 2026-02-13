@@ -12,6 +12,36 @@ EPOCH_RE = re.compile(r"\be:(\d+)/\d+\b")
 STEPS_RE = re.compile(r"\((\d+)-")
 CONFIG_INT_RE = re.compile(r"^\s*(batch_size|steps):(?:\s*int\s*=\s*|\s*)(\d+)\s*$")
 LOSS_RE = re.compile(r"\bμ_l:([0-9]+(?:\.[0-9]+)?)\b")
+TABPFN_REF_LINE_SPECS = [
+    {
+        "id": "tabpfn_v2",
+        "arg_prefix": "tabpfn-v2",
+        "default_label": "TabPFNv2 baseline",
+        "default_y": 0.8301771427689452,
+        "default_alpha": 0.6,
+    },
+    {
+        "id": "tabpfn_v2_nopre",
+        "arg_prefix": "tabpfn-v2-nopre",
+        "default_label": "TabPFNv2 nopre baseline",
+        "default_y": 0.8307422813464695,
+        "default_alpha": 0.4,
+    },
+    {
+        "id": "tabpfn_v2_5",
+        "arg_prefix": "tabpfn-v2-5",
+        "default_label": "TabPFNv2.5 baseline",
+        "default_y": 0.8320368014767934,
+        "default_alpha": 1.0,
+    },
+    {
+        "id": "tabpfn_v2_5_nopre",
+        "arg_prefix": "tabpfn-v2-5-nopre",
+        "default_label": "TabPFNv2.5 nopre baseline",
+        "default_y": 0.8285797522680965,
+        "default_alpha": 0.8,
+    },
+]
 
 
 def parse_log_total_time(log_path):
@@ -297,6 +327,95 @@ def parse_fontsize(value):
     return size
 
 
+def add_tabpfn_ref_line_args(parser):
+    parser.add_argument(
+        "--tabpfn-ref-lines",
+        action="store_true",
+        default=False,
+        help="draw all predefined TabPFN reference lines (valplot)",
+    )
+    parser.add_argument(
+        "--tabpfn-ref-line-color",
+        default="black",
+        help="default color for predefined TabPFN reference lines",
+    )
+    parser.add_argument(
+        "--tabpfn-ref-line-style",
+        default="-",
+        help="default linestyle for predefined TabPFN reference lines",
+    )
+    parser.add_argument(
+        "--tabpfn-ref-line-width",
+        type=float,
+        default=1.0,
+        help="default line width for predefined TabPFN reference lines",
+    )
+    for spec in TABPFN_REF_LINE_SPECS:
+        line_name = spec["default_label"]
+        arg_prefix = spec["arg_prefix"]
+        parser.add_argument(
+            f"--{arg_prefix}-line",
+            action="store_true",
+            default=False,
+            help=f"draw {line_name} reference line",
+        )
+        parser.add_argument(
+            f"--{arg_prefix}-line-y",
+            type=float,
+            default=spec["default_y"],
+            help=f"y value for {line_name} reference line",
+        )
+        parser.add_argument(
+            f"--{arg_prefix}-line-label",
+            default=spec["default_label"],
+            help=f"label for {line_name} reference line",
+        )
+        parser.add_argument(
+            f"--{arg_prefix}-line-color",
+            default=None,
+            help=f"color override for {line_name} reference line",
+        )
+        parser.add_argument(
+            f"--{arg_prefix}-line-style",
+            default=None,
+            help=f"linestyle override for {line_name} reference line",
+        )
+        parser.add_argument(
+            f"--{arg_prefix}-line-width",
+            type=float,
+            default=None,
+            help=f"line width override for {line_name} reference line",
+        )
+        parser.add_argument(
+            f"--{arg_prefix}-line-alpha",
+            type=float,
+            default=spec["default_alpha"],
+            help=f"alpha for {line_name} reference line (0-1)",
+        )
+
+
+def build_tabpfn_ref_lines(args):
+    lines = []
+    for spec in TABPFN_REF_LINE_SPECS:
+        line_id = spec["id"]
+        if not (args.tabpfn_ref_lines or getattr(args, f"{line_id}_line")):
+            continue
+        color_override = getattr(args, f"{line_id}_line_color")
+        style_override = getattr(args, f"{line_id}_line_style")
+        width_override = getattr(args, f"{line_id}_line_width")
+        lines.append(
+            {
+                "label": getattr(args, f"{line_id}_line_label"),
+                "y": getattr(args, f"{line_id}_line_y"),
+                "color": color_override if color_override is not None else args.tabpfn_ref_line_color,
+                "style": style_override if style_override is not None else args.tabpfn_ref_line_style,
+                "width": width_override if width_override is not None else args.tabpfn_ref_line_width,
+                "alpha": getattr(args, f"{line_id}_line_alpha"),
+            }
+        )
+    return lines
+
+
 def save_metric_plot(
     series_by_record,
     out_path,
@@ -314,6 +433,7 @@ def save_metric_plot(
     hline_color,
     hline_style,
     hline_width,
+    extra_hlines,
 ):
     series_by_record = {k: v for k, v in series_by_record.items() if v}
     if not series_by_record:
@@ -350,6 +470,15 @@ def save_metric_plot(
             linewidth=hline_width,
             label=hline_label,
         )
+    for extra_hline in extra_hlines or []:
+        plt.axhline(
+            y=extra_hline["y"],
+            color=extra_hline["color"],
+            linestyle=extra_hline["style"],
+            linewidth=extra_hline["width"],
+            alpha=extra_hline.get("alpha", 1.0),
+            label=extra_hline["label"],
+        )
     if x_mode == "datasets":
         plt.xlabel("datasets_seen")
     elif x_mode == "wallclock":
@@ -362,7 +491,7 @@ def save_metric_plot(
         plt.yticks(fontsize=tick_size)
     if y_min is not None:
         plt.ylim(bottom=y_min)
-    if len(series_by_record) > 1 or hline_y is not None:
+    if len(series_by_record) > 1 or hline_y is not None or extra_hlines:
         plt.legend(loc="best", fontsize=legend_size)
     plt.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -472,6 +601,7 @@ def main():
         default=2.0,
         help="line width for Random Forest reference line",
     )
+    add_tabpfn_ref_line_args(parser)
     args = parser.parse_args()
 
     records_dir = Path(args.records_dir)
@@ -527,6 +657,7 @@ def main():
 
     print(make_table(headers, rows))
     if args.valplot:
+        extra_hlines = build_tabpfn_ref_lines(args)
         ts = __import__("datetime").datetime.now().strftime("%y%m%d-%H%M%S")
         x_tag = "time" if args.valplot_x == "total_time" else args.valplot_x
         out_path = Path("workdir/plots") / f"{ts}-records-plot-x-{x_tag}-y-val.png"
@@ -547,6 +678,7 @@ def main():
             args.rf_line_color,
             args.rf_line_style,
             args.rf_line_width,
+            extra_hlines,
         )
         if saved:
             print(f"valplot: {saved}")
@@ -575,6 +707,7 @@ def main():
             args.rf_line_color,
             args.rf_line_style,
             args.rf_line_width,
+            [],
         )
         if saved:
             print(f"lossplot: {saved}")
