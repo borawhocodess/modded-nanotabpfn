@@ -1,6 +1,8 @@
 import argparse
+import bisect
 import fnmatch
 import re
+import statistics
 from pathlib import Path
 
 TT_RE = re.compile(r"\bt_t:([0-9]+(?:\.[0-9]+)?)s\b")
@@ -209,8 +211,13 @@ def parse_metric_series(log_path, x_mode, metric_re):
 
 
 def pick_log_file(record_dir):
-    logs = list(record_dir.glob("*-log.txt"))
+    logs = pick_log_files(record_dir)
     return max(logs, key=lambda p: p.stat().st_mtime) if logs else None
+
+
+def pick_log_files(record_dir):
+    logs = list(record_dir.glob("*-log.txt"))
+    return sorted(logs, key=lambda p: p.stat().st_mtime)
 
 
 def iter_records(records_dir):
@@ -327,6 +334,52 @@ def parse_fontsize(value):
     return size
 
 
+def smooth_series_points(series, window):
+    xs = [x for x, _ in series]
+    ys = smooth_series([y for _, y in series], window)
+    return list(zip(xs, ys))
+
+
+def interpolate_y_at_x(series, x):
+    if not series:
+        return None
+    xs = [pt[0] for pt in series]
+    ys = [pt[1] for pt in series]
+    if x < xs[0] or x > xs[-1]:
+        return None
+    idx = bisect.bisect_left(xs, x)
+    if idx < len(xs) and xs[idx] == x:
+        return ys[idx]
+    if idx == 0 or idx >= len(xs):
+        return None
+    x0, y0 = xs[idx - 1], ys[idx - 1]
+    x1, y1 = xs[idx], ys[idx]
+    if x1 == x0:
+        return y1
+    ratio = (x - x0) / (x1 - x0)
+    return y0 + ratio * (y1 - y0)
+
+
+def aggregate_series_mean_std(series_list):
+    prepared = [sorted(series, key=lambda p: p[0]) for series in series_list if series]
+    if not prepared:
+        return []
+    x_grid = sorted({x for series in prepared for x, _ in series})
+    out = []
+    for x in x_grid:
+        vals = []
+        for series in prepared:
+            y = interpolate_y_at_x(series, x)
+            if y is not None:
+                vals.append(y)
+        if not vals:
+            continue
+        mean = sum(vals) / len(vals)
+        std = statistics.stdev(vals) if len(vals) >= 2 else 0.0
+        out.append((x, mean, std, len(vals)))
+    return out
+
+
 def add_tabpfn_ref_line_args(parser):
     parser.add_argument(
         "--tabpfn-ref-lines",
@@ -434,6 +487,11 @@ def save_metric_plot(
     hline_style,
     hline_width,
     extra_hlines,
+    run_alpha,
+    std_alpha,
+    multi_run_color,
+    multi_mean_color,
+    multi_std_color,
 ):
     series_by_record = {k: v for k, v in series_by_record.items() if v}
     if not series_by_record:
@@ -444,24 +502,75 @@ def save_metric_plot(
         return None
 
     plt.figure(figsize=figsize)
-    for record_name, series in sorted(series_by_record.items()):
-        if x_mode == "datasets":
-            xs = [t for t, _ in series]
-        else:
-            xs = [t / 60 for t, _ in series]
-        ys = [v for _, v in series]
-        ys = smooth_series(ys, ma_window)
-        if len(series) == 1:
-            plt.scatter(xs, ys, s=point_size, label=record_name)
+    for idx, (record_name, series_list) in enumerate(sorted(series_by_record.items())):
+        smoothed_runs = [smooth_series_points(series, ma_window) for series in series_list if series]
+        if not smoothed_runs:
+            continue
+        base_color = f"C{idx % 10}"
+        if len(smoothed_runs) == 1:
+            series = smoothed_runs[0]
+            if x_mode == "datasets":
+                xs = [t for t, _ in series]
+            else:
+                xs = [t / 60 for t, _ in series]
+            ys = [v for _, v in series]
+            if len(series) == 1:
+                plt.scatter(xs, ys, s=point_size, color=base_color, label=record_name)
+            else:
+                plt.plot(
+                    xs,
+                    ys,
+                    marker="o",
+                    markersize=max(1.0, point_size / 6.0),
+                    linewidth=line_width,
+                    color=base_color,
+                    label=record_name,
+                )
+            continue
+
+        run_color = multi_run_color if multi_run_color is not None else base_color
+        mean_color = multi_mean_color if multi_mean_color is not None else base_color
+        std_color = multi_std_color if multi_std_color is not None else mean_color
+
+        for run_series in smoothed_runs:
+            if x_mode == "datasets":
+                xs_run = [t for t, _ in run_series]
+            else:
+                xs_run = [t / 60 for t, _ in run_series]
+            ys_run = [v for _, v in run_series]
+            if len(run_series) == 1:
+                plt.scatter(xs_run, ys_run, s=max(1.0, point_size / 2.0), color=run_color, alpha=run_alpha)
+            else:
+                plt.plot(
+                    xs_run,
+                    ys_run,
+                    linewidth=max(0.5, line_width),
+                    color=run_color,
+                    alpha=run_alpha,
+                )
+
+        aggregated = aggregate_series_mean_std(smoothed_runs)
+        if not aggregated:
+            continue
+        xs_agg = [x for x, _, _, _ in aggregated]
+        if x_mode != "datasets":
+            xs_agg = [x / 60 for x in xs_agg]
+        ys_mean = [mean for _, mean, _, _ in aggregated]
+        ys_low = [mean - std for _, mean, std, _ in aggregated]
+        ys_high = [mean + std for _, mean, std, _ in aggregated]
+        n_runs = len(smoothed_runs)
+        label = f"{record_name} mean±std (n={n_runs})"
+        if len(xs_agg) == 1:
+            plt.scatter(xs_agg, ys_mean, s=point_size, color=mean_color, label=label)
         else:
             plt.plot(
-                xs,
-                ys,
-                marker="o",
-                markersize=max(1.0, point_size / 6.0),
-                linewidth=line_width,
-                label=record_name,
+                xs_agg,
+                ys_mean,
+                linewidth=line_width + 1.0,
+                color=mean_color,
+                label=label,
             )
+            plt.fill_between(xs_agg, ys_low, ys_high, color=std_color, alpha=std_alpha)
     if hline_y is not None:
         plt.axhline(
             y=hline_y,
@@ -601,6 +710,33 @@ def main():
         default=2.0,
         help="line width for Random Forest reference line",
     )
+    parser.add_argument(
+        "--multi-log-alpha",
+        type=float,
+        default=0.18,
+        help="alpha for individual runs when a record has multiple logs",
+    )
+    parser.add_argument(
+        "--multi-log-std-alpha",
+        type=float,
+        default=0.14,
+        help="alpha for mean±std shaded band when a record has multiple logs",
+    )
+    parser.add_argument(
+        "--multi-log-run-color",
+        default="0.75",
+        help="color for individual runs when a record has multiple logs",
+    )
+    parser.add_argument(
+        "--multi-log-mean-color",
+        default=None,
+        help="color for mean line with multiple logs (default: per-record color cycle)",
+    )
+    parser.add_argument(
+        "--multi-log-std-color",
+        default=None,
+        help="color for std band with multiple logs (default: mean color)",
+    )
     add_tabpfn_ref_line_args(parser)
     args = parser.parse_args()
 
@@ -622,17 +758,23 @@ def main():
     val_series_by_record = {}
     if args.valplot:
         for record_dir in record_dirs:
-            log_path = pick_log_file(record_dir)
-            series = parse_metric_series(log_path, args.valplot_x, VAL_RE)
-            if series:
-                val_series_by_record[record_dir.name] = series
+            series_list = []
+            for log_path in pick_log_files(record_dir):
+                series = parse_metric_series(log_path, args.valplot_x, VAL_RE)
+                if series:
+                    series_list.append(series)
+            if series_list:
+                val_series_by_record[record_dir.name] = series_list
     loss_series_by_record = {}
     if args.lossplot:
         for record_dir in record_dirs:
-            log_path = pick_log_file(record_dir)
-            series = parse_metric_series(log_path, args.lossplot_x, LOSS_RE)
-            if series:
-                loss_series_by_record[record_dir.name] = series
+            series_list = []
+            for log_path in pick_log_files(record_dir):
+                series = parse_metric_series(log_path, args.lossplot_x, LOSS_RE)
+                if series:
+                    series_list.append(series)
+            if series_list:
+                loss_series_by_record[record_dir.name] = series_list
 
     baseline_time = None
     for name, total_time in records:
@@ -679,6 +821,11 @@ def main():
             args.rf_line_style,
             args.rf_line_width,
             extra_hlines,
+            args.multi_log_alpha,
+            args.multi_log_std_alpha,
+            args.multi_log_run_color,
+            args.multi_log_mean_color,
+            args.multi_log_std_color,
         )
         if saved:
             print(f"valplot: {saved}")
@@ -708,6 +855,11 @@ def main():
             args.rf_line_style,
             args.rf_line_width,
             [],
+            args.multi_log_alpha,
+            args.multi_log_std_alpha,
+            args.multi_log_run_color,
+            args.multi_log_mean_color,
+            args.multi_log_std_color,
         )
         if saved:
             print(f"lossplot: {saved}")
