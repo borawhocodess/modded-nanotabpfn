@@ -258,6 +258,7 @@ def save_plot_grouped(series_by_host, out_path):
         vals = [v for _, v in points]
         plt.figure(figsize=(9, 4.5))
         plt.scatter(hosts, vals, s=20, alpha=0.7)
+        plt.xticks(rotation=80, ha="right")
         plt.xlabel("hostname")
         plt.ylabel("total_time (s)")
         add_stat_lines(plt, vals)
@@ -320,10 +321,13 @@ def main():
         parser.add_argument(col["flag"], action="store_true")
     parser.add_argument("--plot", action="store_true")
     parser.add_argument("--group-host", action="store_true")
-    parser.add_argument("--x-host", action="store_true", help="use hostname on x-axis (no aggregation)")
+    parser.add_argument("--x-host", action="store_true", help="use hostname on x-axis (default with --plot --group-host)")
     parser.add_argument("--sort", action="store_true", help="sort by total_time ascending")
     parser.add_argument("--exclude", default="", help="comma-separated experiment ids to exclude")
     args = parser.parse_args()
+
+    if args.plot and args.group_host and not args.x_host:
+        args.x_host = True
 
     requested = [col["key"] for col in COLUMNS if getattr(args, col["attr"])]
     if not requested:
