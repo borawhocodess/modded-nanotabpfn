@@ -320,10 +320,13 @@ def main():
         parser.add_argument(col["flag"], action="store_true")
     parser.add_argument("--plot", action="store_true")
     parser.add_argument("--group-host", action="store_true")
-    parser.add_argument("--x-host", action="store_true", help="use hostname on x-axis (no aggregation)")
+    parser.add_argument("--x-host", action="store_true", help="use hostname on x-axis (default with --plot --group-host)")
     parser.add_argument("--sort", action="store_true", help="sort by total_time ascending")
     parser.add_argument("--exclude", default="", help="comma-separated experiment ids to exclude")
     args = parser.parse_args()
+
+    if args.plot and args.group_host and not args.x_host:
+        args.x_host = True
 
     requested = [col["key"] for col in COLUMNS if getattr(args, col["attr"])]
     if not requested:
