@@ -258,7 +258,7 @@ def save_plot_grouped(series_by_host, out_path):
         vals = [v for _, v in points]
         plt.figure(figsize=(9, 4.5))
         plt.scatter(hosts, vals, s=20, alpha=0.7)
-        plt.xticks(rotation=45, ha="right")
+        plt.xticks(rotation=80, ha="right")
         plt.xlabel("hostname")
         plt.ylabel("total_time (s)")
         add_stat_lines(plt, vals)
