@@ -59,7 +59,7 @@ class Config:
     jackpot: float = 0.8068462330697953
 
 
-parser = argparse.ArgumentParser(description="Train Nano model.")
+parser = argparse.ArgumentParser()
 parser.add_argument("--name", default="")
 args = parser.parse_args()
 
