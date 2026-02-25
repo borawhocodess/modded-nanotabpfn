@@ -6,8 +6,26 @@ With --timeplot --heatmap, save a heatmap (activation vs LR, value = train time 
 import argparse
 import re
 import time
+from datetime import datetime
 from pathlib import Path
 from statistics import mean, median, pstdev
+
+
+def _plot_out_path(base: Path, seedlines: bool = False, ts: str | None = None) -> Path:
+    """Return path like TS-basename[-seedlines].ext (TS = yymmdd-HHMMSS), using '-' instead of '_'.
+    If ts is None, use current time; pass the same ts for all saves in one run so filenames match."""
+    stem = base.stem
+    suffix = base.suffix
+    parent = base.parent
+    if ts is None:
+        ts = datetime.now().strftime("%y%m%d-%H%M%S")
+    name = stem
+    if seedlines:
+        name += "_seedlines"
+    filename = f"{ts}_{name}{suffix}"
+    # Replace all underscores with hyphens in the saved filename
+    filename = filename.replace("_", "-")
+    return parent / filename
 
 TT_RE = re.compile(r"\bt_t:([0-9]+(?:\.[0-9]+)?)s\b")
 # "datasets seen: 2688" when jackpot hit (epoch * batch_size * steps = steps with batch_size=1)
@@ -457,6 +475,8 @@ def save_lineplot(experiments_dir: Path, out_path: Path, seedlines: bool = False
                 )
 
     ax.set_xscale("log")
+    ax.set_xticks(lrs)
+    ax.set_xticklabels([str(lr) for lr in lrs], rotation=75, ha="right")
     ax.set_xlabel("Learning rate")
     ax.set_ylabel("Train time (s)")
     ax.set_title("Train time vs learning rate")
@@ -547,6 +567,8 @@ def save_stepplot(experiments_dir: Path, out_path: Path, seedlines: bool = False
                 )
 
     ax.set_xscale("log")
+    ax.set_xticks(lrs)
+    ax.set_xticklabels([str(lr) for lr in lrs], rotation=45, ha="right")
     ax.set_xlabel("Learning rate")
     ax.set_ylabel("Steps to target")
     ax.set_title("Steps to target vs learning rate")
@@ -636,6 +658,8 @@ def save_meanepochtimeplot(experiments_dir: Path, out_path: Path, seedlines: boo
                 )
 
     ax.set_xscale("log")
+    ax.set_xticks(lrs)
+    ax.set_xticklabels([str(lr) for lr in lrs], rotation=45, ha="right")
     ax.set_xlabel("Learning rate")
     ax.set_ylabel("Mean epoch time (s)")
     ax.set_title("Mean epoch time vs learning rate")
@@ -655,6 +679,7 @@ def main():
         type=Path,
         help="Experiments root (e.g. workdir/experiments)",
     )
+    parser.add_argument("--allplots", action="store_true", help="Produce all plots (lineplot, stepplot, meanepochtimeplot, heatmap) at once")
     parser.add_argument("--lineplot", action="store_true", help="Save activation vs LR line plot to workdir/plots/")
     parser.add_argument("--stepplot", action="store_true", help="Save steps-to-target vs LR line plot to workdir/plots/")
     parser.add_argument("--meanepochtimeplot", action="store_true", help="Save mean epoch time (s) vs LR line plot to workdir/plots/")
@@ -691,6 +716,8 @@ def main():
         help="Log mtime within this many seconds → state 'r' (running). Default 600.",
     )
     args = parser.parse_args()
+    if args.allplots:
+        args.lineplot = args.stepplot = args.meanepochtimeplot = args.heatmap = True
 
     experiments_dir = Path(args.experiments_dir)
     data_times = collect_times(experiments_dir)
@@ -706,15 +733,30 @@ def main():
         return
     print("st: d=done e=exceeded -=crashed r=running  =no run")
 
+    # Single timestamp for all plot filenames in this run
+    plot_ts = datetime.now().strftime("%y%m%d-%H%M%S")
+
     if args.heatmap:
-        save_heatmap(experiments_dir, Path(args.out))
+        save_heatmap(experiments_dir, _plot_out_path(Path(args.out), ts=plot_ts))
     if args.lineplot:
-        save_lineplot(experiments_dir, Path(args.lineplot_out), seedlines=args.seedlines)
+        if args.allplots:
+            save_lineplot(experiments_dir, _plot_out_path(Path(args.lineplot_out), seedlines=False, ts=plot_ts), seedlines=False)
+            save_lineplot(experiments_dir, _plot_out_path(Path(args.lineplot_out), seedlines=True, ts=plot_ts), seedlines=True)
+        else:
+            save_lineplot(experiments_dir, _plot_out_path(Path(args.lineplot_out), seedlines=args.seedlines, ts=plot_ts), seedlines=args.seedlines)
     if args.stepplot:
-        save_stepplot(experiments_dir, Path(args.stepplot_out), seedlines=args.seedlines, data=data_steps)
+        if args.allplots:
+            save_stepplot(experiments_dir, _plot_out_path(Path(args.stepplot_out), seedlines=False, ts=plot_ts), seedlines=False, data=data_steps)
+            save_stepplot(experiments_dir, _plot_out_path(Path(args.stepplot_out), seedlines=True, ts=plot_ts), seedlines=True, data=data_steps)
+        else:
+            save_stepplot(experiments_dir, _plot_out_path(Path(args.stepplot_out), seedlines=args.seedlines, ts=plot_ts), seedlines=args.seedlines, data=data_steps)
     if args.meanepochtimeplot:
         data_met = collect_mean_epoch_times(experiments_dir)
-        save_meanepochtimeplot(experiments_dir, Path(args.meanepochtimeplot_out), seedlines=args.seedlines, data=data_met)
+        if args.allplots:
+            save_meanepochtimeplot(experiments_dir, _plot_out_path(Path(args.meanepochtimeplot_out), seedlines=False, ts=plot_ts), seedlines=False, data=data_met)
+            save_meanepochtimeplot(experiments_dir, _plot_out_path(Path(args.meanepochtimeplot_out), seedlines=True, ts=plot_ts), seedlines=True, data=data_met)
+        else:
+            save_meanepochtimeplot(experiments_dir, _plot_out_path(Path(args.meanepochtimeplot_out), seedlines=args.seedlines, ts=plot_ts), seedlines=args.seedlines, data=data_met)
 
 
 if __name__ == "__main__":
