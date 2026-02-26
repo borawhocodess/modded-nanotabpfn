@@ -181,6 +181,11 @@ def parse_experiment_name(name: str) -> tuple[str | None, float | None, int | No
     return act.lower(), lr, seed
 
 
+def _only_lr_sweep(data: dict[str, list]) -> dict[str, list]:
+    """Keep only experiment names that match act-lrX-sY (exclude e.g. newlr)."""
+    return {k: v for k, v in data.items() if parse_experiment_name(k)[0] is not None}
+
+
 def collect_steps(experiments_dir: Path) -> dict[str, list[float | None]]:
     """experiment_name -> list of steps to target (datasets seen when jackpot hit), one per run dir; None if run failed."""
     experiments_dir = Path(experiments_dir)
@@ -720,9 +725,10 @@ def main():
         args.lineplot = args.stepplot = args.meanepochtimeplot = args.heatmap = True
 
     experiments_dir = Path(args.experiments_dir)
-    data_times = collect_times(experiments_dir)
-    data_steps = collect_steps(experiments_dir) if args.stepplot else None
+    data_times = _only_lr_sweep(collect_times(experiments_dir))
+    data_steps = _only_lr_sweep(collect_steps(experiments_dir)) if args.stepplot else None
     run_states = collect_run_states(experiments_dir, running_secs=args.running_secs)
+    run_states = _only_lr_sweep(run_states)
 
     if args.stepplot and data_steps:
         print(make_table(data_steps, states=run_states))
@@ -751,7 +757,7 @@ def main():
         else:
             save_stepplot(experiments_dir, _plot_out_path(Path(args.stepplot_out), seedlines=args.seedlines, ts=plot_ts), seedlines=args.seedlines, data=data_steps)
     if args.meanepochtimeplot:
-        data_met = collect_mean_epoch_times(experiments_dir)
+        data_met = _only_lr_sweep(collect_mean_epoch_times(experiments_dir))
         if args.allplots:
             save_meanepochtimeplot(experiments_dir, _plot_out_path(Path(args.meanepochtimeplot_out), seedlines=False, ts=plot_ts), seedlines=False, data=data_met)
             save_meanepochtimeplot(experiments_dir, _plot_out_path(Path(args.meanepochtimeplot_out), seedlines=True, ts=plot_ts), seedlines=True, data=data_met)
