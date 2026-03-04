@@ -67,6 +67,7 @@ parser.add_argument("--jackpot", type=float, default=None)
 args = parser.parse_args()
 
 c = Config()
+
 if args.lr is not None:
     c.lr = args.lr
 if args.seed is not None:
