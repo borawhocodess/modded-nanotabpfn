@@ -22,6 +22,8 @@ This improvement in training speed has been brought about by the following techn
 
 The following techniques were evaluated but did not lead to improvements:
 * Xavier initialization
+* GoLU activation
+* Accumulated gradients
 
 
 ## Running the current record

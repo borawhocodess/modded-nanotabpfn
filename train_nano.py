@@ -61,9 +61,19 @@ class Config:
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--name", default="")
+parser.add_argument("--lr", type=float, default=None)
+parser.add_argument("--seed", type=int, default=None)
+parser.add_argument("--jackpot", type=float, default=None)
 args = parser.parse_args()
 
 c = Config()
+
+if args.lr is not None:
+    c.lr = args.lr
+if args.seed is not None:
+    c.seed = args.seed
+if args.jackpot is not None:
+    c.jackpot = args.jackpot
 
 random.seed(c.seed)
 np.random.seed(c.seed)
