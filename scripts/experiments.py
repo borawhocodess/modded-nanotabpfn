@@ -340,6 +340,7 @@ def main():
     rows = []
     times = []
     times_by_host = {}
+    stats_by_col = {}
 
     exclude_ids = {e.strip() for e in args.exclude.split(",") if e.strip()}
 
@@ -360,6 +361,20 @@ def main():
         values = column_values(exp_id, hostname, total_time, roc_auc, mean_epoch_time, epoch, datasets)
         rows.append((total_time, [str(idx)] + [values[key] for key in columns]))
         times.append(total_time)
+
+        # collect per-column numeric stats for displayed columns
+        if "total_time" in columns and total_time is not None:
+            stats_by_col.setdefault("total_time", []).append(total_time)
+        if "total_time_min" in columns and total_time is not None:
+            stats_by_col.setdefault("total_time_min", []).append(total_time / 60.0)
+        if "roc_auc" in columns and roc_auc is not None:
+            stats_by_col.setdefault("roc_auc", []).append(roc_auc)
+        if "epoch" in columns and epoch is not None:
+            stats_by_col.setdefault("epoch", []).append(epoch)
+        if "mean_epoch_time" in columns and mean_epoch_time is not None:
+            stats_by_col.setdefault("mean_epoch_time", []).append(mean_epoch_time)
+        if "datasets" in columns and datasets is not None:
+            stats_by_col.setdefault("datasets", []).append(datasets)
         if hostname:
             times_by_host.setdefault(hostname, []).append(total_time)
 
@@ -376,13 +391,55 @@ def main():
         return 1
 
     print(make_table(headers, rows))
-    stats_values = [t for t in times if t is not None]
-    if stats_values:
-        mu = mean(stats_values)
-        sigma = pstdev(stats_values)
-        med = median(stats_values)
+
+    # compute per-column statistics for numeric columns that were actually displayed
+    stats_summary = {}
+    for key, vals in stats_by_col.items():
+        if not vals:
+            continue
+        stats_summary[key] = {
+            "mean": mean(vals),
+            "std": pstdev(vals),
+            "median": median(vals),
+        }
+
+    if stats_summary:
+        # blank line after table
         print()
-        print(f"stats: mean: {mu:.2f}s ({mu / 60:.2f}m) std: {sigma:.2f}s median: {med:.2f}s ({med / 60:.2f}m)")
+
+        # recompute column widths to align stats rows under existing table
+        widths = [len(h) for h in headers]
+        for row in rows:
+            for idx, cell in enumerate(row):
+                widths[idx] = max(widths[idx], len(cell))
+
+        def fmt_stat_value(col_key, value):
+            if col_key == "total_time":
+                return f"{value:.2f}s"
+            if col_key == "total_time_min":
+                return f"{value:.2f}m"
+            if col_key == "roc_auc":
+                return f"{value:.6f}"
+            if col_key == "epoch" or col_key == "datasets":
+                return f"{int(round(value))}"
+            if col_key == "mean_epoch_time":
+                return f"{value:.2f}s"
+            return ""
+
+        offset = 2 if args.sort else 1
+        for stat_type in ("mean", "std", "median"):
+            row_cells = ["" for _ in headers]
+            for col_idx in range(offset, len(headers)):
+                col_key = columns[col_idx - offset]
+                col_stats = stats_summary.get(col_key)
+                if not col_stats:
+                    continue
+                value = col_stats.get(stat_type)
+                if value is None:
+                    continue
+                row_cells[col_idx] = fmt_stat_value(col_key, value)
+            line = "  ".join(row_cells[i].ljust(widths[i]) for i in range(len(headers)))
+            print(line)
 
     if args.plot:
         ts = datetime.now().strftime("%y%m%d-%H%M%S")

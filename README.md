@@ -5,8 +5,8 @@ This repository hosts the *nanoTabPFN speedrun*, in which we (collaboratively|co
 The code is derived from [nanoTabPFN](https://github.com/automl/nanoTabPFN) with the inspiration of [modded-nanogpt](https://github.com/KellerJordan/modded-nanogpt).
 
 This repo now contains a training algorithm which attains the target performance in:
-* 9.26 minutes on 1xL40S (baseline needed 74.32)
-* 13184 synthetic datasets (baseline needed 80576)
+* 7.57m minutes on 1xL40S (baseline needed 74.32)
+* 10880 synthetic datasets (baseline needed 80576)
 
 This improvement in training speed has been brought about by the following techniques:
 * Muon optimizer
@@ -19,11 +19,13 @@ This improvement in training speed has been brought about by the following techn
 * Increase learning rate from 1e-4 to 1e-3
 * Increase embedding size from 192 to 256
 * Reduce attention heads from 6 to 4
+* Exponential decay of residual stream across layers
 
 The following techniques were evaluated but did not lead to improvements:
 * Xavier initialization
 * GoLU activation
 * Accumulated gradients
+* QK-Norm and ReLU²
 
 
 ## Running the current record
@@ -51,6 +53,7 @@ Note: The 0.8068462330697953 target was selected to match the performance of Ran
 | 2 | 54.41 minutes | 02/02/26 | [Muon optimizer](https://x.com/boratwits/status/2020941276946833615) | [log](records/20260131baseline/260205-224113-34e556ea-muon-log.txt) | @borawhocodess |
 | 3 | 10.10 minutes | 04/02/26 | [SDPA, bf16, higher LR, wider embeddings, fewer heads](https://x.com/boratwits/status/2020943088428917240) | [log](records/20260204carter/260205-225951-d60000eb-carter-log.txt) | @carterprince |
 | 4 | 9.26 minutes  | 08/02/26 | [Batched Muon, compiled forward](https://x.com/boratwits/status/2021388220282568828) | [log](records/20260208batchedmuon/260209-204142-79d70f03-log.txt) | @carterprince |
+| 5 | 7.57 minutes | 16/03/26 | [Exponential decay of residual stream](https://x.com/boratwits/) | [log](records/20260310residualdecay/260311-154253-a787618f-new2-s11-log.txt) | @borawhocodess |
 
 
 ## Rules
