@@ -52,12 +52,12 @@ class Config:
     h: int = 768
     l: int = 6
     o: int | None = None
+    residual_decay: float = 0.95
     eval_folds: int = 5
     eval_subsample_samples: int | None = 1000
     eval_subsample_features: int | None = 100
     max_train_mins: float = 80
     jackpot: float = 0.8068462330697953
-    residual_decay: float = 0.95  # exponential decay of residual stream per layer (1.0 = no decay)
 
 
 parser = argparse.ArgumentParser()
