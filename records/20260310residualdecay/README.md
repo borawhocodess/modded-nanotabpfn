@@ -1,5 +1,7 @@
 # Residual Decay
 
+![NanoTabPFN Diagram with Residual Decay](residualdecay.png)
+
 Only one run's log is included here for reference. The median run is the one added to the general record table.
 
 ```
