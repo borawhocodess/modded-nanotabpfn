@@ -66,6 +66,7 @@ parser.add_argument("--lr", type=float, default=None)
 parser.add_argument("--seed", type=int, default=None)
 parser.add_argument("--jackpot", type=float, default=None)
 parser.add_argument("--residual_decay", type=float, default=None)
+parser.add_argument("--epochs", type=int, default=None)
 args = parser.parse_args()
 
 c = Config()
@@ -78,6 +79,8 @@ if args.jackpot is not None:
     c.jackpot = args.jackpot
 if args.residual_decay is not None:
     c.residual_decay = args.residual_decay
+if args.epochs is not None:
+    c.epochs = args.epochs
 
 random.seed(c.seed)
 np.random.seed(c.seed)
