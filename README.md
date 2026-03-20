@@ -53,7 +53,7 @@ Note: The 0.8068462330697953 target was selected to match the performance of Ran
 | 2 | 54.41 minutes | 02/02/26 | [Muon optimizer](https://x.com/boratwits/status/2020941276946833615) | [log](records/20260131baseline/260205-224113-34e556ea-muon-log.txt),[PR](https://github.com/borawhocodess/modded-nanotabpfn/pull/1) | @borawhocodess |
 | 3 | 10.10 minutes | 04/02/26 | [SDPA, bf16, higher LR, wider embeddings, fewer heads](https://x.com/boratwits/status/2020943088428917240) | [log](records/20260204carter/260205-225951-d60000eb-carter-log.txt),[PR](https://github.com/borawhocodess/modded-nanotabpfn/pull/4) | @carterprince |
 | 4 | 9.26 minutes  | 08/02/26 | [Batched Muon, compiled forward](https://x.com/boratwits/status/2021388220282568828) | [log](records/20260208batchedmuon/260209-204142-79d70f03-log.txt),[PR](https://github.com/borawhocodess/modded-nanotabpfn/pull/7) | @carterprince |
-| 5 | 7.57 minutes | 16/03/26 | [Exponential decay of residual stream](https://x.com/boratwits/) | [log](records/20260310residualdecay/260311-154253-a787618f-new2-s11-log.txt),[PR](https://github.com/borawhocodess/modded-nanotabpfn/pull/12) | @borawhocodess |
+| 5 | 7.57 minutes | 16/03/26 | [Exponential decay of residual stream](https://x.com/boratwits/status/2034426880208593057) | [log](records/20260310residualdecay/260311-154253-a787618f-new2-s11-log.txt),[PR](https://github.com/borawhocodess/modded-nanotabpfn/pull/12) | @borawhocodess |
 
 
 ## Rules
