@@ -61,7 +61,7 @@ Note: The 0.8068462330697953 target was selected to match the performance of Ran
 New records must:
 - Not modify the evaluation pipeline.
 - Not load any pretrained weights.
-- Run faster than prior record when baselined on the same hardware.
+- Run faster than prior record when baselined on the same hardware with the same seed.
 
 Other than that, anything and everything is fair game!
 
