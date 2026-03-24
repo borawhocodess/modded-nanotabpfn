@@ -26,6 +26,7 @@ The following techniques were evaluated but did not lead to improvements:
 * GoLU activation
 * Accumulated gradients
 * QK-Norm and ReLU²
+* XSA (Exclusive Self Attention)
 
 
 ## Running the current record
