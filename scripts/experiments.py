@@ -69,6 +69,14 @@ COLUMN_BY_KEY = {col["key"]: col for col in COLUMNS}
 FLAG_TO_KEY = {col["flag"]: col["key"] for col in COLUMNS}
 DIR_FLAGS = {"--experiments-dir", "--dir", "-d"}
 
+# Named output presets. Add more entries as needed.
+SETTINGS_PRESETS = {
+    "xyz": {
+        "short_id": True,
+        "columns": ["experiment_id", "hostname", "total_time_min", "epoch", "mean_epoch_time", "datasets"],
+    }
+}
+
 
 def parse_log(log_path):
     hostname = None
@@ -222,6 +230,19 @@ def column_values(exp_id, hostname, total_time, roc_auc, mean_epoch_time, epoch,
     }
 
 
+def short_experiment_id(exp_id: str) -> str:
+    """
+    For ids like:
+      260311-154259-9fcfcbb7-new2-s11
+    return:
+      9fcfcbb7
+    """
+    parts = exp_id.split("-")
+    if len(parts) >= 3:
+        return parts[2]
+    return exp_id
+
+
 def save_plot(values, out_path):
     values = [v for v in values if v is not None]
     if len(values) < 2:
@@ -323,14 +344,27 @@ def main():
     parser.add_argument("--group-host", action="store_true")
     parser.add_argument("--x-host", action="store_true", help="use hostname on x-axis (default with --plot --group-host)")
     parser.add_argument("--sort", action="store_true", help="sort by total_time ascending")
+    parser.add_argument("--short-id", action="store_true", help="show only the short id part")
+    parser.add_argument(
+        "--setting",
+        choices=sorted(SETTINGS_PRESETS.keys()),
+        help="use a predefined output setting preset",
+    )
     parser.add_argument("--exclude", default="", help="comma-separated experiment ids to exclude")
     args = parser.parse_args()
 
     if args.plot and args.group_host and not args.x_host:
         args.x_host = True
 
+    preset = SETTINGS_PRESETS.get(args.setting) if args.setting else None
     requested = [col["key"] for col in COLUMNS if getattr(args, col["attr"])]
-    if not requested:
+    if preset:
+        # Explicit flags still win, otherwise use preset columns.
+        if not requested:
+            requested = preset["columns"]
+        if preset.get("short_id"):
+            args.short_id = True
+    elif not requested:
         requested = [col["key"] for col in COLUMNS]
 
     order_tokens = extract_order(sys.argv[1:])
@@ -358,7 +392,8 @@ def main():
         if log_path is not None:
             hostname, total_time, roc_auc, mean_epoch_time, epoch, datasets = parse_log(log_path)
 
-        values = column_values(exp_id, hostname, total_time, roc_auc, mean_epoch_time, epoch, datasets)
+        display_exp_id = short_experiment_id(exp_id) if args.short_id else exp_id
+        values = column_values(display_exp_id, hostname, total_time, roc_auc, mean_epoch_time, epoch, datasets)
         rows.append((total_time, [str(idx)] + [values[key] for key in columns]))
         times.append(total_time)
 
@@ -381,16 +416,20 @@ def main():
     if args.sort:
         rows.sort(key=lambda r: float("inf") if r[0] is None else r[0])
         rows = [[str(i + 1)] + row for i, (_, row) in enumerate(rows)]
-        headers = ["##", "#"] + [COLUMN_BY_KEY[key]["header"] for key in columns]
+        headers = ["##", "#"] + [
+            ("id" if args.short_id and key == "experiment_id" else COLUMN_BY_KEY[key]["header"])
+            for key in columns
+        ]
     else:
         rows = [row for _, row in rows]
-        headers = ["#"] + [COLUMN_BY_KEY[key]["header"] for key in columns]
+        headers = ["#"] + [
+            ("id" if args.short_id and key == "experiment_id" else COLUMN_BY_KEY[key]["header"])
+            for key in columns
+        ]
 
     if not rows:
         print("No experiments found.")
         return 1
-
-    print(make_table(headers, rows))
 
     # compute per-column statistics for numeric columns that were actually displayed
     stats_summary = {}
@@ -404,10 +443,8 @@ def main():
         }
 
     if stats_summary:
-        # blank line after table
-        print()
-
-        # recompute column widths to align stats rows under existing table
+        # Recompute column widths (same logic as `make_table`) so stats lines line up
+        # with the table columns.
         widths = [len(h) for h in headers]
         for row in rows:
             for idx, cell in enumerate(row):
@@ -427,19 +464,59 @@ def main():
             return ""
 
         offset = 2 if args.sort else 1
+
+        # Find where the first calculable/stat column appears in the printed table.
+        # Everything before this index is non-calculated (e.g. experiment id / hostname),
+        # so we "span" the mean/std/median label across it to keep alignment stable.
+        stat_col_indices = []
+        for header_idx in range(offset, len(headers)):
+            col_key = columns[header_idx - offset]
+            if col_key in stats_summary:
+                stat_col_indices.append(header_idx)
+        first_calc_idx = min(stat_col_indices) if stat_col_indices else len(headers)
+
+        # The table uses "  " (two spaces) between columns.
+        # For stats *values*, we must pad up to the exact start position of
+        # `first_calc_idx` in the table line.
+        value_prefix_width = sum(widths[:first_calc_idx]) + 2 * first_calc_idx
+
+        # For the separator dashes, we want the continuous run to stop right before
+        # the first calculated column's dash block. That means we fill the inter-
+        # prefix column gaps with dashes (2 chars each), but do NOT include the final
+        # "  " gap right before `first_calc_idx`.
+        dash_prefix_width = sum(widths[:first_calc_idx]) + 2 * max(first_calc_idx - 1, 0)
+
         for stat_type in ("mean", "std", "median"):
-            row_cells = ["" for _ in headers]
-            for col_idx in range(offset, len(headers)):
-                col_key = columns[col_idx - offset]
-                col_stats = stats_summary.get(col_key)
-                if not col_stats:
+            # Pad the label so that the first calculated value begins at the same
+            # x-position as in the table.
+            pad = max(0, value_prefix_width - len(stat_type))
+            prefix = stat_type + (" " * pad)
+
+            rest_cells = []
+            for header_idx in range(first_calc_idx, len(headers)):
+                col_key = columns[header_idx - offset] if header_idx >= offset else None
+                if col_key is None or col_key not in stats_summary:
+                    rest_cells.append("".ljust(widths[header_idx]))
                     continue
-                value = col_stats.get(stat_type)
+                value = stats_summary[col_key].get(stat_type)
                 if value is None:
+                    rest_cells.append("".ljust(widths[header_idx]))
                     continue
-                row_cells[col_idx] = fmt_stat_value(col_key, value)
-            line = "  ".join(row_cells[i].ljust(widths[i]) for i in range(len(headers)))
+                rest_cells.append(fmt_stat_value(col_key, value).ljust(widths[header_idx]))
+
+            line = prefix + "  ".join(rest_cells)
             print(line)
+
+        # Separator line between stats and the table: continuous dashes up to the first
+        # calculable column (matches your request), then use the normal column spacing.
+        if first_calc_idx < len(headers):
+            prefix_dashes = "-" * dash_prefix_width
+            rest_dashes = "  ".join("-" * widths[i] for i in range(first_calc_idx, len(headers)))
+            # Insert the normal "  " gap between the non-calculated prefix and the first
+            # calculated column's dash block.
+            print(prefix_dashes + "  " + rest_dashes)
+
+    print(make_table(headers, rows))
 
     if args.plot:
         ts = datetime.now().strftime("%y%m%d-%H%M%S")
