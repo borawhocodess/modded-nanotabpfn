@@ -1,5 +1,7 @@
 # RMSNorm and ThinkingRows
 
+![RMSNorm and ThinkingRows Diagram](rmsthink.png)
+
 Combines changes inspired from [TabPFN v2.6](https://github.com/PriorLabs/TabPFN/blob/7b1153a66161e73f6457da5c92af602eabeda87a/src/tabpfn/architectures/tabpfn_v2_6.py) release file:
 
 - **LowerPrecisionRMSNorm**: replace all three LayerNorms with RMSNorm that skips the FP32 autocast upcast
