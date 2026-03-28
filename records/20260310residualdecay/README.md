@@ -39,7 +39,59 @@ Only one run's log is included here for reference. The median run is the one add
 30  31  260316-114825-045f6dfa-new2-s11  dlc2gpu12  539.38s     8.99m    0.807643  147    3.67s      9408    
 31  2   260310-020202-9f21f9fc-new2-s11  dlc2gpu02  545.97s     9.10m    0.807476  206    2.65s      13184   
 
-                                                    446.09s     7.43m    0.807530  164    2.74s      10482   
-                                                    55.72s      0.93m    0.000687  25     0.22s      1581    
-                                                    454.12s     7.57m    0.807365  170    2.74s      10880   
+                                                    446.09s     7.43m    0.807530  164    2.74s      10482
+                                                    55.72s      0.93m    0.000687  25     0.22s      1581
+                                                    454.12s     7.57m    0.807365  170    2.74s      10880
+```
+
+> **Note:** A later re-run of the same technique produced a faster median of **6.06m** vs the 7.57m reported at record time. It produced the same dataset efficiency while epochs running faster on the cluster.
+
+```
+mean               6.14m    165    2.24s      10558     31.56m
+std                0.72m    22     0.16s      1416      4.04m
+median             6.06m    172    2.24s      11008     32.18m
+-----------------  -------  -----  ---------  --------  -------  ---------------
+##  #   hostname   in mins  epoch  μ epoch t  datasets  runtime  id-name
+--  --  ---------  -------  -----  ---------  --------  -------  ---------------
+1   22  dlc2gpu09  4.83m    126    2.30s      8064      24.00m   7e3bef16-rdecay
+2   32  dlc2gpu07  5.00m    132    2.27s      8448      25.04m   27811d78-rdecay
+3   24  dlc2gpu02  5.06m    126    2.41s      8064      23.60m   59d46a12-rdecay
+4   2   dlc2gpu16  5.25m    140    2.25s      8960      28.46m   44e083b2-rdecay
+5   15  dlc2gpu16  5.29m    139    2.28s      8896      27.49m   a657db92-rdecay
+6   13  dlc2gpu16  5.29m    140    2.27s      8960      27.80m   2bb502b1-rdecay
+7   11  dlc2gpu16  5.39m    147    2.20s      9408      29.05m   d5cf6cc0-rdecay
+8   3   dlc2gpu16  5.40m    147    2.20s      9408      29.89m   56e102f5-rdecay
+9   1   dlc2gpu16  5.46m    150    2.19s      9600      30.44m   221ca6e7-rdecay
+10  39  dlc2gpu14  5.61m    147    2.29s      9408      27.16m   0251e5d1-rdecay
+11  4   dlc2gpu16  5.63m    157    2.15s      10048     31.51m   ad14e459-rdecay
+12  37  dlc2gpu15  5.63m    152    2.22s      9728      28.32m   8028aa52-rdecay
+13  41  dlc2gpu06  5.65m    134    2.53s      8576      25.24m   beef2320-rdecay
+14  16  dlc2gpu09  5.74m    161    2.14s      10304     29.80m   8d420941-rdecay
+15  33  dlc2gpu07  5.84m    164    2.14s      10496     30.65m   d117c72a-rdecay
+16  27  dlc2gpu11  5.91m    138    2.57s      8832      27.23m   a9db8828-rdecay
+17  12  dlc2gpu16  5.93m    172    2.07s      11008     32.92m   bfcedbec-rdecay
+18  23  dlc2gpu09  5.94m    171    2.08s      10944     31.71m   d038806c-rdecay
+19  21  dlc2gpu09  6.00m    175    2.06s      11200     32.40m   6a487f98-rdecay
+20  18  dlc2gpu09  6.01m    174    2.07s      11136     32.18m   297f85ec-rdecay
+21  17  dlc2gpu09  6.06m    174    2.09s      11136     32.26m   d65267a2-rdecay
+22  5   dlc2gpu16  6.09m    172    2.12s      11008     34.51m   c807d733-rdecay
+23  14  dlc2gpu01  6.09m    175    2.09s      11200     31.93m   a02341bd-rdecay
+24  34  dlc2gpu16  6.14m    175    2.11s      11200     32.59m   e8f5d88c-rdecay
+25  20  dlc2gpu09  6.28m    187    2.02s      11968     34.38m   3d257711-rdecay
+26  36  dlc2gpu14  6.31m    140    2.70s      8960      27.43m   f099d2b1-rdecay
+27  40  dlc2gpu05  6.53m    153    2.56s      9792      29.32m   bc5da34c-rdecay
+28  25  dlc2gpu09  6.55m    199    1.97s      12736     36.34m   a93f2746-rdecay
+29  19  dlc2gpu02  6.62m    178    2.23s      11392     32.37m   4d6bb34f-rdecay
+30  38  dlc2gpu01  6.65m    178    2.24s      11392     33.27m   f774ee33-rdecay
+31  28  dlc2gpu11  6.67m    170    2.36s      10880     32.70m   06e1f10d-rdecay
+32  8   dlc2gpu09  6.71m    178    2.26s      11392     35.32m   c1527be2-rdecay
+33  7   dlc2gpu09  6.77m    176    2.31s      11264     35.21m   18085bf6-rdecay
+34  9   dlc2gpu09  6.80m    174    2.35s      11136     34.68m   d4f0c952-rdecay
+35  31  dlc2gpu11  6.82m    175    2.34s      11200     33.36m   46a5dfb5-rdecay
+36  30  dlc2gpu11  6.87m    178    2.32s      11392     34.19m   3c943e6b-rdecay
+37  6   dlc2gpu09  7.05m    189    2.24s      12096     37.51m   b5bb105c-rdecay
+38  26  dlc2gpu11  7.09m    187    2.27s      11968     35.74m   3af6bc68-rdecay
+39  35  dlc2gpu14  7.33m    178    2.47s      11392     33.91m   0e499684-rdecay
+40  10  dlc2gpu16  7.75m    222    2.09s      14208     42.18m   50691d63-rdecay
+41  29  dlc2gpu11  7.80m    214    2.19s      13696     40.07m   29b8a0b2-rdecay
 ```
