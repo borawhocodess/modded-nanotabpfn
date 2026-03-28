@@ -58,7 +58,7 @@ Note: The 0.8068462330697953 target was selected to match the performance of Ran
 | 3 | 10.10 minutes | 04/02/26 | [SDPA, bf16, higher LR, wider embeddings, fewer heads](https://x.com/boratwits/status/2020943088428917240) | [log](records/20260204carter/260205-225951-d60000eb-carter-log.txt),[PR](https://github.com/borawhocodess/modded-nanotabpfn/pull/4) | @carterprince |
 | 4 | 9.26 minutes  | 08/02/26 | [Batched Muon, compiled forward](https://x.com/boratwits/status/2021388220282568828) | [log](records/20260208batchedmuon/260209-204142-79d70f03-log.txt),[PR](https://github.com/borawhocodess/modded-nanotabpfn/pull/7) | @carterprince |
 | 5 | 7.57 minutes | 16/03/26 | [Exponential decay of residual stream](https://x.com/boratwits/status/2034426880208593057) | [log](records/20260310residualdecay/260311-154253-a787618f-new2-s11-log.txt),[PR](https://github.com/borawhocodess/modded-nanotabpfn/pull/12) | @borawhocodess |
-| 6 | 3.88 minutes | 28/03/26 | RMSNorm, ThinkingRows | [log](records/20260328rmsthink/260328-011343-4ba701de-rmsthink-s11-log.txt) | @borawhocodess |
+| 6 | 3.88 minutes | 28/03/26 | RMSNorm, ThinkingRows | [log](records/20260328rmsthink/260328-011343-4ba701de-rmsthink-s11-log.txt),[PR](https://github.com/borawhocodess/modded-nanotabpfn/pull/14) | @borawhocodess |
 
 
 ## Rules
