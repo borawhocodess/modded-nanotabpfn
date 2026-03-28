@@ -13,13 +13,14 @@ ROC_RE = re.compile(r"\bavg_roc_auc\s*:\s*([0-9]+(?:\.[0-9]+)?)\b")
 MU_E_T_RE = re.compile(r"μ_e_t:([0-9]+(?:\.[0-9]+)?)s")
 EPOCH_RE = re.compile(r"\be:(\d+)(?:/\d+)?\b")
 DATASETS_RE = re.compile(r"\bdatasets seen\s*:\s*(\d+)\b", re.IGNORECASE)
+SCRIPT_RUNTIME_RE = re.compile(r"script runtime\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*mins", re.IGNORECASE)
 
 COLUMNS = [
     {
         "key": "experiment_id",
         "flag": "--eid",
         "attr": "eid",
-        "header": "experiment_id",
+        "header": "experiment id",
     },
     {
         "key": "hostname",
@@ -31,19 +32,19 @@ COLUMNS = [
         "key": "total_time",
         "flag": "--total-time",
         "attr": "total_time",
-        "header": "total_time",
+        "header": "total time",
     },
     {
         "key": "total_time_min",
         "flag": "--mins",
         "attr": "mins",
-        "header": "in_mins",
+        "header": "in mins",
     },
     {
         "key": "roc_auc",
         "flag": "--roc-auc",
         "attr": "roc_auc",
-        "header": "roc_auc",
+        "header": "roc auc",
     },
     {
         "key": "epoch",
@@ -55,13 +56,25 @@ COLUMNS = [
         "key": "mean_epoch_time",
         "flag": "--mean-epoch-time",
         "attr": "mean_epoch_time",
-        "header": "μ_epoch_t",
+        "header": "μ epoch t",
     },
     {
         "key": "datasets",
         "flag": "--datasets",
         "attr": "datasets",
         "header": "datasets",
+    },
+    {
+        "key": "script_runtime",
+        "flag": "--script-runtime",
+        "attr": "script_runtime",
+        "header": "runtime",
+    },
+    {
+        "key": "id_name0",
+        "flag": "--id-name0",
+        "attr": "id_name0",
+        "header": "id-name",
     },
 ]
 
@@ -74,7 +87,10 @@ SETTINGS_PRESETS = {
     "xyz": {
         "short_id": True,
         "columns": ["experiment_id", "hostname", "total_time_min", "epoch", "mean_epoch_time", "datasets"],
-    }
+    },
+    "alpha": {
+        "columns": ["hostname", "total_time_min", "epoch", "mean_epoch_time", "datasets", "script_runtime", "id_name0"],
+    },
 }
 
 
@@ -85,6 +101,7 @@ def parse_log(log_path):
     mean_epoch_time = None
     epoch = None
     datasets = None
+    script_runtime = None
     last_t_t = None
     first_clock = None
     last_clock = None
@@ -140,6 +157,13 @@ def parse_log(log_path):
                     except ValueError:
                         pass
 
+                match = SCRIPT_RUNTIME_RE.search(line)
+                if match:
+                    try:
+                        script_runtime = float(match.group(1))
+                    except ValueError:
+                        pass
+
                 match = TIME_BRACKET_RE.search(line)
                 if match:
                     h = int(match.group(1))
@@ -150,7 +174,7 @@ def parse_log(log_path):
                         first_clock = seconds
                     last_clock = seconds
     except FileNotFoundError:
-        return None, None, None, None, None, None
+        return None, None, None, None, None, None, None
 
     if total_time is None:
         total_time = last_t_t
@@ -160,7 +184,7 @@ def parse_log(log_path):
             last_clock += 24 * 3600
         total_time = float(last_clock - first_clock)
 
-    return hostname, total_time, roc_auc, mean_epoch_time, epoch, datasets
+    return hostname, total_time, roc_auc, mean_epoch_time, epoch, datasets, script_runtime
 
 
 def pick_log_file(exp_dir):
@@ -216,7 +240,7 @@ def unique(items):
     return out
 
 
-def column_values(exp_id, hostname, total_time, roc_auc, mean_epoch_time, epoch, datasets):
+def column_values(exp_id, hostname, total_time, roc_auc, mean_epoch_time, epoch, datasets, script_runtime=None):
     total_time_min = "-" if total_time is None else f"{total_time / 60:.2f}m"
     return {
         "experiment_id": exp_id,
@@ -227,6 +251,8 @@ def column_values(exp_id, hostname, total_time, roc_auc, mean_epoch_time, epoch,
         "epoch": "-" if epoch is None else str(epoch),
         "mean_epoch_time": "-" if mean_epoch_time is None else f"{mean_epoch_time:.2f}s",
         "datasets": "-" if datasets is None else str(datasets),
+        "script_runtime": "-" if script_runtime is None else f"{script_runtime:.2f}m",
+        "id_name0": id_name0(exp_id),
     }
 
 
@@ -238,6 +264,22 @@ def short_experiment_id(exp_id: str) -> str:
       9fcfcbb7
     """
     parts = exp_id.split("-")
+    if len(parts) >= 3:
+        return parts[2]
+    return exp_id
+
+
+def id_name0(exp_id: str) -> str:
+    """
+    For ids like:
+      260311-154259-9fcfcbb7-new2-s11
+    return:
+      9fcfcbb7-new2
+    (short hash + first segment of the experiment name)
+    """
+    parts = exp_id.split("-")
+    if len(parts) >= 4:
+        return f"{parts[2]}-{parts[3]}"
     if len(parts) >= 3:
         return parts[2]
     return exp_id
@@ -335,6 +377,133 @@ def add_stat_lines(plt, values):
     plt.yticks(ticks)
 
 
+def print_group(experiments_dir, columns, args, exclude_ids):
+    """Print stats block + runs table for a single experiments directory."""
+    rows = []
+    times = []
+    times_by_host = {}
+    stats_by_col = {}
+
+    for idx, exp_dir in enumerate(iter_experiments(experiments_dir), start=1):
+        exp_id = exp_dir.name
+        if exp_id in exclude_ids:
+            continue
+        log_path = pick_log_file(exp_dir)
+        hostname = None
+        total_time = None
+        roc_auc = None
+        mean_epoch_time = None
+        epoch = None
+        datasets = None
+        script_runtime = None
+        if log_path is not None:
+            hostname, total_time, roc_auc, mean_epoch_time, epoch, datasets, script_runtime = parse_log(log_path)
+
+        display_exp_id = short_experiment_id(exp_id) if args.short_id else exp_id
+        values = column_values(display_exp_id, hostname, total_time, roc_auc, mean_epoch_time, epoch, datasets, script_runtime)
+        rows.append((total_time, [str(idx)] + [values[key] for key in columns]))
+        times.append(total_time)
+
+        if "total_time" in columns and total_time is not None:
+            stats_by_col.setdefault("total_time", []).append(total_time)
+        if "total_time_min" in columns and total_time is not None:
+            stats_by_col.setdefault("total_time_min", []).append(total_time / 60.0)
+        if "roc_auc" in columns and roc_auc is not None:
+            stats_by_col.setdefault("roc_auc", []).append(roc_auc)
+        if "epoch" in columns and epoch is not None:
+            stats_by_col.setdefault("epoch", []).append(epoch)
+        if "mean_epoch_time" in columns and mean_epoch_time is not None:
+            stats_by_col.setdefault("mean_epoch_time", []).append(mean_epoch_time)
+        if "datasets" in columns and datasets is not None:
+            stats_by_col.setdefault("datasets", []).append(datasets)
+        if "script_runtime" in columns and script_runtime is not None:
+            stats_by_col.setdefault("script_runtime", []).append(script_runtime)
+        if hostname:
+            times_by_host.setdefault(hostname, []).append(total_time)
+
+    if args.sort:
+        rows.sort(key=lambda r: float("inf") if r[0] is None else r[0])
+        rows = [[str(i + 1)] + row for i, (_, row) in enumerate(rows)]
+        headers = ["##", "#"] + [
+            ("id" if args.short_id and key == "experiment_id" else COLUMN_BY_KEY[key]["header"])
+            for key in columns
+        ]
+    else:
+        rows = [row for _, row in rows]
+        headers = ["#"] + [
+            ("id" if args.short_id and key == "experiment_id" else COLUMN_BY_KEY[key]["header"])
+            for key in columns
+        ]
+
+    if not rows:
+        return times_by_host
+
+    stats_summary = {}
+    for key, vals in stats_by_col.items():
+        if not vals:
+            continue
+        stats_summary[key] = {
+            "mean": mean(vals),
+            "std": pstdev(vals),
+            "median": median(vals),
+        }
+
+    if stats_summary:
+        widths = [len(h) for h in headers]
+        for row in rows:
+            for idx, cell in enumerate(row):
+                widths[idx] = max(widths[idx], len(cell))
+
+        def fmt_stat_value(col_key, value):
+            if col_key == "total_time":
+                return f"{value:.2f}s"
+            if col_key == "total_time_min":
+                return f"{value:.2f}m"
+            if col_key == "roc_auc":
+                return f"{value:.6f}"
+            if col_key in ("epoch", "datasets"):
+                return f"{int(round(value))}"
+            if col_key == "mean_epoch_time":
+                return f"{value:.2f}s"
+            if col_key == "script_runtime":
+                return f"{value:.2f}m"
+            return ""
+
+        offset = 2 if args.sort else 1
+        stat_col_indices = []
+        for header_idx in range(offset, len(headers)):
+            col_key = columns[header_idx - offset]
+            if col_key in stats_summary:
+                stat_col_indices.append(header_idx)
+        first_calc_idx = min(stat_col_indices) if stat_col_indices else len(headers)
+        value_prefix_width = sum(widths[:first_calc_idx]) + 2 * first_calc_idx
+        dash_prefix_width = sum(widths[:first_calc_idx]) + 2 * max(first_calc_idx - 1, 0)
+
+        for stat_type in ("mean", "std", "median"):
+            pad = max(0, value_prefix_width - len(stat_type))
+            prefix = stat_type + (" " * pad)
+            rest_cells = []
+            for header_idx in range(first_calc_idx, len(headers)):
+                col_key = columns[header_idx - offset] if header_idx >= offset else None
+                if col_key is None or col_key not in stats_summary:
+                    rest_cells.append("".ljust(widths[header_idx]))
+                    continue
+                value = stats_summary[col_key].get(stat_type)
+                if value is None:
+                    rest_cells.append("".ljust(widths[header_idx]))
+                    continue
+                rest_cells.append(fmt_stat_value(col_key, value).ljust(widths[header_idx]))
+            print(prefix + "  ".join(rest_cells))
+
+        if first_calc_idx < len(headers):
+            prefix_dashes = "-" * dash_prefix_width
+            rest_dashes = "  ".join("-" * widths[i] for i in range(first_calc_idx, len(headers)))
+            print(prefix_dashes + "  " + rest_dashes)
+
+    print(make_table(headers, rows))
+    return times_by_host
+
+
 def main():
     parser = argparse.ArgumentParser(description="Summarize experiment logs.")
     parser.add_argument("--experiments-dir", "--dir", "-d", default="workdir/experiments")
@@ -359,7 +528,6 @@ def main():
     preset = SETTINGS_PRESETS.get(args.setting) if args.setting else None
     requested = [col["key"] for col in COLUMNS if getattr(args, col["attr"])]
     if preset:
-        # Explicit flags still win, otherwise use preset columns.
         if not requested:
             requested = preset["columns"]
         if preset.get("short_id"):
@@ -371,152 +539,35 @@ def main():
     columns = unique(order_tokens + [key for key in requested if key not in order_tokens]) if order_tokens else requested
 
     experiments_dir = Path(args.experiments_dir)
-    rows = []
-    times = []
-    times_by_host = {}
-    stats_by_col = {}
-
     exclude_ids = {e.strip() for e in args.exclude.split(",") if e.strip()}
 
-    for idx, exp_dir in enumerate(iter_experiments(experiments_dir), start=1):
-        exp_id = exp_dir.name
-        if exp_id in exclude_ids:
-            continue
-        log_path = pick_log_file(exp_dir)
-        hostname = None
-        total_time = None
-        roc_auc = None
-        mean_epoch_time = None
-        epoch = None
-        datasets = None
-        if log_path is not None:
-            hostname, total_time, roc_auc, mean_epoch_time, epoch, datasets = parse_log(log_path)
+    # Detect whether we're at the top-level grouping dir (subdirs contain runs, not logs)
+    top_dirs = sorted([p for p in experiments_dir.iterdir() if p.is_dir()]) if experiments_dir.exists() else []
+    is_grouped = top_dirs and not any(list(d.glob("*-log.txt")) for d in top_dirs)
 
-        display_exp_id = short_experiment_id(exp_id) if args.short_id else exp_id
-        values = column_values(display_exp_id, hostname, total_time, roc_auc, mean_epoch_time, epoch, datasets)
-        rows.append((total_time, [str(idx)] + [values[key] for key in columns]))
-        times.append(total_time)
-
-        # collect per-column numeric stats for displayed columns
-        if "total_time" in columns and total_time is not None:
-            stats_by_col.setdefault("total_time", []).append(total_time)
-        if "total_time_min" in columns and total_time is not None:
-            stats_by_col.setdefault("total_time_min", []).append(total_time / 60.0)
-        if "roc_auc" in columns and roc_auc is not None:
-            stats_by_col.setdefault("roc_auc", []).append(roc_auc)
-        if "epoch" in columns and epoch is not None:
-            stats_by_col.setdefault("epoch", []).append(epoch)
-        if "mean_epoch_time" in columns and mean_epoch_time is not None:
-            stats_by_col.setdefault("mean_epoch_time", []).append(mean_epoch_time)
-        if "datasets" in columns and datasets is not None:
-            stats_by_col.setdefault("datasets", []).append(datasets)
-        if hostname:
-            times_by_host.setdefault(hostname, []).append(total_time)
-
-    if args.sort:
-        rows.sort(key=lambda r: float("inf") if r[0] is None else r[0])
-        rows = [[str(i + 1)] + row for i, (_, row) in enumerate(rows)]
-        headers = ["##", "#"] + [
-            ("id" if args.short_id and key == "experiment_id" else COLUMN_BY_KEY[key]["header"])
-            for key in columns
-        ]
+    times_by_host = {}
+    if is_grouped:
+        # Print each subfolder as its own block
+        found_any = False
+        for group_dir in top_dirs:
+            sub_run_dirs = sorted([p for p in group_dir.iterdir() if p.is_dir()])
+            if not sub_run_dirs:
+                continue
+            has_logs = any(list(d.glob("*-log.txt")) for d in sub_run_dirs)
+            if not has_logs:
+                continue
+            found_any = True
+            print()
+            tbh = print_group(group_dir, columns, args, exclude_ids)
+            for host, ts in tbh.items():
+                times_by_host.setdefault(host, []).extend(ts)
+        if not found_any:
+            print("No experiments found.")
+            return 1
     else:
-        rows = [row for _, row in rows]
-        headers = ["#"] + [
-            ("id" if args.short_id and key == "experiment_id" else COLUMN_BY_KEY[key]["header"])
-            for key in columns
-        ]
-
-    if not rows:
-        print("No experiments found.")
-        return 1
-
-    # compute per-column statistics for numeric columns that were actually displayed
-    stats_summary = {}
-    for key, vals in stats_by_col.items():
-        if not vals:
-            continue
-        stats_summary[key] = {
-            "mean": mean(vals),
-            "std": pstdev(vals),
-            "median": median(vals),
-        }
-
-    if stats_summary:
-        # Recompute column widths (same logic as `make_table`) so stats lines line up
-        # with the table columns.
-        widths = [len(h) for h in headers]
-        for row in rows:
-            for idx, cell in enumerate(row):
-                widths[idx] = max(widths[idx], len(cell))
-
-        def fmt_stat_value(col_key, value):
-            if col_key == "total_time":
-                return f"{value:.2f}s"
-            if col_key == "total_time_min":
-                return f"{value:.2f}m"
-            if col_key == "roc_auc":
-                return f"{value:.6f}"
-            if col_key == "epoch" or col_key == "datasets":
-                return f"{int(round(value))}"
-            if col_key == "mean_epoch_time":
-                return f"{value:.2f}s"
-            return ""
-
-        offset = 2 if args.sort else 1
-
-        # Find where the first calculable/stat column appears in the printed table.
-        # Everything before this index is non-calculated (e.g. experiment id / hostname),
-        # so we "span" the mean/std/median label across it to keep alignment stable.
-        stat_col_indices = []
-        for header_idx in range(offset, len(headers)):
-            col_key = columns[header_idx - offset]
-            if col_key in stats_summary:
-                stat_col_indices.append(header_idx)
-        first_calc_idx = min(stat_col_indices) if stat_col_indices else len(headers)
-
-        # The table uses "  " (two spaces) between columns.
-        # For stats *values*, we must pad up to the exact start position of
-        # `first_calc_idx` in the table line.
-        value_prefix_width = sum(widths[:first_calc_idx]) + 2 * first_calc_idx
-
-        # For the separator dashes, we want the continuous run to stop right before
-        # the first calculated column's dash block. That means we fill the inter-
-        # prefix column gaps with dashes (2 chars each), but do NOT include the final
-        # "  " gap right before `first_calc_idx`.
-        dash_prefix_width = sum(widths[:first_calc_idx]) + 2 * max(first_calc_idx - 1, 0)
-
-        for stat_type in ("mean", "std", "median"):
-            # Pad the label so that the first calculated value begins at the same
-            # x-position as in the table.
-            pad = max(0, value_prefix_width - len(stat_type))
-            prefix = stat_type + (" " * pad)
-
-            rest_cells = []
-            for header_idx in range(first_calc_idx, len(headers)):
-                col_key = columns[header_idx - offset] if header_idx >= offset else None
-                if col_key is None or col_key not in stats_summary:
-                    rest_cells.append("".ljust(widths[header_idx]))
-                    continue
-                value = stats_summary[col_key].get(stat_type)
-                if value is None:
-                    rest_cells.append("".ljust(widths[header_idx]))
-                    continue
-                rest_cells.append(fmt_stat_value(col_key, value).ljust(widths[header_idx]))
-
-            line = prefix + "  ".join(rest_cells)
-            print(line)
-
-        # Separator line between stats and the table: continuous dashes up to the first
-        # calculable column (matches your request), then use the normal column spacing.
-        if first_calc_idx < len(headers):
-            prefix_dashes = "-" * dash_prefix_width
-            rest_dashes = "  ".join("-" * widths[i] for i in range(first_calc_idx, len(headers)))
-            # Insert the normal "  " gap between the non-calculated prefix and the first
-            # calculated column's dash block.
-            print(prefix_dashes + "  " + rest_dashes)
-
-    print(make_table(headers, rows))
+        # Single directory mode (e.g. -d workdir/experiments/normuon-s11/)
+        tbh = print_group(experiments_dir, columns, args, exclude_ids)
+        times_by_host = tbh
 
     if args.plot:
         ts = datetime.now().strftime("%y%m%d-%H%M%S")
@@ -534,7 +585,8 @@ def main():
         elif args.group_host:
             saved = save_plot_grouped(times_by_host, out_path)
         else:
-            saved = save_plot(times, out_path)
+            flat_times = [v for vs in times_by_host.values() for v in vs if v is not None]
+            saved = save_plot(flat_times, out_path)
         if saved:
             print(f"plot: {saved}")
         else:

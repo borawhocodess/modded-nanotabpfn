@@ -1,0 +1,390 @@
+"""
+Inspect results from the 20-technique sweep (sweep-techniques.sh).
+
+Usage:
+    uv run python scripts/techniques.py
+    uv run python scripts/techniques.py --sort auc
+    uv run python scripts/techniques.py --all-runs
+    uv run python scripts/techniques.py --dir workdir/experiments --seed 11
+"""
+
+import argparse
+import re
+import sys
+from pathlib import Path
+from statistics import mean, median
+
+# ---------------------------------------------------------------------------
+# Technique metadata (same order as sweep-techniques.sh / techniques.md)
+# ---------------------------------------------------------------------------
+
+TECHNIQUES = [
+    ("staticcompile",   "P7",      "torch.compile(dynamic=False)"),
+    ("layerscale",      "R2",      "per-layer learned residual scale"),
+    ("normuon",         "O4",      "NorMuon (7-step NS + col norm)"),
+    ("muonmom",         "O6",      "Muon momentum warmup/cooldown"),
+    ("fp8",             "P4",      "FP8 matmul"),
+    ("unet",            "R3",      "U-Net skip connections"),
+    ("valueemb",        "A4",      "value embeddings"),
+    ("gqa",             "A5",      "grouped query attention"),
+    ("cautious",        "O5",      "cautious weight decay"),
+    ("zeroinit",        "I2",      "zero-init output projections"),
+    ("cooldown",        "H4",      "explicit LR cooldown"),
+    ("ema",             "H6",      "EMA parameter averaging"),
+    ("orthoinit",       "I3/I4",   "orthogonal initialization"),
+    ("softcap",         "A6",      "softcap attention logits"),
+    ("lrelu2",          "M4",      "LeakyReLU² activation"),
+    ("x0mix",           "R4",      "residual mix with x0"),
+    ("fp32weights",     "P5/P6/P8","FP32 master weights"),
+    ("adafactormuon",   "O7",      "Adafactor-style factored momentum"),
+    ("pairedhead",      "A7",      "paired head attention"),
+    ("fusedadam",       "O8",      "fused AdamW"),
+]
+
+# Current record to compare against
+BASELINE_MINS = 7.57
+BASELINE_AUC  = 0.8068462330697953
+
+# ---------------------------------------------------------------------------
+# Log parsing (reusing patterns from experiments.py)
+# ---------------------------------------------------------------------------
+
+TT_RE       = re.compile(r"\bt_t:([0-9]+(?:\.[0-9]+)?)s\b")
+ROC_RE      = re.compile(r"\bavg_roc_auc\s*:\s*([0-9]+(?:\.[0-9]+)?)\b")
+MU_E_T_RE   = re.compile(r"μ_e_t:([0-9]+(?:\.[0-9]+)?)s")
+EPOCH_RE    = re.compile(r"\be:(\d+)(?:/\d+)?\b")
+RECORD_RE   = re.compile(r"record time in mins\s*:\s*([0-9]+(?:\.[0-9]+)?)", re.IGNORECASE)
+DATASETS_RE = re.compile(r"datasets seen\s*:\s*(\d+)", re.IGNORECASE)
+RUNTIME_RE  = re.compile(r"script runtime\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*mins", re.IGNORECASE)
+
+
+def parse_log(log_path: Path) -> dict:
+    result = {
+        "total_time_s": None,   # wall-clock training time (t_t)
+        "record_mins":  None,   # time when jackpot was hit
+        "final_auc":    None,   # last reported AUC
+        "best_auc":     None,   # highest AUC seen
+        "mean_epoch_t": None,
+        "epoch":        None,
+        "datasets":     None,
+        "hit_jackpot":  False,
+        "script_runtime_mins": None,
+    }
+    last_t_t = None
+    best_auc = None
+
+    try:
+        with log_path.open("r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                m = TT_RE.search(line)
+                if m:
+                    last_t_t = float(m.group(1))
+
+                m = ROC_RE.search(line)
+                if m:
+                    auc = float(m.group(1))
+                    result["final_auc"] = auc
+                    if best_auc is None or auc > best_auc:
+                        best_auc = auc
+
+                m = MU_E_T_RE.search(line)
+                if m:
+                    result["mean_epoch_t"] = float(m.group(1))
+
+                m = EPOCH_RE.search(line)
+                if m:
+                    result["epoch"] = int(m.group(1))
+
+                m = DATASETS_RE.search(line)
+                if m:
+                    result["datasets"] = int(m.group(1))
+                    result["hit_jackpot"] = True
+
+                m = RECORD_RE.search(line)
+                if m:
+                    result["record_mins"] = float(m.group(1))
+
+                m = RUNTIME_RE.search(line)
+                if m:
+                    result["script_runtime_mins"] = float(m.group(1))
+
+    except (FileNotFoundError, PermissionError):
+        return result
+
+    result["total_time_s"] = last_t_t
+    result["best_auc"] = best_auc
+    return result
+
+
+def pick_log(run_dir: Path) -> Path | None:
+    logs = list(run_dir.glob("*-log.txt"))
+    return max(logs, key=lambda p: p.stat().st_mtime) if logs else None
+
+
+def find_runs(experiments_dir: Path, technique: str, seed: int) -> list[dict]:
+    """Return list of parsed results for all runs of a technique."""
+    exp_name = f"{technique}-s{seed}"
+    technique_dir = experiments_dir / exp_name
+    if not technique_dir.exists():
+        return []
+
+    runs = []
+    for run_dir in sorted(technique_dir.iterdir()):
+        if not run_dir.is_dir():
+            continue
+        log = pick_log(run_dir)
+        if log is None:
+            continue
+        r = parse_log(log)
+        r["run_id"] = run_dir.name
+        runs.append(r)
+    return runs
+
+
+# ---------------------------------------------------------------------------
+# Aggregation
+# ---------------------------------------------------------------------------
+
+def aggregate_runs(runs: list[dict]) -> dict:
+    """Summarise multiple runs of the same technique into one row."""
+    if not runs:
+        return None
+
+    times_mins = [
+        r["record_mins"] if r["hit_jackpot"] and r["record_mins"] is not None
+        else (r["total_time_s"] / 60.0 if r["total_time_s"] is not None else None)
+        for r in runs
+    ]
+    times_mins = [t for t in times_mins if t is not None]
+
+    best_aucs = [r["best_auc"] for r in runs if r["best_auc"] is not None]
+    hits = sum(1 for r in runs if r["hit_jackpot"])
+
+    return {
+        "n_runs":    len(runs),
+        "n_hits":    hits,
+        "best_mins": min(times_mins) if times_mins else None,
+        "mean_mins": mean(times_mins) if times_mins else None,
+        "best_auc":  max(best_aucs) if best_aucs else None,
+        "mean_auc":  mean(best_aucs) if best_aucs else None,
+        "epoch":     max(r["epoch"] for r in runs if r["epoch"] is not None) if any(r["epoch"] for r in runs) else None,
+        "runs":      runs,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Formatting helpers
+# ---------------------------------------------------------------------------
+
+def fmt_mins(mins, *, delta=False):
+    if mins is None:
+        return "-"
+    if delta:
+        sign = "+" if mins >= 0 else ""
+        return f"{sign}{mins:.2f}m"
+    return f"{mins:.2f}m"
+
+
+def fmt_pct(pct):
+    if pct is None:
+        return "-"
+    sign = "+" if pct >= 0 else ""
+    return f"{sign}{pct:.1f}%"
+
+
+def fmt_auc(auc):
+    if auc is None:
+        return "-"
+    return f"{auc:.4f}"
+
+
+def make_table(headers, rows):
+    widths = [len(h) for h in headers]
+    for row in rows:
+        for i, cell in enumerate(row):
+            widths[i] = max(widths[i], len(str(cell)))
+    sep = "  ".join("-" * w for w in widths)
+    header = "  ".join(h.ljust(widths[i]) for i, h in enumerate(headers))
+    lines = [header, sep]
+    for row in rows:
+        lines.append("  ".join(str(row[i]).ljust(widths[i]) for i in range(len(headers))))
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(description="Inspect 20-technique sweep results.")
+    parser.add_argument("--dir", "-d", default="workdir/experiments",
+                        help="experiments directory (default: workdir/experiments)")
+    parser.add_argument("--seed", type=int, default=11)
+    parser.add_argument("--baseline", type=float, default=None,
+                        help=f"override baseline time in mins (default: {BASELINE_MINS})")
+    parser.add_argument("--sort", choices=["time", "auc", "name", "priority"],
+                        default="priority",
+                        help="sort rows by: priority (default), time, auc, name")
+    parser.add_argument("--all-runs", action="store_true",
+                        help="show one row per run instead of aggregated per technique")
+    args = parser.parse_args()
+
+    baseline_mins = args.baseline if args.baseline is not None else BASELINE_MINS
+    experiments_dir = Path(args.dir)
+    if not experiments_dir.exists():
+        print(f"experiments dir not found: {experiments_dir}", file=sys.stderr)
+        return 1
+
+    # Collect data
+    rows_data = []
+    for priority, (name, code, desc) in enumerate(TECHNIQUES, start=1):
+        runs = find_runs(experiments_dir, name, args.seed)
+        agg = aggregate_runs(runs)
+        rows_data.append((priority, name, code, desc, agg, runs))
+
+    # --all-runs: expand to one row per individual run
+    if args.all_runs:
+        print(f"\n{'=' * 110}")
+        print(f"  All individual runs  (baseline: {baseline_mins:.2f}m  |  jackpot AUC: {BASELINE_AUC:.4f})")
+        print(f"{'=' * 110}\n")
+
+        headers = ["#", "technique", "code", "run_id", "time", "Δ vs base", "Δ%", "best_auc", "hit?", "epoch"]
+        all_run_rows = []
+        for priority, name, code, desc, agg, runs in rows_data:
+            for r in runs:
+                t = (r["record_mins"] if r["hit_jackpot"] and r["record_mins"] is not None
+                     else (r["total_time_s"] / 60.0 if r["total_time_s"] is not None else None))
+                delta = (t - baseline_mins) if t is not None else None
+                pct = (delta / baseline_mins * 100) if delta is not None else None
+                hit = "✓" if r["hit_jackpot"] else "✗"
+                all_run_rows.append({
+                    "priority": priority,
+                    "name": name,
+                    "code": code,
+                    "run_id": r.get("run_id", "-"),
+                    "time": t,
+                    "delta": delta,
+                    "pct": pct,
+                    "best_auc": r["best_auc"],
+                    "hit": hit,
+                    "epoch": r["epoch"],
+                })
+
+        if args.sort == "time":
+            all_run_rows.sort(key=lambda r: r["time"] if r["time"] is not None else float("inf"))
+        elif args.sort == "auc":
+            all_run_rows.sort(key=lambda r: -(r["best_auc"] or 0))
+        elif args.sort == "name":
+            all_run_rows.sort(key=lambda r: r["name"])
+        # default: priority (already sorted)
+
+        table_rows = []
+        for i, r in enumerate(all_run_rows, start=1):
+            table_rows.append([
+                str(i),
+                r["name"],
+                r["code"],
+                r["run_id"][-20:],
+                fmt_mins(r["time"]),
+                fmt_mins(r["delta"], delta=True),
+                fmt_pct(r["pct"]),
+                fmt_auc(r["best_auc"]),
+                r["hit"],
+                str(r["epoch"]) if r["epoch"] else "-",
+            ])
+
+        print(make_table(headers, table_rows))
+        return 0
+
+    # Default: one row per technique (aggregated)
+    print(f"\n{'=' * 110}")
+    print(f"  Technique sweep results  (baseline: {baseline_mins:.2f}m  |  jackpot AUC: {BASELINE_AUC:.4f})")
+    print(f"{'=' * 110}\n")
+
+    headers = [
+        "#", "technique", "code", "runs", "hits",
+        "best_time", "mean_time", "Δ mean", "Δ%",
+        "best_auc", "mean_auc",
+        "description",
+    ]
+
+    table_data = []
+    for priority, name, code, desc, agg, runs in rows_data:
+        if agg is None:
+            table_data.append({
+                "priority": priority, "name": name, "code": code, "desc": desc,
+                "n_runs": 0, "n_hits": 0,
+                "best_mins": None, "mean_mins": None, "delta": None, "pct": None,
+                "best_auc": None, "mean_auc": None,
+            })
+            continue
+
+        delta = (agg["mean_mins"] - baseline_mins) if agg["mean_mins"] is not None else None
+        pct   = (delta / baseline_mins * 100) if delta is not None else None
+
+        table_data.append({
+            "priority": priority, "name": name, "code": code, "desc": desc,
+            "n_runs":   agg["n_runs"],
+            "n_hits":   agg["n_hits"],
+            "best_mins": agg["best_mins"],
+            "mean_mins": agg["mean_mins"],
+            "delta":    delta,
+            "pct":      pct,
+            "best_auc": agg["best_auc"],
+            "mean_auc": agg["mean_auc"],
+        })
+
+    # Sort
+    if args.sort == "time":
+        table_data.sort(key=lambda r: r["mean_mins"] if r["mean_mins"] is not None else float("inf"))
+    elif args.sort == "auc":
+        table_data.sort(key=lambda r: -(r["best_auc"] or 0))
+    elif args.sort == "name":
+        table_data.sort(key=lambda r: r["name"])
+    # default: priority order (already in order)
+
+    table_rows = []
+    for i, r in enumerate(table_data, start=1):
+        table_rows.append([
+            str(i),
+            r["name"],
+            r["code"],
+            str(r["n_runs"]),
+            f"{r['n_hits']}/{r['n_runs']}",
+            fmt_mins(r["best_mins"]),
+            fmt_mins(r["mean_mins"]),
+            fmt_mins(r["delta"], delta=True),
+            fmt_pct(r["pct"]),
+            fmt_auc(r["best_auc"]),
+            fmt_auc(r["mean_auc"]),
+            r["desc"],
+        ])
+
+    print(make_table(headers, table_rows))
+
+    # Summary: which ones improved
+    improved = [r for r in table_data if r["delta"] is not None and r["delta"] < 0]
+    failed   = [r for r in table_data if r["n_runs"] > 0 and r["n_hits"] == 0]
+    missing  = [r for r in table_data if r["n_runs"] == 0]
+
+    print()
+    if improved:
+        improved.sort(key=lambda r: r["delta"])
+        print(f"  ↓ improved over baseline ({baseline_mins:.2f}m) by mean time:")
+        for r in improved:
+            print(f"    {r['name']:20s}  mean:{fmt_mins(r['mean_mins'])}  {fmt_mins(r['delta'], delta=True)}  {fmt_pct(r['pct'])}")
+    else:
+        print("  no technique improved over baseline yet")
+
+    if failed:
+        print(f"\n  ✗ ran but did not hit jackpot: {', '.join(r['name'] for r in failed)}")
+
+    if missing:
+        print(f"\n  ? no results yet: {', '.join(r['name'] for r in missing)}")
+
+    print()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
