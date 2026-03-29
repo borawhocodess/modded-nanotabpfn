@@ -41,3 +41,49 @@ median             3.88m    150    1.54s      9600      27.06m
 23  20  dlc2gpu09  5.61m    209    1.61s      13376     36.30m   24dba3e7-rmsthink
 ```
 
+
+## Individual Contributions
+
+Each technique was tested independently before combining. ThinkingRows is the driver of the combined improvement.
+
+### ThinkingRows
+
+```
+mean              4.10m    158    1.55s      10133     28.49m                     
+std               0.35m    15     0.03s      932       2.40m                      
+median            4.22m    161    1.55s      10304     29.20m                     
+----------------  -------  -----  ---------  --------  -------  ------------------
+##  #  hostname   in mins  epoch  μ epoch t  datasets  runtime  id-name           
+--  -  ---------  -------  -----  ---------  --------  -------  ------------------
+1   5  dlc2gpu06  3.60m    139    1.55s      8896      25.50m   27a10da4-thinkrows
+2   7  dlc2gpu06  3.68m    140    1.58s      8960      25.71m   915db5ac-thinkrows
+3   1  dlc2gpu01  3.81m    147    1.55s      9408      26.40m   788facc8-thinkrows
+4   6  dlc2gpu01  3.83m    147    1.56s      9408      26.34m   7c4a56f0-thinkrows
+5   9  dlc2gpu01  4.22m    164    1.54s      10496     29.20m   e0b4fb61-thinkrows
+6   2  dlc2gpu03  4.37m    161    1.63s      10304     29.37m   7738733a-thinkrows
+7   3  dlc2gpu01  4.43m    176    1.51s      11264     32.09m   1dccef90-thinkrows
+8   4  dlc2gpu03  4.44m    175    1.52s      11200     30.41m   9b538862-thinkrows
+9   8  dlc2gpu15  4.56m    176    1.55s      11264     31.37m   45c1e00e-thinkrows
+```
+
+### RMSNorm
+
+```
+mean               5.99m    163    2.22s      10415     30.00m                   
+std                0.85m    27     0.11s      1697      4.99m                    
+median             6.32m    176    2.27s      11264     32.36m                   
+-----------------  -------  -----  ---------  --------  -------  ----------------
+##  #   hostname   in mins  epoch  μ epoch t  datasets  runtime  id-name         
+--  --  ---------  -------  -----  ---------  --------  -------  ----------------
+1   5   dlc2gpu01  4.66m    122    2.29s      7808      23.31m   df0132b6-rmsnorm
+2   10  dlc2gpu01  4.90m    122    2.41s      7808      22.19m   763e974b-rmsnorm
+3   2   dlc2gpu03  5.23m    147    2.13s      9408      26.63m   5dd37817-rmsnorm
+4   6   dlc2gpu01  5.33m    139    2.30s      8896      25.13m   214ffab0-rmsnorm
+5   7   dlc2gpu01  5.40m    150    2.16s      9600      27.16m   c587a564-rmsnorm
+6   11  dlc2gpu01  6.32m    189    2.01s      12096     33.67m   991d4aa3-rmsnorm
+7   3   dlc2gpu01  6.63m    192    2.07s      12288     36.21m   c0dda8f6-rmsnorm
+8   4   dlc2gpu07  6.65m    176    2.27s      11264     32.40m   beef644b-rmsnorm
+9   9   dlc2gpu12  6.71m    176    2.29s      11264     32.36m   d3824e0d-rmsnorm
+10  1   dlc2gpu04  6.73m    178    2.27s      11392     34.69m   56b4fb83-rmsnorm
+11  8   dlc2gpu12  7.29m    199    2.20s      12736     36.28m   35651ba7-rmsnorm
+```
