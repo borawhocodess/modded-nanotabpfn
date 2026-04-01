@@ -6,7 +6,7 @@ The code is derived from [nanoTabPFN](https://github.com/automl/nanoTabPFN) with
 
 This repo now contains a training algorithm which attains the target performance in:
 * 3.88m minutes on 1xL40S (baseline needed 74.32)
-* 9664 synthetic datasets (baseline needed 80576)
+* 9600 synthetic datasets (baseline needed 80576)
 
 This improvement in training speed has been brought about by the following techniques:
 * Muon optimizer
