@@ -1,8 +1,9 @@
 """
-Inspect results from the 20-technique sweep (sweep-techniques.sh).
+Inspect results from technique sweeps.
 
 Usage:
     uv run python scripts/techniques.py
+    uv run python scripts/techniques.py --batch v26
     uv run python scripts/techniques.py --sort auc
     uv run python scripts/techniques.py --all-runs
     uv run python scripts/techniques.py --dir workdir/experiments --seed 11
@@ -40,6 +41,34 @@ TECHNIQUES = [
     ("pairedhead",      "A7",      "paired head attention"),
     ("fusedadam",       "O8",      "fused AdamW"),
 ]
+
+# ---------------------------------------------------------------------------
+# v26 technique batch (v26techniques2.sh, ThinkingRows+RMSNorm base)
+# ---------------------------------------------------------------------------
+
+TECHNIQUES_V26 = [
+    ("v26thinkrows32",   "T1", "ThinkingRows x32 (vs 16 baseline)"),
+    ("v26thinkrows64",   "T2", "ThinkingRows x64"),
+    ("v26thinkrowstest", "T3", "ThinkingRows test-side only"),
+    ("v26gatedattn",     "A1", "per-head sigmoid gate on attn output"),
+    ("v26qgain",         "A2", "learnable per-head Q scale"),
+    ("v26vrl",           "A3", "value residual cross-layer"),
+    ("v26xsa",           "A4", "subtract V-parallel from attn output"),
+    ("v26dtg",           "R1", "DTG per-block bypass gate"),
+    ("v26residmix",      "R2", "per-block learned x/x0 mix"),
+    ("v26siglu",         "M1", "SwiGLU MLP"),
+    ("v26mlp4x",         "M2", "MLP 4x wider (h=1024)"),
+    ("v26muonbeta2",     "O1", "AdamW beta2=0.9"),
+    ("v26adamwd",        "O2", "AdamW weight_decay=0.01"),
+    ("v26muonwd",        "O3", "Muon weight_decay=0.04"),
+    ("v26lawa",          "O4", "LAWA latest weight averaging"),
+    ("v26labelsmooth",   "L1", "label smoothing 0.1"),
+    ("v26l8",            "C1", "l=8 layers"),
+    ("v26e512",          "C2", "e=512 wider model"),
+]
+
+# Baseline: ThinkingRows+RMSNorm (rmsthink-s11, 23-run median)
+BASELINE_V26_MINS = 3.88
 
 # Current record to compare against
 BASELINE_MINS = 7.57
@@ -216,12 +245,14 @@ def make_table(headers, rows):
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="Inspect 20-technique sweep results.")
+    parser = argparse.ArgumentParser(description="Inspect technique sweep results.")
     parser.add_argument("--dir", "-d", default="workdir/experiments",
                         help="experiments directory (default: workdir/experiments)")
     parser.add_argument("--seed", type=int, default=11)
+    parser.add_argument("--batch", choices=["v25", "v26"], default="v25",
+                        help="which technique batch to show (default: v25)")
     parser.add_argument("--baseline", type=float, default=None,
-                        help=f"override baseline time in mins (default: {BASELINE_MINS})")
+                        help="override baseline time in mins")
     parser.add_argument("--sort", choices=["time", "auc", "name", "priority"],
                         default="priority",
                         help="sort rows by: priority (default), time, auc, name")
@@ -229,7 +260,14 @@ def main():
                         help="show one row per run instead of aggregated per technique")
     args = parser.parse_args()
 
-    baseline_mins = args.baseline if args.baseline is not None else BASELINE_MINS
+    if args.batch == "v26":
+        techniques = TECHNIQUES_V26
+        default_baseline = BASELINE_V26_MINS
+    else:
+        techniques = TECHNIQUES
+        default_baseline = BASELINE_MINS
+
+    baseline_mins = args.baseline if args.baseline is not None else default_baseline
     experiments_dir = Path(args.dir)
     if not experiments_dir.exists():
         print(f"experiments dir not found: {experiments_dir}", file=sys.stderr)
@@ -237,7 +275,7 @@ def main():
 
     # Collect data
     rows_data = []
-    for priority, (name, code, desc) in enumerate(TECHNIQUES, start=1):
+    for priority, (name, code, desc) in enumerate(techniques, start=1):
         runs = find_runs(experiments_dir, name, args.seed)
         agg = aggregate_runs(runs)
         rows_data.append((priority, name, code, desc, agg, runs))
@@ -245,7 +283,7 @@ def main():
     # --all-runs: expand to one row per individual run
     if args.all_runs:
         print(f"\n{'=' * 110}")
-        print(f"  All individual runs  (baseline: {baseline_mins:.2f}m  |  jackpot AUC: {BASELINE_AUC:.4f})")
+        print(f"  All individual runs [{args.batch}]  (baseline: {baseline_mins:.2f}m  |  jackpot AUC: {BASELINE_AUC:.4f})")
         print(f"{'=' * 110}\n")
 
         headers = ["#", "technique", "code", "run_id", "time", "Δ vs base", "Δ%", "best_auc", "hit?", "epoch"]
@@ -298,7 +336,7 @@ def main():
 
     # Default: one row per technique (aggregated)
     print(f"\n{'=' * 110}")
-    print(f"  Technique sweep results  (baseline: {baseline_mins:.2f}m  |  jackpot AUC: {BASELINE_AUC:.4f})")
+    print(f"  Technique sweep results [{args.batch}]  (baseline: {baseline_mins:.2f}m  |  jackpot AUC: {BASELINE_AUC:.4f})")
     print(f"{'=' * 110}\n")
 
     headers = [
