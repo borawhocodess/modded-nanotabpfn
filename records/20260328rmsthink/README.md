@@ -87,3 +87,18 @@ median             6.32m    176    2.27s      11264     32.36m
 10  1   dlc2gpu04  6.73m    178    2.27s      11392     34.69m   56b4fb83-rmsnorm
 11  8   dlc2gpu12  7.29m    199    2.20s      12736     36.28m   35651ba7-rmsnorm
 ```
+
+
+## Thinking Rows Attention Maps
+
+The thinking tokens usage (first 16) are clearly visible (e.g. layer 1 head 3). The left side attends, the up side is attended to.
+
+![attention map jm1](260410-220421-attention-plot-260328-011343-4ba701de-rmsthink-s11-ckpt-363712-jm1-all.png)
+
+Run from the root directory to reproduce all attention maps for all datasets:
+
+```bash
+uv run python scripts/attention.py path/to/ckpt.pth
+```
+
+This one was generated with `--max-rows 100` for cleaner visualisation
