@@ -108,3 +108,5 @@ Evaluation is on all of 38 TabArena classification tasks.
 11. [PyTorch docs: Dealing with Recompilations.](https://docs.pytorch.org/docs/stable/user_guide/torch_compiler/compile/programming_model.recompilation.html)
 12. [J. Kaddour. Stop Wasting My Time! Saving Days of ImageNet and BERT Training with Latest Weight Averaging. arXiv:2209.14981 (2022).](https://arxiv.org/abs/2209.14981)
 13. [S. Sanyal et al. Early Weight Averaging meets High Learning Rates for LLM Pre-training. arXiv:2306.03241 (2023).](https://arxiv.org/abs/2306.03241)
+14. [I. Loshchilov & F. Hutter. Decoupled Weight Decay Regularization. ICLR 2019. arXiv:1711.05101.](https://arxiv.org/abs/1711.05101)
+15. [A. Defazio et al. Schedule-Free Learning: A New Way to Train. arXiv:2405.15682 (2024).](https://arxiv.org/abs/2405.15682)
