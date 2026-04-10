@@ -60,6 +60,9 @@ class Config:
     eval_subsample_features: int | None = 100
     max_train_mins: float = 80
     jackpot: float = 0.8068462330697953
+    lawa_k: int = 10
+    lawa_freq: int = 1
+    adam_wd: float = 0.01
 
 
 parser = argparse.ArgumentParser()
@@ -616,15 +619,13 @@ for name, p in model.named_parameters():
         adam_params.append(p)
 
 optimizer_muon = Muon(muon_params, lr=0.1*c.lr, momentum=0.95)
-optimizer_adam = schedulefree.AdamWScheduleFree(adam_params, lr=c.lr, weight_decay=0.01, warmup_steps=1000)
+optimizer_adam = schedulefree.AdamWScheduleFree(adam_params, lr=c.lr, weight_decay=c.adam_wd, warmup_steps=1000)
 
 optimizers = [optimizer_muon, optimizer_adam]
 
 criterion = nn.CrossEntropyLoss()
 
-LAWA_K = 10
-LAWA_FREQ = 1
-lawa_queue = collections.deque(maxlen=LAWA_K)
+lawa_queue = collections.deque(maxlen=c.lawa_k)
 
 t_t = 0.0
 
@@ -677,7 +678,7 @@ for epoch in range(1, c.epochs + 1):
     model.eval()
     optimizer_adam.eval()
 
-    if epoch % LAWA_FREQ == 0:
+    if epoch % c.lawa_freq == 0:
         lawa_queue.append({k: v.cpu().clone() for k, v in model.state_dict().items()})
 
     if len(lawa_queue) > 1:
