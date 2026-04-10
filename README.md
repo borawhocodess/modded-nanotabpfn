@@ -6,7 +6,7 @@ The code is derived from [nanoTabPFN](https://github.com/automl/nanoTabPFN) with
 
 This repo now contains a training algorithm which attains the target performance in:
 * 3.48m minutes on 1xL40S (baseline needed 74.32)
-* 8384 synthetic datasets (baseline needed 80576)
+* 8768 synthetic datasets (baseline needed 80576)
 
 This improvement in training speed has been brought about by the following techniques:
 * Muon optimizer
@@ -22,8 +22,8 @@ This improvement in training speed has been brought about by the following techn
 * Exponential decay of residual stream across layers
 * Lower precision RMSNorm
 * Prepend 16 learnable Thinking Rows
-* LAWA (Latest Weight Averaging) — average last K=10 epoch checkpoints before each eval
-* AdamW weight decay 0.01 on non-Muon parameters
+* Latest Weight Averaging of 10 checkpoints
+* Set AdamWScheduleFree weight decay to 0.01
 
 The following techniques were evaluated but did not lead to improvements:
 * Xavier initialization of all Linear layers
@@ -61,7 +61,7 @@ Note: The 0.8068462330697953 target was selected to match the performance of Ran
 | 4 | 9.26 minutes  | 08/02/26 | [Batched Muon, compiled forward](https://x.com/boratwits/status/2021388220282568828) | [log](records/20260208batchedmuon/260209-204142-79d70f03-log.txt),[PR](https://github.com/borawhocodess/modded-nanotabpfn/pull/7) | @carterprince |
 | 5 | 7.57 minutes | 16/03/26 | [Exponential decay of residual stream](https://x.com/boratwits/status/2034426880208593057) | [log](records/20260310residualdecay/260311-154253-a787618f-new2-s11-log.txt),[PR](https://github.com/borawhocodess/modded-nanotabpfn/pull/12) | @borawhocodess |
 | 6 | 3.88 minutes | 28/03/26 | [RMSNorm, ThinkingRows](https://x.com/boratwits/status/2038018033763918087) | [log](records/20260328rmsthink/260328-011343-4ba701de-rmsthink-s11-log.txt),[PR](https://github.com/borawhocodess/modded-nanotabpfn/pull/14) | @borawhocodess |
-| 7 | 3.48 minutes | 02/04/26 | [LAWA + AdamW weight decay](records/20260402lawa1wd/README.md) | [log](records/20260402lawa1wd/260401-183226-edb3469e-v26lawa1wd-s11-log.txt) | @borawhocodess |
+| 7 | 3.48 minutes | 02/04/26 | LAWA, AdamW weight decay | [log](records/20260402lawa1wd/260401-183226-edb3469e-v26lawa1wd-s11-log.txt),[README](records/20260402lawa1wd/README.md) | @borawhocodess |
 
 
 ## Rules

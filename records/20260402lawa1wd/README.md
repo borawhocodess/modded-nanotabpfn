@@ -3,7 +3,7 @@
 Adds two orthogonal optimizer improvements on top of the ThinkingRows+RMSNorm base:
 
 - **LAWA (Latest Weight Averaging)**: maintain a sliding window of the last K=10 epoch checkpoints; before every eval, average them into a temporary model, evaluate, then restore training weights. If jackpot is hit on the averaged model, save the averaged weights as the checkpoint.
-- **AdamW weight_decay=0.01**: small L2 regularization on the non-Muon parameters (embeddings, output projection).
+- **AdamW weight_decay=0.01**: small L2 regularization on the non-Muon parameters.
 
 Only the median run's log is included here. The median run is the one added to the general record table.
 
@@ -27,7 +27,7 @@ median             3.48m    131    1.59s      8384      24.21m
 11  26  dlc2gpu05  3.39m    131    1.55s      8384      23.12m   eba30685-v26lawa1wd
 12  23  dlc2gpu09  3.44m    133    1.55s      8512      23.38m   6adb8b0b-v26lawa1wd
 13  15  dlc2gpu12  3.47m    116    1.79s      7424      24.21m   18b66c01-v26lawa1wd
-14  3   dlc2gpu15  3.48m    137    1.52s      8768      27.50m   edb3469e-v26lawa1wd  ← median
+14  3   dlc2gpu15  3.48m    137    1.52s      8768      27.50m   edb3469e-v26lawa1wd 
 15  14  dlc2gpu17  3.51m    118    1.78s      7552      25.30m   df28c463-v26lawa1wd
 16  16  dlc2gpu12  3.51m    117    1.80s      7488      24.46m   360f7bc6-v26lawa1wd
 17  7   dlc2gpu05  3.52m    137    1.54s      8768      27.17m   690f2c45-v26lawa1wd
@@ -51,19 +51,4 @@ LAWA was introduced in:
 
 2. **Sanyal et al. (2023)** — *"Early Weight Averaging meets High Learning Rates for LLM Pre-training"* — [arXiv:2306.03241](https://arxiv.org/abs/2306.03241). Extends LAWA to LLM pre-training, adds `k_stepsize` for spacing between selected checkpoints, shows LAWA acts as a surrogate for LR decay.
 
-LAWA also appears as an **experimental (disabled by default)** feature in the [parameter-golf](https://github.com/openai/parameter-golf) competition records — specifically in the [`2026-03-23_LeakyReLU_LegalTTT_ParallelMuon`](../parameter-golf/records/track_10min_16mb/2026-03-23_LeakyReLU_LegalTTT_ParallelMuon/) and [`2026-03-25_ValCalib_GPTQ_XSA_BigramHash3072`](../parameter-golf/records/track_10min_16mb/2026-03-25_ValCalib_GPTQ_XSA_BigramHash3072/) records, where it is implemented but never activated for any leaderboard submission (they use EMA + SWA instead).
-
-**Our adaptation differs from the original paper:** the paper applies LAWA as a one-time post-processing step at the end of training. We apply it as a **continuous eval policy** — averaging before every epoch's evaluation and restoring training weights afterward. This allows hitting jackpot (AUC threshold) with averaged weights at any epoch, not just the last one. This is what produces the -10.3% improvement over baseline.
-
-### Hyperparameters
-
-| | Paper (Kaddour 2022) | Ours |
-|---|---|---|
-| K | 6 (recommended) | 10 |
-| Frequency | every epoch | every epoch (FREQ=1) |
-| When applied | once, end of training | every eval throughout training |
-| Averaging | uniform | uniform |
-
-## AdamW weight_decay=0.01
-
-The non-Muon parameters (embedding, output projection, norms) are optimized with AdamWScheduleFree. The baseline uses `weight_decay=0.0`. Setting it to `0.01` adds mild L2 regularization on these parameters. Tested independently: mean 3.98m (+2.6%, within noise vs 3.88m baseline). Combined with LAWA it has no additional effect on wall-clock time but reduces datasets seen by ~6% (8133 vs 8604 for plain LAWA5), suggesting slightly better sample efficiency.
+LAWA also appears as an **experimental (disabled by default)** feature in the [parameter-golf](https://github.com/openai/parameter-golf) competition records — in [`2026-03-23_LeakyReLU_LegalTTT_ParallelMuon`](https://github.com/openai/parameter-golf/tree/main/records/track_10min_16mb/2026-03-23_LeakyReLU_LegalTTT_ParallelMuon) and [`2026-03-25_ValCalib_GPTQ_XSA_BigramHash3072`](https://github.com/openai/parameter-golf/tree/main/records/track_10min_16mb/2026-03-25_ValCalib_GPTQ_XSA_BigramHash3072) records.

@@ -622,13 +622,8 @@ optimizers = [optimizer_muon, optimizer_adam]
 
 criterion = nn.CrossEntropyLoss()
 
-# TECHNIQUE O4: LAWA — Latest Weight Averaging.
-# Maintain a queue of K=10 most recent snapshots taken every LAWA_FREQ epochs.
-# Before eval, average them and evaluate the averaged model.
-# Avoids EMA's co-evolution problem: all snapshots are from nearby training steps.
-# Ref: parameter-golf train_gpt.py:75-77,1918-1920.
 LAWA_K = 10
-LAWA_FREQ = 1  # snapshot every epoch — current weights always in queue
+LAWA_FREQ = 1
 lawa_queue = collections.deque(maxlen=LAWA_K)
 
 t_t = 0.0
@@ -682,7 +677,6 @@ for epoch in range(1, c.epochs + 1):
     model.eval()
     optimizer_adam.eval()
 
-    # LAWA: snapshot every LAWA_FREQ epochs, then average queue before eval.
     if epoch % LAWA_FREQ == 0:
         lawa_queue.append({k: v.cpu().clone() for k, v in model.state_dict().items()})
 
@@ -757,12 +751,10 @@ for epoch in range(1, c.epochs + 1):
         console=True,
     )
 
-    # Restore training weights after LAWA eval.
     if saved_state is not None:
         model.load_state_dict(saved_state)
 
     if avg_auc >= c.jackpot:
-        # Save the LAWA-averaged weights (already loaded into model at this point if hit).
         if saved_state is not None:
             model.load_state_dict(avg_state)
         ckpt = {
