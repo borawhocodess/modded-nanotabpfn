@@ -70,6 +70,34 @@ TECHNIQUES_V26 = [
 # Baseline: ThinkingRows+RMSNorm (rmsthink-s11, 23-run median)
 BASELINE_V26_MINS = 3.88
 
+# ---------------------------------------------------------------------------
+# v27 technique batch (techniques3.sh, LAWA freq=1 + AdamW WD=0.01 base)
+# ---------------------------------------------------------------------------
+
+TECHNIQUES_V27 = [
+    ("muoneqr",        "O1", "row-normalized MuonEq-R style update"),
+    ("recur23late",    "R1", "delayed middle-layer recurrence, layers 2/3"),
+    ("recur34late",    "R1", "delayed middle-layer recurrence, layers 3/4"),
+    ("recur23prog",    "R2", "progressive recurrence (phase 1→2)"),
+    ("parallel45",     "R3", "late parallel residuals, last 2 blocks"),
+    ("parallel345",    "R3", "late parallel residuals, last 3 blocks"),
+    ("qgainfix1",      "A1", "vectorized Q gain, init 1.0"),
+    ("qgainfix4",      "A1", "vectorized Q gain, init 4.0"),
+    ("siglulawa",      "M1", "SiGLU/SwiGLU on LAWA base"),
+    ("think32lawa",    "T1", "ThinkingRows x32 on LAWA base"),
+    ("lawa_microgrid", "O2", "LAWA/WD microgrid, default point"),
+    ("curriculum",     "S1", "ramp prior steps per epoch"),
+    ("featuregroup",   "I1", "NanoTabICL-style feature grouping"),
+    ("rowcls",         "I2", "NanoTabICL-style row CLS decoder column"),
+    ("inducedcol",     "I3", "induced feature/column attention"),
+    ("qassmax",        "A2", "QASSMax-style row query scaling"),
+    ("cautiousadamwd", "O3", "cautious Adam weight decay approximation"),
+    ("muonwarmup",     "O4", "Muon momentum warmup-only"),
+]
+
+# Baseline: LAWA freq=1 + AdamW WD=0.01 (20260402lawa1wd, mean over runs)
+BASELINE_V27_MINS = 3.48
+
 # Current record to compare against
 BASELINE_MINS = 7.57
 BASELINE_AUC  = 0.8068462330697953
@@ -249,7 +277,7 @@ def main():
     parser.add_argument("--dir", "-d", default="workdir/experiments",
                         help="experiments directory (default: workdir/experiments)")
     parser.add_argument("--seed", type=int, default=11)
-    parser.add_argument("--batch", choices=["v25", "v26"], default="v25",
+    parser.add_argument("--batch", choices=["v25", "v26", "v27"], default="v25",
                         help="which technique batch to show (default: v25)")
     parser.add_argument("--baseline", type=float, default=None,
                         help="override baseline time in mins")
@@ -260,7 +288,10 @@ def main():
                         help="show one row per run instead of aggregated per technique")
     args = parser.parse_args()
 
-    if args.batch == "v26":
+    if args.batch == "v27":
+        techniques = TECHNIQUES_V27
+        default_baseline = BASELINE_V27_MINS
+    elif args.batch == "v26":
         techniques = TECHNIQUES_V26
         default_baseline = BASELINE_V26_MINS
     else:
