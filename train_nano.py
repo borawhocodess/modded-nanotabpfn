@@ -55,22 +55,22 @@ class Config:
     o: int | None = None
     residual_decay: float = 0.95
     thinking_rows: int = 16
+    feature_group_size: int = 3
+    adam_wd: float = 0.01
+    lawa_k: int = 10
+    lawa_freq: int = 1
     eval_folds: int = 5
     eval_subsample_samples: int | None = 1000
     eval_subsample_features: int | None = 100
     max_train_mins: float = 80
     jackpot: float = 0.8068462330697953
-    lawa_k: int = 10
-    lawa_freq: int = 1
-    adam_wd: float = 0.01
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--name", default="featuregroup")
+parser.add_argument("--name", default="test")
 parser.add_argument("--lr", type=float, default=None)
 parser.add_argument("--seed", type=int, default=None)
 parser.add_argument("--jackpot", type=float, default=None)
-parser.add_argument("--residual_decay", type=float, default=None)
 parser.add_argument("--epochs", type=int, default=None)
 args = parser.parse_args()
 
@@ -82,8 +82,6 @@ if args.seed is not None:
     c.seed = args.seed
 if args.jackpot is not None:
     c.jackpot = args.jackpot
-if args.residual_decay is not None:
-    c.residual_decay = args.residual_decay
 if args.epochs is not None:
     c.epochs = args.epochs
 
@@ -277,7 +275,7 @@ class ThinkingRows(nn.Module):
 
 
 class NanoTabPFNModel(nn.Module):
-    def __init__(self, l, a, e, h, o, residual_decay=1.0, thinking_rows=16):
+    def __init__(self, l, a, e, h, o, residual_decay=1.0, thinking_rows=16, feature_group_size=3):
         """
         l : num layers
         a : num attention heads
@@ -292,7 +290,7 @@ class NanoTabPFNModel(nn.Module):
         self.e = e
         self.h = h
         self.o = o
-        self.feature_encoder = FeatureEncoder(e)
+        self.feature_encoder = FeatureEncoder(e, feature_group_size=feature_group_size)
         self.target_encoder = TargetEncoder(e)
         self.transformer_encoder = TransformerEncoderStack(l, a, e, h, residual_decay=residual_decay)
         self.decoder = Decoder(e, h, o)
@@ -325,15 +323,15 @@ class NanoTabPFNModel(nn.Module):
 
 
 class FeatureEncoder(nn.Module):
-    def __init__(self, e, feature_group_size=3):
+    def __init__(self, e, feature_group_size):
         super().__init__()
         self.feature_group_size = feature_group_size
         self.linear_layer = nn.Linear(feature_group_size, e)
 
     def forward(self, x, sep):
-        num_cols = x.shape[-1]
-        idxs = torch.arange(num_cols, dtype=torch.long, device=x.device)
-        x = torch.stack([x[:, :, (idxs + (2 ** i - 1)) % num_cols] for i in range(self.feature_group_size)], dim=-1)
+        n_cols = x.shape[-1]
+        idxs = torch.arange(n_cols, dtype=torch.long, device=x.device)
+        x = torch.stack([x[:, :, (idxs + (2 ** i - 1)) % n_cols] for i in range(self.feature_group_size)], dim=-1)
         mean = x[:, :sep].mean(dim=1, keepdim=True)
         std = x[:, :sep].std(dim=1, keepdim=True) + 1e-8
         x = (x - mean) / std
@@ -609,6 +607,7 @@ model = NanoTabPFNModel(
     o=c.o, 
     residual_decay=c.residual_decay, 
     thinking_rows=c.thinking_rows,
+    feature_group_size=c.feature_group_size,
 ).to(device)
 
 muon_params = []
