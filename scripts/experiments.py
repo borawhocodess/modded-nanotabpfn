@@ -23,6 +23,18 @@ COLUMNS = [
         "header": "experiment id",
     },
     {
+        "key": "date",
+        "flag": "--date",
+        "attr": "date",
+        "header": "date",
+    },
+    {
+        "key": "time",
+        "flag": "--time",
+        "attr": "time",
+        "header": "time",
+    },
+    {
         "key": "hostname",
         "flag": "--hostname",
         "attr": "hostname",
@@ -76,6 +88,12 @@ COLUMNS = [
         "attr": "id_name0",
         "header": "id-name",
     },
+    {
+        "key": "id_name",
+        "flag": "--id-name",
+        "attr": "id_name",
+        "header": "id-name",
+    },
 ]
 
 COLUMN_BY_KEY = {col["key"]: col for col in COLUMNS}
@@ -90,6 +108,9 @@ SETTINGS_PRESETS = {
     },
     "alpha": {
         "columns": ["hostname", "total_time_min", "epoch", "mean_epoch_time", "datasets", "script_runtime", "id_name0"],
+    },
+    "beta": {
+        "columns": ["date", "hostname", "total_time_min", "epoch", "mean_epoch_time", "datasets", "script_runtime", "id_name"],
     },
 }
 
@@ -244,6 +265,8 @@ def column_values(exp_id, hostname, total_time, roc_auc, mean_epoch_time, epoch,
     total_time_min = "-" if total_time is None else f"{total_time / 60:.2f}m"
     return {
         "experiment_id": exp_id,
+        "date": exp_date(exp_id),
+        "time": exp_time(exp_id),
         "hostname": hostname or "-",
         "total_time": "-" if total_time is None else f"{total_time:.2f}s",
         "total_time_min": total_time_min,
@@ -253,7 +276,26 @@ def column_values(exp_id, hostname, total_time, roc_auc, mean_epoch_time, epoch,
         "datasets": "-" if datasets is None else str(datasets),
         "script_runtime": "-" if script_runtime is None else f"{script_runtime:.2f}m",
         "id_name0": id_name0(exp_id),
+        "id_name": id_name(exp_id),
     }
+
+
+def exp_date(exp_id: str) -> str:
+    """From '260420-022941-...' return '26-04-20'."""
+    parts = exp_id.split("-")
+    if parts and len(parts[0]) == 6 and parts[0].isdigit():
+        d = parts[0]
+        return f"{d[0:2]}-{d[2:4]}-{d[4:6]}"
+    return "-"
+
+
+def exp_time(exp_id: str) -> str:
+    """From '260420-022941-...' return '02:29:41'."""
+    parts = exp_id.split("-")
+    if len(parts) >= 2 and len(parts[1]) == 6 and parts[1].isdigit():
+        t = parts[1]
+        return f"{t[0:2]}:{t[2:4]}:{t[4:6]}"
+    return "-"
 
 
 def short_experiment_id(exp_id: str) -> str:
@@ -282,6 +324,20 @@ def id_name0(exp_id: str) -> str:
         return f"{parts[2]}-{parts[3]}"
     if len(parts) >= 3:
         return parts[2]
+    return exp_id
+
+
+def id_name(exp_id: str) -> str:
+    """
+    For ids like:
+      260311-154259-9fcfcbb7-new2-s11
+    return:
+      9fcfcbb7-new2-s11
+    (short hash + all remaining name segments)
+    """
+    parts = exp_id.split("-")
+    if len(parts) >= 3:
+        return "-".join(parts[2:])
     return exp_id
 
 
