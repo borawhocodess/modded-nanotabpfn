@@ -98,6 +98,39 @@ TECHNIQUES_V27 = [
 # Baseline: LAWA freq=1 + AdamW WD=0.01 (20260402lawa1wd, mean over runs)
 BASELINE_V27_MINS = 3.48
 
+# ---------------------------------------------------------------------------
+# v28 technique batch (train_nano_automod_*.py, automod20.sh, techniques5.md)
+# Base script: train_nano_automod_.py (l=5, fgs=5, rows=24, mean-pool-nolast,
+# ns=5 default, Muon on transformer_encoder, ScheduleFree Adam warmup=1000,
+# LAWA k=10 freq=1). Each variant applies a single candidate on top.
+# ---------------------------------------------------------------------------
+
+TECHNIQUES_V28 = [
+    ("automod_k1_fusedmuon",      "K1", "fused Muon: Polar Express + NorMuon + cautious WD"),
+    ("automod_k2_cautiouswd",     "K2", "cautious WD mask on Muon step"),
+    ("automod_a1_lambdas",        "A1", "per-layer resid_lambdas (1.15→1.05) + x0_lambdas (0.20→0.05)"),
+    ("automod_a2_backout",        "A2", "mid-layer residual backout (l//2 cache, subtract)"),
+    ("automod_a3_hyperconn",      "A3", "saved mid-layer activation hyperconnection"),
+    ("automod_a4_softcap",        "A4", "decoder tanh softcap at 15.0"),
+    ("automod_o1_normuon",        "O1", "NorMuon factored per-row/col variance post-NS"),
+    ("automod_o2_muoneqr",        "O2", "MuonEq-R row normalization pre-NS"),
+    ("automod_q1_qkgain",         "Q1", "per-head Q-gain parameters (init 5.25)"),
+    ("automod_r1_recur",          "R1", "depth recurrence [0,1,2,3,4,1,2,3]"),
+    ("automod_r2_recurprog",      "R2", "progressive two-phase recurrence"),
+    ("automod_r3_parallel",       "R3", "GPT-J parallel residuals (attn_f + attn_d + MLP)"),
+    ("automod_s1_multigroup",     "S1", "multi-group AdamW (norms/embed/decoder/other)"),
+    ("automod_s2_dmodellr",       "S2", "Adam LR scaled by sqrt(768/e)"),
+    ("automod_s3_schedule",       "S3", "adam_wd=0.03 + lawa_freq=2 + warmup=1500"),
+    ("automod_x1_rows24only",     "X1", "revert l=6/fgs=3/last-col decoder, keep rows=24"),
+    ("automod_w1_warmup750",      "W1", "Adam warmup_steps 1000 → 750"),
+    ("automod_v1_deterministic",  "V1", "deterministic CUDA ops"),
+    ("automod_d1_curriculum",     "D1", "easy-first dataset curriculum (num_features asc)"),
+    ("automod_f1_fgmask",         "F1", "cyclic-distance feature-attn bias (learnable slope)"),
+]
+
+# Baseline: train_nano_automod_ (confirmed best config, n=11)
+BASELINE_V28_MINS = 1.35
+
 # Current record to compare against
 BASELINE_MINS = 7.57
 BASELINE_AUC  = 0.8068462330697953
@@ -179,10 +212,17 @@ def pick_log(run_dir: Path) -> Path | None:
 
 
 def find_runs(experiments_dir: Path, technique: str, seed: int) -> list[dict]:
-    """Return list of parsed results for all runs of a technique."""
-    exp_name = f"{technique}-s{seed}"
-    technique_dir = experiments_dir / exp_name
-    if not technique_dir.exists():
+    """Return list of parsed results for all runs of a technique.
+
+    Tries `{technique}-s{seed}` first (legacy naming), then falls back to
+    `{technique}` (automod20.sh v28 naming, which passes --name "${NAME}"
+    without a seed suffix).
+    """
+    for candidate in (f"{technique}-s{seed}", technique):
+        technique_dir = experiments_dir / candidate
+        if technique_dir.exists():
+            break
+    else:
         return []
 
     runs = []
@@ -277,7 +317,7 @@ def main():
     parser.add_argument("--dir", "-d", default="workdir/experiments",
                         help="experiments directory (default: workdir/experiments)")
     parser.add_argument("--seed", type=int, default=11)
-    parser.add_argument("--batch", choices=["v25", "v26", "v27"], default="v25",
+    parser.add_argument("--batch", choices=["v25", "v26", "v27", "v28"], default="v25",
                         help="which technique batch to show (default: v25)")
     parser.add_argument("--baseline", type=float, default=None,
                         help="override baseline time in mins")
@@ -288,7 +328,10 @@ def main():
                         help="show one row per run instead of aggregated per technique")
     args = parser.parse_args()
 
-    if args.batch == "v27":
+    if args.batch == "v28":
+        techniques = TECHNIQUES_V28
+        default_baseline = BASELINE_V28_MINS
+    elif args.batch == "v27":
         techniques = TECHNIQUES_V27
         default_baseline = BASELINE_V27_MINS
     elif args.batch == "v26":
