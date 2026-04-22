@@ -1,2 +1,3 @@
 # modded-paper
-nanotabpfn in a minute
+
+speedrunning tabular foundation models pretraining
