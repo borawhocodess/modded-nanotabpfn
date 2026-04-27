@@ -1,5 +1,6 @@
 export TEXINPUTS := .:icml2026:
 export BIBINPUTS := .:icml2026:
+export BSTINPUTS := .:icml2026:
 BUILD := build
 
 $(BUILD)/main.pdf: main.tex | $(BUILD)
