@@ -3,6 +3,7 @@
 This record was obtained by implementing the Muon optimizer.
 
 [[writeup](https://kellerjordan.github.io/posts/muon/)] -
+[[extra writing](https://jeremybernste.in/writing/deriving-muon)] - 
 [[repo](https://github.com/KellerJordan/Muon)] -
 [[source record log](https://github.com/KellerJordan/modded-nanogpt/blob/master/records/track_1_short/2024-10-10_Muon/eb5659d0-fb6a-49e5-a311-f1f89412f726.txt)]
 
