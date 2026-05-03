@@ -4,6 +4,7 @@ Inspect results from technique sweeps.
 Usage:
     uv run python scripts/techniques.py
     uv run python scripts/techniques.py --batch v26
+    uv run python scripts/techniques.py --batch tech6
     uv run python scripts/techniques.py --sort auc
     uv run python scripts/techniques.py --all-runs
     uv run python scripts/techniques.py --dir workdir/experiments --seed 11
@@ -130,6 +131,39 @@ TECHNIQUES_V28 = [
 
 # Baseline: train_nano_automod_ (confirmed best config, n=11)
 BASELINE_V28_MINS = 1.35
+
+# ---------------------------------------------------------------------------
+# techniques6/autoresearch batch (techniques6_autoresearch.sh, techniques6.md)
+# Base script: train_nano_autoresearch.py. Each variant was copied from that
+# base and named train_nano_autoresearch_<technique>.py; Slurm run names are
+# tech6-<technique>-s<seed>.
+# ---------------------------------------------------------------------------
+
+TECHNIQUES_V29 = [
+    ("tech6-rowclsdecoder",    "T6-01", "row CLS decoder column"),
+    ("tech6-inducedcolattn",   "T6-02", "learned inducing-token feature attention"),
+    ("tech6-qassmax",          "T6-03", "QASSMax row/ICL attention scaling"),
+    ("tech6-rowrope",          "T6-04", "cached RoPE on row attention"),
+    ("tech6-classembedding",   "T6-05", "ClassEmbedding target encoder"),
+    ("tech6-dualtarget",       "T6-06", "dual target embeddings"),
+    ("tech6-popstd",           "T6-07", "train-only std with unbiased=False"),
+    ("tech6-fgattnmask",       "T6-08", "sparse feature-group attention mask"),
+    ("tech6-qgain",            "T6-09", "per-head Q gain"),
+    ("tech6-sparseattngate",   "T6-10", "sparse attention output gate"),
+    ("tech6-denseattngate",    "T6-11", "dense attention output gate"),
+    ("tech6-rowsmear",         "T6-12", "row smear lookback"),
+    ("tech6-residx0lambdas",   "T6-13", "learnable residual/x0 lambdas"),
+    ("tech6-backout",          "T6-14", "backout before decoder"),
+    ("tech6-lateparallel",     "T6-15", "late parallel residual lane"),
+    ("tech6-depthrecurrence",  "T6-16", "middle block depth recurrence"),
+    ("tech6-polarexpress",     "T6-17", "Polar Express Muon"),
+    ("tech6-normuon",          "T6-18", "NorMuon variance reduction"),
+    ("tech6-cautiouswd",       "T6-19", "cautious weight decay"),
+    ("tech6-multigroupadam",   "T6-20", "multi-group AdamW"),
+]
+
+# Baseline: train_nano_autoresearch.py base/automod confirmed best config.
+BASELINE_V29_MINS = 1.35
 
 # Current record to compare against
 BASELINE_MINS = 7.57
@@ -317,7 +351,7 @@ def main():
     parser.add_argument("--dir", "-d", default="workdir/experiments",
                         help="experiments directory (default: workdir/experiments)")
     parser.add_argument("--seed", type=int, default=11)
-    parser.add_argument("--batch", choices=["v25", "v26", "v27", "v28"], default="v25",
+    parser.add_argument("--batch", choices=["v25", "v26", "v27", "v28", "v29", "tech6"], default="v25",
                         help="which technique batch to show (default: v25)")
     parser.add_argument("--baseline", type=float, default=None,
                         help="override baseline time in mins")
@@ -328,7 +362,10 @@ def main():
                         help="show one row per run instead of aggregated per technique")
     args = parser.parse_args()
 
-    if args.batch == "v28":
+    if args.batch in ("v29", "tech6"):
+        techniques = TECHNIQUES_V29
+        default_baseline = BASELINE_V29_MINS
+    elif args.batch == "v28":
         techniques = TECHNIQUES_V28
         default_baseline = BASELINE_V28_MINS
     elif args.batch == "v27":
