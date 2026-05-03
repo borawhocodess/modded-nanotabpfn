@@ -560,6 +560,77 @@ def print_group(experiments_dir, columns, args, exclude_ids):
     return times_by_host
 
 
+def collect_group_stats(experiments_dir, exclude_ids):
+    """Aggregate stats for one group folder. Returns (n_runs, stats_by_col)."""
+    stats_by_col = {}
+    n = 0
+    for exp_dir in iter_experiments(experiments_dir):
+        exp_id = exp_dir.name
+        if exp_id in exclude_ids:
+            continue
+        log_path = pick_log_file(exp_dir)
+        if log_path is None:
+            continue
+        hostname, total_time, roc_auc, mean_epoch_time, epoch, datasets, script_runtime = parse_log(log_path)
+        n += 1
+        if total_time is not None:
+            stats_by_col.setdefault("total_time_min", []).append(total_time / 60.0)
+        if epoch is not None:
+            stats_by_col.setdefault("epoch", []).append(epoch)
+        if mean_epoch_time is not None:
+            stats_by_col.setdefault("mean_epoch_time", []).append(mean_epoch_time)
+        if datasets is not None:
+            stats_by_col.setdefault("datasets", []).append(datasets)
+        if script_runtime is not None:
+            stats_by_col.setdefault("script_runtime", []).append(script_runtime)
+        if roc_auc is not None:
+            stats_by_col.setdefault("roc_auc", []).append(roc_auc)
+    return n, stats_by_col
+
+
+SUMMARY_COLUMNS = [
+    ("total_time_min", "med mins", lambda v: f"{v:.2f}m"),
+    ("epoch", "med epoch", lambda v: f"{int(round(v))}"),
+    ("mean_epoch_time", "med μ ep t", lambda v: f"{v:.2f}s"),
+    ("datasets", "med datasets", lambda v: f"{int(round(v))}"),
+    ("script_runtime", "med runtime", lambda v: f"{v:.2f}m"),
+]
+
+
+def print_summary(top_dirs, args, exclude_ids):
+    rows = []
+    for group_dir in top_dirs:
+        sub_run_dirs = sorted([p for p in group_dir.iterdir() if p.is_dir()])
+        if not sub_run_dirs:
+            continue
+        if not any(list(d.glob("*-log.txt")) for d in sub_run_dirs):
+            continue
+        n, stats = collect_group_stats(group_dir, exclude_ids)
+        if n == 0:
+            continue
+        cells = [group_dir.name, str(n)]
+        for key, _, fmt in SUMMARY_COLUMNS:
+            vals = stats.get(key, [])
+            cells.append(fmt(median(vals)) if vals else "-")
+        rows.append(cells)
+
+    if not rows:
+        print("No experiments found.")
+        return 1
+
+    if args.sort:
+        def _key(r):
+            v = r[2]
+            if v == "-":
+                return float("inf")
+            return float(v.rstrip("m"))
+        rows.sort(key=_key)
+
+    headers = ["group", "n"] + [h for _, h, _ in SUMMARY_COLUMNS]
+    print(make_table(headers, rows))
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description="Summarize experiment logs.")
     parser.add_argument("--experiments-dir", "--dir", "-d", default="workdir/experiments")
@@ -576,6 +647,7 @@ def main():
         help="use a predefined output setting preset",
     )
     parser.add_argument("--exclude", default="", help="comma-separated experiment ids to exclude")
+    parser.add_argument("--summary", action="store_true", help="one-row-per-group summary table")
     args = parser.parse_args()
 
     if args.plot and args.group_host and not args.x_host:
@@ -600,6 +672,9 @@ def main():
     # Detect whether we're at the top-level grouping dir (subdirs contain runs, not logs)
     top_dirs = sorted([p for p in experiments_dir.iterdir() if p.is_dir()]) if experiments_dir.exists() else []
     is_grouped = top_dirs and not any(list(d.glob("*-log.txt")) for d in top_dirs)
+
+    if args.summary and is_grouped:
+        return print_summary(top_dirs, args, exclude_ids)
 
     times_by_host = {}
     if is_grouped:
