@@ -70,7 +70,7 @@ Note: The 0.8068462330697953 target was selected to match the performance of Ran
 | 6 | 3.88 minutes | 28/03/26 | RMSNorm, ThinkingRows | [log](records/20260328rmsthink/260328-011343-4ba701de-rmsthink-s11-log.txt),[read](records/20260328rmsthink/README.md),[PR](https://github.com/borawhocodess/modded-nanotabpfn/pull/14),[X](https://x.com/boratwits/status/2038018033763918087) | @borawhocodess |
 | 7 | 3.48 minutes | 02/04/26 | LAWA, AdamW weight decay | [log](records/20260402lawa1wd/260401-183226-edb3469e-v26lawa1wd-s11-log.txt),[read](records/20260402lawa1wd/README.md),[PR](https://github.com/borawhocodess/modded-nanotabpfn/pull/16),[X](https://x.com/boratwits/status/2042729853821022644) | @borawhocodess |
 | 8 | 2.15 minutes | 11/04/26 | Repeated feature grouping | [log](records/20260411featuregroup/260411-142657-1686dd83-featuregroup-s11-log.txt),[read](records/20260411featuregroup/README.md),[PR](https://github.com/borawhocodess/modded-nanotabpfn/pull/17),[X](https://x.com/boratwits/status/2043047953502290052) | @borawhocodess |
-| 9 | 0.92 minutes | 06/05/26 | autoresearch HPO, Muon weight decay, mean feature pooling | [log](records/20260506autohuman/260506-163637-589ea1cf-autohuman-log.txt),[read](records/20260506autohuman/README.md) | @borawhocodess |
+| 9 | 0.92 minutes | 06/05/26 | autoresearch HPO, Muon weight decay, mean feature pooling | [log](records/20260506autohuman/260506-163637-589ea1cf-autohuman-log.txt),[read](records/20260506autohuman/README.md),[PR](https://github.com/borawhocodess/modded-nanotabpfn/pull/18) | @borawhocodess |
 
 
 ## Rules
