@@ -254,6 +254,9 @@ class Muon(torch.optim.Optimizer):
 
 
 class LowerPrecisionRMSNorm(nn.RMSNorm):
+    """
+    code adapted from: https://github.com/PriorLabs/TabPFN/blob/main/src/tabpfn/architectures/tabpfn_v2_6.py
+    """
     def forward(self, x):
         if x.dtype in (torch.float16, torch.bfloat16):
             with torch.amp.autocast("cuda", enabled=False):
@@ -262,6 +265,9 @@ class LowerPrecisionRMSNorm(nn.RMSNorm):
 
 
 class ThinkingRows(nn.Module):
+    """
+    code adapted from: https://github.com/PriorLabs/TabPFN/blob/main/src/tabpfn/architectures/tabpfn_v2_6.py
+    """
     def __init__(self, num_thinking_rows: int, e: int):
         super().__init__()
         self.num_thinking_rows = num_thinking_rows
@@ -606,12 +612,12 @@ prior = PriorDumpDataLoader(
 c.o = prior.max_num_classes
 
 model = NanoTabPFNModel(
-    l=c.l, 
-    a=c.a, 
-    e=c.e, 
-    h=c.h, 
-    o=c.o, 
-    residual_decay=c.residual_decay, 
+    l=c.l,
+    a=c.a,
+    e=c.e,
+    h=c.h,
+    o=c.o,
+    residual_decay=c.residual_decay,
     thinking_rows=c.thinking_rows,
     feature_group_size=c.feature_group_size,
 ).to(device)
