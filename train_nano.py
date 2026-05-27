@@ -176,7 +176,7 @@ TABARENA_CLASSIFICATION_TASKS = [
 
 
 # -----------------------------------------------------------------------------
-# muon
+# techniques
 
 
 def zeropower_via_svd(G, steps=None):
