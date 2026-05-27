@@ -32,14 +32,6 @@ This improvement in training speed has been brought about by the following techn
 * Increase gradient clip from 1.0 to 2.0
 * Feed mean of test feature embeddings into output decoder
 
-The following techniques were evaluated but did not lead to improvements:
-* Xavier initialization of all Linear layers
-* GoLU activation
-* Accumulated gradients
-* QK-Norm and ReLU²
-* XSA (Exclusive Self Attention)
-* No bias QKV with Xavier initialization
-
 
 ## Running the current record
 
