@@ -1,6 +1,6 @@
 # autoresearch
 
-changes found by adapting [autoresearch](https://github.com/karpathy/autoresearch) over multiple runs with human intervention. 
+changes found by adapting [autoresearch](https://github.com/karpathy/autoresearch) over multiple runs with human intervention.
 
 Only the median run's log is included here. The median run is the one added to the general record table.
 
@@ -72,3 +72,20 @@ Architecture: the Decoder is fed the mean over feature tokens at test rows inste
 # before out[:, sep:, -1, :]
 # after out[:, sep:, :-1, :].mean(dim=2)
 ```
+
+## Ablation
+
+Leave-one-out: each row reverts one change, everything else stays at the record, bigger Δ means that change carried more of the speedup.
+
+| revert                                   | med  | mean | min  | max  | med ep | ΔLOO  |
+| ---------------------------------------- | ---- | ---- | ---- | ---- | ------ | ----- |
+| `l` 5→6                                  | 1.81 | 1.81 | 1.39 | 2.12 | 99     | +0.86 |
+| decoder mean-pool → last target token    | 1.64 | 1.63 | 1.31 | 2.02 | 106    | +0.69 |
+| `feature_group_size` 5→3                 | 1.37 | 1.42 | 1.19 | 1.78 | 88     | +0.42 |
+| `grad_clip` 2.0→1.0                      | 1.14 | 1.22 | 0.96 | 1.87 | 71     | +0.19 |
+| `batch_size` 2→1, `steps` 32→64          | 1.04 | 1.05 | 0.96 | 1.18 | 45     | +0.09 |
+| `muon_momentum` 0.96→0.95                | 0.98 | 1.01 | 0.95 | 1.40 | 61     | +0.03 |
+| `muon_wd` 0.1→0.0                        | 0.95 | 0.94 | 0.90 | 0.97 | 58     | +0.00 |
+| `thinking_rows` 24→16                    | 0.94 | 1.10 | 0.89 | 1.61 | 59     | −0.01 |
+
+`l` 5, the mean-pool decoder, and `feature_group_size` 5 drove the speedup.
