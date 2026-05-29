@@ -478,6 +478,7 @@ def save_metric_plot(
     point_size,
     line_width,
     y_min,
+    y_max,
     figsize,
     legend_size,
     tick_size,
@@ -492,6 +493,7 @@ def save_metric_plot(
     multi_run_color,
     multi_mean_color,
     multi_std_color,
+    log_x=False,
 ):
     series_by_record = {k: v for k, v in series_by_record.items() if v}
     if not series_by_record:
@@ -594,12 +596,16 @@ def save_metric_plot(
         plt.xlabel("wallclock (mins)")
     else:
         plt.xlabel("time (mins)")
+    if log_x:
+        plt.xscale("log")
     plt.ylabel(ylabel)
     if tick_size is not None:
         plt.xticks(fontsize=tick_size)
         plt.yticks(fontsize=tick_size)
     if y_min is not None:
         plt.ylim(bottom=y_min)
+    if y_max is not None:
+        plt.ylim(top=y_max)
     if len(series_by_record) > 1 or hline_y is not None or extra_hlines:
         plt.legend(loc="best", fontsize=legend_size)
     plt.tight_layout()
@@ -660,10 +666,12 @@ def main():
         default="total_time",
         help="x axis for lossplot",
     )
+    parser.add_argument("--logx", action="store_true", default=False, help="use a log-scale x-axis for plots")
     parser.add_argument("--ma", type=int, default=1, help="moving average window for plots")
     parser.add_argument("--point-size", type=float, default=10.0, help="marker size for plots")
     parser.add_argument("--line-width", type=float, default=1.0, help="line width for plots")
     parser.add_argument("--start-y-axis-at", type=float, default=0.72, help="y-axis lower bound")
+    parser.add_argument("--end-y-axis-at", type=float, default=None, help="y-axis upper bound")
     parser.add_argument(
         "--figsize",
         type=parse_figsize,
@@ -812,6 +820,7 @@ def main():
             args.point_size,
             args.line_width,
             args.start_y_axis_at,
+            args.end_y_axis_at,
             args.figsize,
             args.legend_size,
             args.tick_size,
@@ -826,6 +835,7 @@ def main():
             args.multi_log_run_color,
             args.multi_log_mean_color,
             args.multi_log_std_color,
+            args.logx,
         )
         if saved:
             print(f"valplot: {saved}")
@@ -846,6 +856,7 @@ def main():
             args.point_size,
             args.line_width,
             args.start_y_axis_at,
+            args.end_y_axis_at,
             args.figsize,
             args.legend_size,
             args.tick_size,
@@ -860,6 +871,7 @@ def main():
             args.multi_log_run_color,
             args.multi_log_mean_color,
             args.multi_log_std_color,
+            args.logx,
         )
         if saved:
             print(f"lossplot: {saved}")
