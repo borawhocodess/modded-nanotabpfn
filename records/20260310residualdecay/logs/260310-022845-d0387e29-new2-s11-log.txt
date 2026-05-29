@@ -1,0 +1,976 @@
+import argparse
+import os
+import sys
+
+with open(sys.argv[0], "r") as f:
+    code = f.read()
+
+import platform
+import random
+import socket
+import subprocess
+import time
+import tomllib
+import uuid
+from dataclasses import dataclass, fields
+from datetime import datetime
+
+import h5py
+import numpy as np
+import openml
+import pandas as pd
+import schedulefree
+import torch
+import torch.nn.functional as F
+from sklearn.compose import ColumnTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.metrics import roc_auc_score
+from sklearn.model_selection import StratifiedKFold, train_test_split
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import FunctionTransformer, LabelEncoder, OrdinalEncoder
+from torch import nn
+from torch.utils.data import DataLoader
+
+
+# -----------------------------------------------------------------------------
+# config
+
+
+@dataclass
+class Config:
+    type: str = "classification"
+    experiments_dir: str = "workdir/experiments"
+    classification_dump: str = "workdir/dumps/dump-d256000b1r1000c20-8.h5"
+    # wget -c https://salihboraozturk.com/other/ufr/dump-d256000b1r1000c20-8.h5
+    seed: int = 11
+    batch_size: int = 1
+    lr: float = 0.001
+    steps: int = 64
+    epochs: int = 4000
+    a: int = 4
+    e: int = 256
+    h: int = 768
+    l: int = 6
+    o: int | None = None
+    eval_folds: int = 5
+    eval_subsample_samples: int | None = 1000
+    eval_subsample_features: int | None = 100
+    max_train_mins: float = 80
+    jackpot: float = 0.8068462330697953
+    residual_decay: float = 0.95  # exponential decay of residual stream per layer (1.0 = no decay)
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--name", default="")
+parser.add_argument("--lr", type=float, default=None)
+parser.add_argument("--seed", type=int, default=None)
+parser.add_argument("--jackpot", type=float, default=None)
+parser.add_argument("--residual_decay", type=float, default=None)
+args = parser.parse_args()
+
+c = Config()
+
+if args.lr is not None:
+    c.lr = args.lr
+if args.seed is not None:
+    c.seed = args.seed
+if args.jackpot is not None:
+    c.jackpot = args.jackpot
+if args.residual_decay is not None:
+    c.residual_decay = args.residual_decay
+
+random.seed(c.seed)
+np.random.seed(c.seed)
+torch.manual_seed(c.seed)
+torch.set_float32_matmul_precision('high')
+import torch._dynamo
+torch._dynamo.config.cache_size_limit = 128
+
+assert torch.cuda.is_available()
+
+device = "cuda"
+
+start_ts = datetime.now()
+ts = start_ts.strftime("%y%m%d-%H%M%S")
+uid = uuid.uuid4().hex[:8]
+e_name = args.name.strip()
+e_id = f"{ts}-{uid}-{e_name}" if e_name else f"{ts}-{uid}"
+e_root = os.path.join(c.experiments_dir, e_name) if e_name else c.experiments_dir
+e_dir = os.path.join(e_root, e_id)
+os.makedirs(e_dir, exist_ok=True)
+log_path = os.path.join(e_dir, f"{e_id}-log.txt")
+ckpt_path = os.path.join(e_dir, f"{e_id}-ckpt.pth")
+
+with open("pyproject.toml", "rb") as f:
+    version = tomllib.load(f)["project"]["version"]
+
+
+def print0(s, console=False):
+    with open(log_path, "a") as f:
+        if console:
+            print(s)
+        print(s, file=f)
+
+
+print0(code)
+print0("=" * 100)
+print0(f"start timestamp: {start_ts.strftime('%Y-%m-%d %H:%M:%S')}", console=True)
+print0(f"host: {socket.gethostname()}")
+print0(f"platform: {platform.platform()}")
+print0(f"python: {sys.version}")
+print0(f"torch: {torch.version.__version__}")
+print0(f"cuda: {torch.version.cuda}")
+print0(subprocess.run(["nvidia-smi"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True).stdout)
+print0("=" * 100)
+
+TABARENA_CLASSIFICATION_TASKS = [
+    363613,  # ( 32769,   10) Amazon_employee_access
+    363614,  # (   898,   39) anneal
+    363616,  # ( 76000,  171) APSFailure
+    363618,  # ( 45211,   14) bank-marketing
+    363619,  # ( 10000,   11) Bank_Customer_Churn
+    363620,  # (  3751, 1777) Bioresponse
+    363621,  # (   748,    5) blood-transfusion-service-center
+    363623,  # (  5000,   20) churn
+    363624,  # (  9822,   86) coil2000_insurance_policies
+    363626,  # (  1000,   21) credit-g
+    363627,  # ( 30000,   24) credit_card_clients_default
+    363628,  # (129880,   22) customer_satisfaction_in_airline
+    363629,  # (   768,    9) diabetes
+    363630,  # ( 71518,   48) Diabetes130US
+    363632,  # ( 10999,   11) E-CommereShippingData
+    363671,  # (  1500,    7) Fitness_Club
+    363673,  # (150000,   11) GiveMeSomeCredit
+    363674,  # (  2400,   31) hazelnut-spread-contaminant-detection
+    363676,  # ( 10459,   24) heloc
+    363677,  # (  3845, 1618) hiva_agnostic
+    363679,  # ( 19158,   13) HR_Analytics_Job_Change_of_Data_Scientists
+    363681,  # ( 12684,   25) in_vehicle_coupon_recommendation
+    363682,  # (  1723,   14) Is-this-a-good-customer
+    363683,  # ( 50000,  213) kddcup09_appetency
+    363684,  # (  2240,   26) Marketing_Campaign
+    363685,  # (  1014,    7) maternal_health_risk
+    363689,  # (  7491,   87) NATICUSdroid
+    363691,  # ( 12330,   18) online_shoppers_intention
+    363694,  # (  5910,   65) polish_companies_bankruptcy
+    363696,  # (  1054,   42) qsar-biodeg
+    363699,  # ( 78053,   12) SDSS17
+    363700,  # (  2584,   16) seismic-bumps
+    363702,  # (  3190,   61) splice
+    363704,  # (  4424,   37) students_dropout_and_academic_success
+    363706,  # (  6819,   95) taiwanese_bankruptcy_prediction
+    363707,  # (  1353,   10) website_phishing
+    363711,  # (  1699,  112) MIC
+    363712,  # ( 10885,   22) jm1
+]
+
+
+# -----------------------------------------------------------------------------
+# muon
+
+
+def zeropower_via_svd(G, steps=None):
+    U, S, V = G.svd()
+    return U @ V.T
+
+@torch.compile
+def zeropower_via_newtonschulz5(G, steps=10, eps=1e-7):
+    assert len(G.shape) == 2
+    a, b, c = (3.4445, -4.7750,  2.0315)
+    X = G.bfloat16()
+    X /= (X.norm() + eps)
+    if G.size(0) > G.size(1):
+        X = X.T
+    for _ in range(steps):
+        A = X @ X.T
+        B = A @ X
+        X = a * X + b * B + c * A @ B
+    if G.size(0) > G.size(1):
+        X = X.T
+    return X.to(G.dtype)
+
+@torch.compile
+def zeropower_via_newtonschulz5_batched(G, steps=10, eps=1e-7):
+    a, b, c = (3.4445, -4.7750,  2.0315)
+    X = G.bfloat16()
+    X /= (X.norm(dim=(1, 2), keepdim=True) + eps)
+    if X.size(1) > X.size(2):
+        X = X.transpose(1, 2)
+    for _ in range(steps):
+        A = X @ X.transpose(1, 2)
+        B = A @ X
+        X = a * X + b * B + c * A @ B
+    if G.size(1) > G.size(2):
+        X = X.transpose(1, 2)
+    return X.to(G.dtype)
+
+zeropower_backends = dict(svd=zeropower_via_svd, newtonschulz5=zeropower_via_newtonschulz5)
+
+class Muon(torch.optim.Optimizer):
+    """
+    code adapted from: https://github.com/KellerJordan/modded-nanogpt/commit/b356a1f
+    """
+    def __init__(self, params, lr=3e-4, momentum=0.95, nesterov=True, backend='newtonschulz5', backend_steps=5):
+        defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, backend=backend, backend_steps=backend_steps)
+        super().__init__(params, defaults)
+
+    def step(self):
+        for group in self.param_groups:
+            lr = group['lr']
+            momentum = group['momentum']
+            zeropower_backend = zeropower_backends[group['backend']]
+            for p in group['params']:
+                g = p.grad
+                if g is None:
+                    continue
+                state = self.state[p]
+                if 'momentum_buffer' not in state:
+                    state['momentum_buffer'] = torch.zeros_like(g)
+                buf = state['momentum_buffer']
+                buf.mul_(momentum).add_(g)
+                if group['nesterov']:
+                    g = g.add(buf, alpha=momentum)
+                if g.size(0) == 3 * g.size(1):
+                    g_batched = g.view(3, g.size(1), g.size(1))
+                    g_new = zeropower_via_newtonschulz5_batched(g_batched, steps=group['backend_steps'])
+                    g = g_new.view(3 * g.size(1), g.size(1))
+                    scale = g.size(1)**0.5
+                else:
+                    g = zeropower_backend(g, steps=group['backend_steps'])
+                    scale = max(g.size(0), g.size(1))**0.5
+                p.data.add_(g, alpha=-lr * scale)
+
+
+# -----------------------------------------------------------------------------
+# model
+
+
+class NanoTabPFNModel(nn.Module):
+    def __init__(self, l, a, e, h, o, residual_decay=1.0):
+        """
+        l : num layers
+        a : num attention heads
+        e : embedding size
+        h : mlp hidden size
+        o : num outputs
+        residual_decay : exponential decay of residual stream per layer (1.0 = no decay)
+        """
+        super().__init__()
+        self.l = l
+        self.a = a
+        self.e = e
+        self.h = h
+        self.o = o
+        self.feature_encoder = FeatureEncoder(e)
+        self.target_encoder = TargetEncoder(e)
+        self.transformer_encoder = TransformerEncoderStack(l, a, e, h, residual_decay=residual_decay)
+        self.decoder = Decoder(e, h, o)
+
+        self.register_buffer("borders", None, persistent=True)
+
+    def forward(self, *args, **kwargs):
+        if len(args) == 3:
+            x = args[0]
+            if args[2] is not None:
+                x = torch.cat((x, args[2]), dim=1)
+            return self._forward((x, args[1]), sep=args[0].shape[1], **kwargs)
+        elif len(args) == 1 and isinstance(args[0], tuple):
+            return self._forward(*args, **kwargs)
+
+    def _forward(self, src, sep):
+        x_src, y_src = src
+        if len(y_src.shape) < len(x_src.shape):
+            y_src = y_src.unsqueeze(-1)
+        x_src = self.feature_encoder(x_src, sep)
+        num_rows = x_src.shape[1]
+        y_src = self.target_encoder(y_src, num_rows)
+        src = torch.cat([x_src, y_src], 2)
+        output = self.transformer_encoder(src, sep)
+        output = output[:, sep:, -1, :]
+        output = self.decoder(output)
+        return output
+
+
+class FeatureEncoder(nn.Module):
+    def __init__(self, e):
+        super().__init__()
+        self.linear_layer = nn.Linear(1, e)
+
+    def forward(self, x, sep):
+        x = x.unsqueeze(-1)
+        mean = x[:, :sep].mean(dim=1, keepdim=True)
+        std = x[:, :sep].std(dim=1, keepdim=True) + 1e-8
+        x = (x - mean) / std
+        x = torch.clip(x, min=-100, max=100)
+        return self.linear_layer(x)
+
+
+class TargetEncoder(nn.Module):
+    def __init__(self, e):
+        super().__init__()
+        self.linear_layer = nn.Linear(1, e)
+
+    def forward(self, y_train, num_rows):
+        mean = y_train.mean(dim=1, keepdim=True)
+        padding = mean.repeat(1, num_rows - y_train.shape[1], 1)
+        y = torch.cat([y_train, padding], dim=1)
+        y = y.unsqueeze(-1)
+        return self.linear_layer(y)
+
+
+class TransformerEncoderStack(nn.Module):
+    def __init__(self, l, a, e, h, residual_decay=1.0):
+        super().__init__()
+        self.residual_decay = residual_decay
+        self.transformer_blocks = nn.ModuleList()
+        for _ in range(l):
+            self.transformer_blocks.append(TransformerEncoderLayer(a, e, h))
+
+    def forward(self, x, sep):
+        for i, block in enumerate(self.transformer_blocks):
+            x = x * (self.residual_decay ** i)
+            x = block(x, sep=sep)
+        return x
+
+
+class TransformerEncoderLayer(nn.Module):
+    def __init__(self, a, e, h, eps=1e-5):
+        super().__init__()
+        self.num_heads = a
+        self.head_dim = e // a
+        assert e % a == 0, "Embedding size must be divisible by heads"
+
+        self.qkv_datapoints = nn.Linear(e, 3 * e)
+        self.qkv_features = nn.Linear(e, 3 * e)
+
+        self.linear1 = nn.Linear(e, h)
+        self.linear2 = nn.Linear(h, e)
+
+        self.norm1 = nn.LayerNorm(e, eps=eps)
+        self.norm2 = nn.LayerNorm(e, eps=eps)
+        self.norm3 = nn.LayerNorm(e, eps=eps)
+
+    @torch.compile(dynamic=True)
+    def forward(self, src, sep):
+        b, r, c, e = src.shape
+
+        x = src.reshape(b * r, c, e)
+        res = x
+        x = self.norm1(x)
+
+        qkv = self.qkv_features(x)
+        qkv = qkv.reshape(b * r, c, 3, self.num_heads, self.head_dim)
+        qkv = qkv.permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+
+        x = F.scaled_dot_product_attention(q, k, v)
+        x = x.transpose(1, 2).reshape(b * r, c, e)
+
+        src = res + x
+        src = src.reshape(b, r, c, e)
+
+        x = src.transpose(1, 2).reshape(b * c, r, e)
+        res = x
+        x = self.norm2(x)
+
+        qkv = self.qkv_datapoints(x)
+        qkv = qkv.reshape(b * c, r, 3, self.num_heads, self.head_dim)
+        qkv = qkv.permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+
+        q_left, q_right = q.split([sep, r - sep], dim=2)
+
+        k_train = k[:, :, :sep, :]
+        v_train = v[:, :, :sep, :]
+
+        x_left = F.scaled_dot_product_attention(q_left, k_train, v_train)
+        x_right = F.scaled_dot_product_attention(q_right, k_train, v_train)
+
+        x = torch.cat([x_left, x_right], dim=2)
+        x = x.transpose(1, 2).reshape(b * c, r, e)
+
+        src = res + x
+        src = src.reshape(b, c, r, e).transpose(2, 1)
+
+        x = self.norm3(src)
+        x = self.linear2(F.gelu(self.linear1(x)))
+        src = src + x
+
+        return src
+
+
+class Decoder(nn.Module):
+    def __init__(self, e, h, o):
+        super().__init__()
+        self.linear1 = nn.Linear(e, h)
+        self.linear2 = nn.Linear(h, o)
+
+    def forward(self, x):
+        return self.linear2(F.gelu(self.linear1(x)))
+
+
+# -----------------------------------------------------------------------------
+# priors
+
+
+class PriorDumpDataLoader(DataLoader):
+    def __init__(self, filename, num_steps, batch_size, device):
+        self.filename = filename
+        self.num_steps = num_steps
+        self.batch_size = batch_size
+        with h5py.File(self.filename, "r") as f:
+            self.max_num_classes = f["max_num_classes"][0] if "max_num_classes" in f else None
+            self.problem_type = f["problem_type"][()].decode("utf-8")
+            self.datasets = f["X"].shape[0]
+            self.max_rows = f["X"].shape[1]
+            self.max_cols = f["X"].shape[2]
+        self.device = device
+        self.pointer = 0
+
+    def __iter__(self):
+        with h5py.File(self.filename, "r") as f:
+            for _ in range(self.num_steps):
+                end = self.pointer + self.batch_size
+
+                num_features = f["num_features"][self.pointer : end].max()
+                x = torch.from_numpy(f["X"][self.pointer : end, :, :num_features])
+                y = torch.from_numpy(f["y"][self.pointer : end])
+                sep = f["single_eval_pos"][self.pointer : end]
+
+                self.pointer += self.batch_size
+                if self.pointer >= self.datasets:
+                    print("pointer >= datasets, will reset!")
+                    self.pointer = 0
+
+                yield dict(
+                    x=x.to(self.device),
+                    y=y.to(self.device),
+                    target_y=y.to(self.device),
+                    sep=sep[0].item(),
+                )
+
+    def __len__(self):
+        return self.num_steps
+
+
+# -----------------------------------------------------------------------------
+# interface
+
+
+def init_model_from_ckpt_file(file_path):
+    ckpt = torch.load(file_path, map_location="cpu")
+    model = NanoTabPFNModel(
+        l=ckpt["arch"]["l"],
+        a=ckpt["arch"]["a"],
+        e=ckpt["arch"]["e"],
+        h=ckpt["arch"]["h"],
+        o=ckpt["arch"]["o"],
+    )
+    if "borders" in ckpt["model"]:
+        model.borders = ckpt["model"]["borders"]
+    model.load_state_dict(ckpt["model"])
+    return model
+
+
+def to_pandas(x):
+    return pd.DataFrame(x) if not isinstance(x, pd.DataFrame) else x
+
+
+def to_numeric(x):
+    return x.apply(pd.to_numeric, errors="coerce").to_numpy()
+
+
+def get_feature_preprocessor(X):
+    X = pd.DataFrame(X)
+    num_mask = []
+    cat_mask = []
+    for col in X:
+        unique_non_nan_entries = X[col].dropna().unique()
+        if len(unique_non_nan_entries) <= 1:
+            num_mask.append(False)
+            cat_mask.append(False)
+            continue
+        non_nan_entries = X[col].notna().sum()
+        numeric_entries = pd.to_numeric(X[col], errors="coerce").notna().sum()
+        num_mask.append(non_nan_entries == numeric_entries)
+        cat_mask.append(non_nan_entries != numeric_entries)
+
+    num_transformer = Pipeline(
+        [
+            ("to_pandas", FunctionTransformer(to_pandas)),
+            ("to_numeric", FunctionTransformer(to_numeric)),
+            ("imputer", SimpleImputer(strategy="mean")),
+        ],
+    )
+    cat_transformer = Pipeline(
+        [
+            ("encoder", OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=np.nan)),
+            ("imputer", SimpleImputer(strategy="most_frequent")),
+        ],
+    )
+
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ("num", num_transformer, np.array(num_mask)),
+            ("cat", cat_transformer, np.array(cat_mask)),
+        ],
+    )
+    return preprocessor
+
+
+class NanoTabPFNClassifier:
+    def __init__(self, model=None):
+        device = "cuda"
+        if model is None:
+            raise ValueError("model is None")
+        if isinstance(model, str):
+            model = init_model_from_ckpt_file(model)
+        self.model = model.to(device)
+        self.device = device
+
+    def fit(self, X_train, y_train):
+        self.feature_preprocessor = get_feature_preprocessor(X_train)
+        self.X_train = self.feature_preprocessor.fit_transform(X_train)
+        self.y_train = y_train
+        self.num_classes = max(set(y_train)) + 1
+
+    def predict(self, X_test):
+        predicted_probabilities = self.predict_proba(X_test)
+        return predicted_probabilities.argmax(axis=1)
+
+    def predict_proba(self, X_test):
+        x = np.concatenate((self.X_train, self.feature_preprocessor.transform(X_test)))
+        y = self.y_train
+        with torch.no_grad():
+            x = torch.from_numpy(x).unsqueeze(0).to(torch.float).to(self.device)
+            y = torch.from_numpy(y).unsqueeze(0).to(torch.float).to(self.device)
+
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                out = self.model((x, y), sep=len(self.X_train)).squeeze(0)
+                out = out[:, : self.num_classes]
+                probabilities = F.softmax(out, dim=1)
+
+            return probabilities.to("cpu").numpy()
+
+
+# -----------------------------------------------------------------------------
+# main
+
+
+prior = PriorDumpDataLoader(
+    filename=c.classification_dump,
+    num_steps=c.steps,
+    batch_size=c.batch_size,
+    device=device,
+)
+c.o = prior.max_num_classes
+
+model = NanoTabPFNModel(l=c.l, a=c.a, e=c.e, h=c.h, o=c.o, residual_decay=c.residual_decay).to(device)
+
+muon_params = []
+adam_params = []
+for name, p in model.named_parameters():
+    if p.ndim != 2:
+        adam_params.append(p)
+    elif "transformer_encoder" in name:
+        muon_params.append(p)
+    else:
+        adam_params.append(p)
+
+optimizer_muon = Muon(muon_params, lr=0.1*c.lr, momentum=0.95)
+optimizer_adam = schedulefree.AdamWScheduleFree(adam_params, lr=c.lr, weight_decay=0.0, warmup_steps=1000)
+
+optimizers = [optimizer_muon, optimizer_adam]
+
+criterion = nn.CrossEntropyLoss()
+
+t_t = 0.0
+
+
+for epoch in range(1, c.epochs + 1):
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    model.train()
+    optimizer_adam.train()
+    total_loss = 0.0
+    num_valid = 0
+    for i, full_data in enumerate(prior):
+        sep = full_data["sep"]
+        x = full_data["x"]
+        y = full_data["y"][:, :sep]
+        targets = full_data["target_y"][:, sep:]
+
+        if torch.isnan(x).any() or torch.isnan(y).any():
+            continue
+        num_valid += 1
+
+        for opt in optimizers:
+            opt.zero_grad(set_to_none=True)
+
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            output = model((x, y), sep=sep)
+            output = output.reshape(-1, output.shape[-1])
+            targets = targets.reshape((-1,)).to(torch.long)
+            loss = criterion(output, targets)
+
+        loss.backward()
+
+        total_loss += loss.detach()
+
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        for opt in optimizers:
+            opt.step()
+
+    torch.cuda.synchronize()
+    e_t = time.perf_counter() - t0
+    t_t += e_t
+    mu_e_t = t_t / epoch
+
+    mean_loss = (total_loss / num_valid).cpu().item()
+
+    if t_t > c.max_train_mins * 60:
+        print0("exceeded max train time", console=True)
+        sys.exit(0)
+
+    model.eval()
+    optimizer_adam.eval()
+
+    clf = NanoTabPFNClassifier(model)
+    aucs = []
+
+    for task_id in TABARENA_CLASSIFICATION_TASKS:
+        task = openml.tasks.get_task(task_id, download_splits=False)
+
+        dataset = task.get_dataset(download_data=False)
+        X, y, _, _ = dataset.get_data(target=task.target_name, dataset_format="dataframe")
+
+        len_features = X.shape[1]
+        if c.eval_subsample_features is not None and len_features > c.eval_subsample_features:
+            rng = np.random.default_rng(c.seed)
+            feature_choices = rng.choice(len_features, size=c.eval_subsample_features, replace=False)
+            X = X.iloc[:, feature_choices]
+
+        if c.eval_subsample_samples is not None and len(X) > c.eval_subsample_samples:
+            _, X, _, y = train_test_split(X, y, test_size=c.eval_subsample_samples, stratify=y, random_state=c.seed)
+            X = X.reset_index(drop=True)
+            y = y.reset_index(drop=True)
+
+        cv = StratifiedKFold(n_splits=c.eval_folds, shuffle=True, random_state=c.seed)
+
+        targets = []
+        probabilities = []
+
+        for _, (train_indices, test_indices) in enumerate(cv.split(X, y)):
+            X_train = X.iloc[train_indices].to_numpy()
+            y_train = y.iloc[train_indices].to_numpy()
+            X_test = X.iloc[test_indices].to_numpy()
+            y_test = y.iloc[test_indices].to_numpy()
+
+            label_encoder = LabelEncoder()
+            y_train = label_encoder.fit_transform(y_train)
+            y_test = label_encoder.transform(y_test)
+            targets.append(y_test)
+
+            clf.fit(X_train, y_train)
+            y_proba = clf.predict_proba(X_test)
+            if y_proba.shape[1] == 2:
+                y_proba = y_proba[:, 1]
+            probabilities.append(y_proba)
+
+        y_true = np.concatenate(targets, axis=0)
+        y_proba = np.concatenate(probabilities, axis=0) if len(probabilities) > 0 else None
+
+        auc = (
+            roc_auc_score(y_true, y_proba, multi_class="ovr")
+            if getattr(y_proba, "ndim", 1) > 1
+            else roc_auc_score(y_true, y_proba)
+        )
+        aucs.append(auc)
+
+    avg_auc = (sum(aucs) / len(aucs)) if len(aucs) > 0 else float("nan")
+
+    print0(
+        f"e:{epoch}/{c.epochs} μ_l:{mean_loss:.2f} "
+        f"e_t:{e_t:.2f}s μ_e_t:{mu_e_t:.2f}s t_t:{t_t:.2f}s "
+        f"avg_roc_auc:{avg_auc}",
+        console=True,
+    )
+
+    if avg_auc >= c.jackpot:
+        ckpt = {
+            "version": version,
+            "timestamp": ts,
+            "uid": uid,
+            "type": c.type,
+            "arch": {
+                "e": model.e,
+                "a": model.a,
+                "h": model.h,
+                "l": model.l,
+                "o": model.o,
+            },
+            "model": model.state_dict(),
+        }
+        torch.save(ckpt, ckpt_path)
+        print0("=" * 100)
+        print0(f"datasets seen: {epoch * c.batch_size * c.steps}", console=True)
+        print0(f"record time in mins: {t_t / 60:.2f}", console=True)
+        break
+
+print0("=" * 100)
+print0("config:")
+for f in fields(Config):
+    print0(f"  {f.name}: {getattr(c, f.name)}")
+print0("=" * 100)
+total_params = sum(p.numel() for p in model.parameters())
+trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+print0(f"params: {total_params:,} (trainable: {trainable_params:,})")
+print0("=" * 100)
+print0(f"peak memory allocated: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB", console=True)
+print0(f"peak memory reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB", console=True)
+print0("=" * 100)
+end_ts = datetime.now()
+print0(f"end timestamp: {end_ts.strftime('%Y-%m-%d %H:%M:%S')}", console=True)
+print0(f"script runtime: {(end_ts - start_ts).total_seconds() / 60:.2f} mins")
+print0(f"experiment done: {e_id}", console=True)
+
+====================================================================================================
+start timestamp: 2026-03-10 02:28:45
+host: dlc2gpu02
+platform: Linux-6.8.0-94-generic-x86_64-with-glibc2.35
+python: 3.13.12 (main, Mar  3 2026, 15:01:51) [Clang 21.1.4 ]
+torch: 2.9.1+cu128
+cuda: 12.8
+Tue Mar 10 02:28:45 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 590.48.01              Driver Version: 590.48.01      CUDA Version: 13.1     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA L40S                    On  |   00000000:01:00.0 Off |                    0 |
+| N/A   45C    P8             38W /  350W |       3MiB /  46068MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+
+====================================================================================================
+e:1/4000 μ_l:1.30 e_t:91.32s μ_e_t:91.32s t_t:91.32s avg_roc_auc:0.5023018843438177
+e:2/4000 μ_l:1.14 e_t:16.10s μ_e_t:53.71s t_t:107.42s avg_roc_auc:0.4917850418766233
+e:3/4000 μ_l:1.10 e_t:1.18s μ_e_t:36.20s t_t:108.61s avg_roc_auc:0.5433481128097778
+e:4/4000 μ_l:0.95 e_t:1.19s μ_e_t:27.45s t_t:109.79s avg_roc_auc:0.48077015051851524
+e:5/4000 μ_l:1.02 e_t:1.18s μ_e_t:22.20s t_t:110.98s avg_roc_auc:0.5670888754551796
+e:6/4000 μ_l:0.92 e_t:2.10s μ_e_t:18.85s t_t:113.08s avg_roc_auc:0.5877605763090225
+e:7/4000 μ_l:1.09 e_t:1.19s μ_e_t:16.32s t_t:114.26s avg_roc_auc:0.601648574808922
+e:8/4000 μ_l:1.00 e_t:1.17s μ_e_t:14.43s t_t:115.44s avg_roc_auc:0.5967614843944803
+e:9/4000 μ_l:0.90 e_t:1.19s μ_e_t:12.96s t_t:116.63s avg_roc_auc:0.6223456468831788
+e:10/4000 μ_l:1.05 e_t:1.16s μ_e_t:11.78s t_t:117.80s avg_roc_auc:0.6834363346424386
+e:11/4000 μ_l:0.95 e_t:2.09s μ_e_t:10.90s t_t:119.88s avg_roc_auc:0.6883425721375067
+e:12/4000 μ_l:1.08 e_t:1.16s μ_e_t:10.09s t_t:121.04s avg_roc_auc:0.7161599374158968
+e:13/4000 μ_l:0.94 e_t:2.29s μ_e_t:9.49s t_t:123.33s avg_roc_auc:0.72360690789979
+e:14/4000 μ_l:0.98 e_t:1.15s μ_e_t:8.89s t_t:124.48s avg_roc_auc:0.7205250753932165
+e:15/4000 μ_l:0.88 e_t:2.23s μ_e_t:8.45s t_t:126.71s avg_roc_auc:0.7357658557678576
+e:16/4000 μ_l:0.88 e_t:2.39s μ_e_t:8.07s t_t:129.11s avg_roc_auc:0.743866896031791
+e:17/4000 μ_l:1.02 e_t:1.17s μ_e_t:7.66s t_t:130.28s avg_roc_auc:0.726393442371406
+e:18/4000 μ_l:0.85 e_t:1.17s μ_e_t:7.30s t_t:131.45s avg_roc_auc:0.7415396417888218
+e:19/4000 μ_l:0.97 e_t:1.70s μ_e_t:7.01s t_t:133.15s avg_roc_auc:0.7488453129151201
+e:20/4000 μ_l:0.86 e_t:1.15s μ_e_t:6.72s t_t:134.30s avg_roc_auc:0.7484698406701815
+e:21/4000 μ_l:0.91 e_t:1.16s μ_e_t:6.45s t_t:135.46s avg_roc_auc:0.7430261975930641
+e:22/4000 μ_l:0.93 e_t:2.56s μ_e_t:6.27s t_t:138.02s avg_roc_auc:0.7538396528826024
+e:23/4000 μ_l:0.82 e_t:1.17s μ_e_t:6.05s t_t:139.19s avg_roc_auc:0.7522309307426486
+e:24/4000 μ_l:0.95 e_t:1.18s μ_e_t:5.85s t_t:140.37s avg_roc_auc:0.7524516759871672
+e:25/4000 μ_l:1.00 e_t:1.18s μ_e_t:5.66s t_t:141.55s avg_roc_auc:0.7571794223347099
+e:26/4000 μ_l:0.95 e_t:1.17s μ_e_t:5.49s t_t:142.72s avg_roc_auc:0.7454735782930331
+e:27/4000 μ_l:0.90 e_t:1.16s μ_e_t:5.33s t_t:143.88s avg_roc_auc:0.7567664727826039
+e:28/4000 μ_l:0.90 e_t:2.32s μ_e_t:5.22s t_t:146.20s avg_roc_auc:0.7632520225451954
+e:29/4000 μ_l:0.69 e_t:1.18s μ_e_t:5.08s t_t:147.37s avg_roc_auc:0.7451179854353299
+e:30/4000 μ_l:0.95 e_t:1.27s μ_e_t:4.95s t_t:148.64s avg_roc_auc:0.7604010575875926
+e:31/4000 μ_l:0.94 e_t:1.19s μ_e_t:4.83s t_t:149.83s avg_roc_auc:0.7625146502188805
+e:32/4000 μ_l:0.91 e_t:2.96s μ_e_t:4.77s t_t:152.79s avg_roc_auc:0.7515173685717578
+e:33/4000 μ_l:0.80 e_t:2.37s μ_e_t:4.70s t_t:155.15s avg_roc_auc:0.7719679044019262
+e:34/4000 μ_l:0.91 e_t:1.18s μ_e_t:4.60s t_t:156.33s avg_roc_auc:0.7672127773431294
+e:35/4000 μ_l:0.93 e_t:1.15s μ_e_t:4.50s t_t:157.48s avg_roc_auc:0.7650110424792159
+e:36/4000 μ_l:0.65 e_t:2.81s μ_e_t:4.45s t_t:160.29s avg_roc_auc:0.7636382205091844
+e:37/4000 μ_l:0.71 e_t:1.16s μ_e_t:4.36s t_t:161.45s avg_roc_auc:0.7674951172917832
+e:38/4000 μ_l:0.91 e_t:1.15s μ_e_t:4.28s t_t:162.60s avg_roc_auc:0.7651006963934187
+e:39/4000 μ_l:0.91 e_t:1.17s μ_e_t:4.20s t_t:163.77s avg_roc_auc:0.7570181499344092
+e:40/4000 μ_l:0.82 e_t:1.15s μ_e_t:4.12s t_t:164.93s avg_roc_auc:0.769019702078742
+e:41/4000 μ_l:0.86 e_t:1.16s μ_e_t:4.05s t_t:166.09s avg_roc_auc:0.7667950582061828
+e:42/4000 μ_l:0.83 e_t:1.15s μ_e_t:3.98s t_t:167.23s avg_roc_auc:0.7700697973186544
+e:43/4000 μ_l:0.86 e_t:1.16s μ_e_t:3.92s t_t:168.39s avg_roc_auc:0.7737195509470028
+e:44/4000 μ_l:0.82 e_t:1.21s μ_e_t:3.85s t_t:169.60s avg_roc_auc:0.7678282463444653
+e:45/4000 μ_l:0.84 e_t:1.18s μ_e_t:3.80s t_t:170.78s avg_roc_auc:0.7712138516224921
+e:46/4000 μ_l:0.86 e_t:1.18s μ_e_t:3.74s t_t:171.96s avg_roc_auc:0.7807849733181275
+e:47/4000 μ_l:0.97 e_t:1.18s μ_e_t:3.68s t_t:173.14s avg_roc_auc:0.7756985108560029
+e:48/4000 μ_l:0.87 e_t:1.19s μ_e_t:3.63s t_t:174.33s avg_roc_auc:0.7767125954253725
+e:49/4000 μ_l:0.94 e_t:1.19s μ_e_t:3.58s t_t:175.52s avg_roc_auc:0.7820177770904445
+e:50/4000 μ_l:0.89 e_t:1.17s μ_e_t:3.53s t_t:176.69s avg_roc_auc:0.7811848248305244
+e:51/4000 μ_l:0.80 e_t:2.15s μ_e_t:3.51s t_t:178.83s avg_roc_auc:0.7834900766881353
+e:52/4000 μ_l:0.81 e_t:2.20s μ_e_t:3.48s t_t:181.04s avg_roc_auc:0.7818435714350964
+e:53/4000 μ_l:0.70 e_t:2.23s μ_e_t:3.46s t_t:183.26s avg_roc_auc:0.7848974612879716
+e:54/4000 μ_l:0.70 e_t:2.36s μ_e_t:3.44s t_t:185.62s avg_roc_auc:0.7835881329465567
+e:55/4000 μ_l:0.88 e_t:1.17s μ_e_t:3.40s t_t:186.79s avg_roc_auc:0.7800117594749378
+e:56/4000 μ_l:0.88 e_t:7.19s μ_e_t:3.46s t_t:193.98s avg_roc_auc:0.7852169295279602
+e:57/4000 μ_l:0.88 e_t:1.16s μ_e_t:3.42s t_t:195.14s avg_roc_auc:0.7730338294913129
+e:58/4000 μ_l:0.84 e_t:2.13s μ_e_t:3.40s t_t:197.27s avg_roc_auc:0.7818011914540172
+e:59/4000 μ_l:0.90 e_t:2.56s μ_e_t:3.39s t_t:199.83s avg_roc_auc:0.784819886428035
+e:60/4000 μ_l:0.83 e_t:1.16s μ_e_t:3.35s t_t:200.99s avg_roc_auc:0.7847131470694467
+e:61/4000 μ_l:0.83 e_t:1.87s μ_e_t:3.33s t_t:202.86s avg_roc_auc:0.7863736288981723
+e:62/4000 μ_l:0.93 e_t:1.18s μ_e_t:3.29s t_t:204.04s avg_roc_auc:0.7825502111927625
+e:63/4000 μ_l:0.72 e_t:2.62s μ_e_t:3.28s t_t:206.66s avg_roc_auc:0.7855817452984319
+e:64/4000 μ_l:0.84 e_t:1.15s μ_e_t:3.25s t_t:207.82s avg_roc_auc:0.788222492180968
+e:65/4000 μ_l:0.75 e_t:1.18s μ_e_t:3.22s t_t:208.99s avg_roc_auc:0.7923603070625895
+e:66/4000 μ_l:0.77 e_t:1.15s μ_e_t:3.18s t_t:210.15s avg_roc_auc:0.7878280625505978
+e:67/4000 μ_l:0.71 e_t:1.78s μ_e_t:3.16s t_t:211.93s avg_roc_auc:0.7863260265137976
+e:68/4000 μ_l:0.81 e_t:1.17s μ_e_t:3.13s t_t:213.10s avg_roc_auc:0.7922020621659223
+e:69/4000 μ_l:0.98 e_t:1.18s μ_e_t:3.11s t_t:214.28s avg_roc_auc:0.7875053416486528
+e:70/4000 μ_l:0.86 e_t:2.20s μ_e_t:3.09s t_t:216.48s avg_roc_auc:0.793953739503514
+e:71/4000 μ_l:0.81 e_t:1.18s μ_e_t:3.07s t_t:217.66s avg_roc_auc:0.7944009477511851
+e:72/4000 μ_l:0.79 e_t:1.18s μ_e_t:3.04s t_t:218.84s avg_roc_auc:0.7951323115673113
+e:73/4000 μ_l:0.88 e_t:1.21s μ_e_t:3.01s t_t:220.05s avg_roc_auc:0.7877715129178897
+e:74/4000 μ_l:0.72 e_t:1.19s μ_e_t:2.99s t_t:221.24s avg_roc_auc:0.7953432032367196
+e:75/4000 μ_l:0.69 e_t:1.70s μ_e_t:2.97s t_t:222.94s avg_roc_auc:0.795685879957705
+e:76/4000 μ_l:0.96 e_t:1.15s μ_e_t:2.95s t_t:224.09s avg_roc_auc:0.7827925512980907
+e:77/4000 μ_l:0.78 e_t:2.14s μ_e_t:2.94s t_t:226.23s avg_roc_auc:0.7897253188533646
+e:78/4000 μ_l:0.78 e_t:2.24s μ_e_t:2.93s t_t:228.47s avg_roc_auc:0.7938313109168414
+e:79/4000 μ_l:0.88 e_t:1.18s μ_e_t:2.91s t_t:229.64s avg_roc_auc:0.7848537301883888
+e:80/4000 μ_l:0.78 e_t:1.15s μ_e_t:2.88s t_t:230.80s avg_roc_auc:0.7864241933562537
+e:81/4000 μ_l:0.79 e_t:2.57s μ_e_t:2.88s t_t:233.36s avg_roc_auc:0.7928517971411658
+e:82/4000 μ_l:0.88 e_t:1.15s μ_e_t:2.86s t_t:234.52s avg_roc_auc:0.7979317245393995
+e:83/4000 μ_l:0.85 e_t:1.18s μ_e_t:2.84s t_t:235.70s avg_roc_auc:0.7954348246124381
+e:84/4000 μ_l:0.69 e_t:2.27s μ_e_t:2.83s t_t:237.96s avg_roc_auc:0.7921417094465685
+e:85/4000 μ_l:0.82 e_t:1.17s μ_e_t:2.81s t_t:239.13s avg_roc_auc:0.7959558900866626
+e:86/4000 μ_l:0.79 e_t:1.16s μ_e_t:2.79s t_t:240.29s avg_roc_auc:0.7927738316302496
+e:87/4000 μ_l:0.95 e_t:1.15s μ_e_t:2.78s t_t:241.44s avg_roc_auc:0.7828922806250374
+e:88/4000 μ_l:0.86 e_t:1.71s μ_e_t:2.76s t_t:243.15s avg_roc_auc:0.7890413741965618
+e:89/4000 μ_l:0.80 e_t:1.16s μ_e_t:2.75s t_t:244.31s avg_roc_auc:0.7922754373674578
+e:90/4000 μ_l:0.87 e_t:2.15s μ_e_t:2.74s t_t:246.46s avg_roc_auc:0.7936987952740793
+e:91/4000 μ_l:0.86 e_t:1.17s μ_e_t:2.72s t_t:247.63s avg_roc_auc:0.7941405347278415
+e:92/4000 μ_l:0.88 e_t:1.86s μ_e_t:2.71s t_t:249.49s avg_roc_auc:0.7913423965005176
+e:93/4000 μ_l:0.58 e_t:2.26s μ_e_t:2.71s t_t:251.75s avg_roc_auc:0.8003381413626968
+e:94/4000 μ_l:0.81 e_t:2.51s μ_e_t:2.70s t_t:254.27s avg_roc_auc:0.8023784400427671
+e:95/4000 μ_l:0.79 e_t:1.18s μ_e_t:2.69s t_t:255.44s avg_roc_auc:0.7993670795296349
+e:96/4000 μ_l:0.91 e_t:1.16s μ_e_t:2.67s t_t:256.60s avg_roc_auc:0.791225082253864
+e:97/4000 μ_l:0.86 e_t:2.53s μ_e_t:2.67s t_t:259.13s avg_roc_auc:0.7888089356982432
+e:98/4000 μ_l:0.95 e_t:1.72s μ_e_t:2.66s t_t:260.85s avg_roc_auc:0.7937642126480136
+e:99/4000 μ_l:0.90 e_t:1.16s μ_e_t:2.65s t_t:262.02s avg_roc_auc:0.7932031002525733
+e:100/4000 μ_l:0.84 e_t:1.16s μ_e_t:2.63s t_t:263.17s avg_roc_auc:0.7886458023930768
+e:101/4000 μ_l:0.89 e_t:1.18s μ_e_t:2.62s t_t:264.35s avg_roc_auc:0.7924649031255505
+e:102/4000 μ_l:0.82 e_t:1.17s μ_e_t:2.60s t_t:265.53s avg_roc_auc:0.789948166676533
+e:103/4000 μ_l:0.83 e_t:1.16s μ_e_t:2.59s t_t:266.68s avg_roc_auc:0.7897178787391242
+e:104/4000 μ_l:0.75 e_t:1.17s μ_e_t:2.58s t_t:267.85s avg_roc_auc:0.7967766431344131
+e:105/4000 μ_l:0.80 e_t:1.17s μ_e_t:2.56s t_t:269.02s avg_roc_auc:0.7987654361565423
+e:106/4000 μ_l:0.76 e_t:1.16s μ_e_t:2.55s t_t:270.18s avg_roc_auc:0.8025453360504893
+e:107/4000 μ_l:0.72 e_t:2.52s μ_e_t:2.55s t_t:272.70s avg_roc_auc:0.8011837575461425
+e:108/4000 μ_l:0.85 e_t:2.15s μ_e_t:2.54s t_t:274.85s avg_roc_auc:0.7917855220682912
+e:109/4000 μ_l:0.84 e_t:1.73s μ_e_t:2.54s t_t:276.58s avg_roc_auc:0.7981485456216485
+e:110/4000 μ_l:0.75 e_t:1.98s μ_e_t:2.53s t_t:278.56s avg_roc_auc:0.8020520741044327
+e:111/4000 μ_l:0.84 e_t:2.25s μ_e_t:2.53s t_t:280.81s avg_roc_auc:0.7998559190780281
+e:112/4000 μ_l:0.65 e_t:2.69s μ_e_t:2.53s t_t:283.49s avg_roc_auc:0.802175869559118
+e:113/4000 μ_l:0.72 e_t:1.15s μ_e_t:2.52s t_t:284.64s avg_roc_auc:0.7968906709623433
+e:114/4000 μ_l:0.85 e_t:1.16s μ_e_t:2.51s t_t:285.80s avg_roc_auc:0.7934877796529595
+e:115/4000 μ_l:0.74 e_t:2.66s μ_e_t:2.51s t_t:288.46s avg_roc_auc:0.8006267748948518
+e:116/4000 μ_l:0.76 e_t:2.79s μ_e_t:2.51s t_t:291.25s avg_roc_auc:0.7984412802698199
+e:117/4000 μ_l:0.81 e_t:2.83s μ_e_t:2.51s t_t:294.08s avg_roc_auc:0.7985128456206194
+e:118/4000 μ_l:0.79 e_t:1.17s μ_e_t:2.50s t_t:295.25s avg_roc_auc:0.8014953347579046
+e:119/4000 μ_l:0.82 e_t:2.32s μ_e_t:2.50s t_t:297.57s avg_roc_auc:0.8005187027168408
+e:120/4000 μ_l:0.84 e_t:1.17s μ_e_t:2.49s t_t:298.74s avg_roc_auc:0.8041816771832826
+e:121/4000 μ_l:0.87 e_t:1.18s μ_e_t:2.48s t_t:299.91s avg_roc_auc:0.7885240703338728
+e:122/4000 μ_l:0.90 e_t:1.18s μ_e_t:2.47s t_t:301.09s avg_roc_auc:0.7960961909501887
+e:123/4000 μ_l:0.81 e_t:1.16s μ_e_t:2.46s t_t:302.26s avg_roc_auc:0.7907028101942586
+e:124/4000 μ_l:0.76 e_t:1.97s μ_e_t:2.45s t_t:304.22s avg_roc_auc:0.8004855124574181
+e:125/4000 μ_l:0.76 e_t:1.18s μ_e_t:2.44s t_t:305.41s avg_roc_auc:0.800909477827404
+e:126/4000 μ_l:0.76 e_t:1.17s μ_e_t:2.43s t_t:306.57s avg_roc_auc:0.8064569234608772
+e:127/4000 μ_l:0.80 e_t:1.18s μ_e_t:2.42s t_t:307.76s avg_roc_auc:0.7926621764321806
+e:128/4000 μ_l:0.74 e_t:1.18s μ_e_t:2.41s t_t:308.94s avg_roc_auc:0.7942309981800502
+e:129/4000 μ_l:0.82 e_t:2.20s μ_e_t:2.41s t_t:311.13s avg_roc_auc:0.7947123838680215
+e:130/4000 μ_l:0.68 e_t:2.22s μ_e_t:2.41s t_t:313.36s avg_roc_auc:0.7937683074330575
+e:131/4000 μ_l:0.87 e_t:2.03s μ_e_t:2.41s t_t:315.39s avg_roc_auc:0.8019074875154502
+e:132/4000 μ_l:0.78 e_t:2.34s μ_e_t:2.41s t_t:317.73s avg_roc_auc:0.8034199677367218
+e:133/4000 μ_l:0.78 e_t:2.05s μ_e_t:2.40s t_t:319.78s avg_roc_auc:0.7975815048649975
+e:134/4000 μ_l:0.76 e_t:1.16s μ_e_t:2.40s t_t:320.94s avg_roc_auc:0.7991695751916699
+e:135/4000 μ_l:0.84 e_t:1.17s μ_e_t:2.39s t_t:322.11s avg_roc_auc:0.7991688676931363
+e:136/4000 μ_l:0.92 e_t:1.19s μ_e_t:2.38s t_t:323.30s avg_roc_auc:0.7982691638707645
+e:137/4000 μ_l:0.90 e_t:1.18s μ_e_t:2.37s t_t:324.47s avg_roc_auc:0.8007209711642457
+e:138/4000 μ_l:0.71 e_t:1.16s μ_e_t:2.36s t_t:325.63s avg_roc_auc:0.7977524262459164
+e:139/4000 μ_l:0.72 e_t:1.15s μ_e_t:2.35s t_t:326.78s avg_roc_auc:0.7999875722660603
+e:140/4000 μ_l:0.70 e_t:1.18s μ_e_t:2.34s t_t:327.96s avg_roc_auc:0.8019709008016042
+e:141/4000 μ_l:0.79 e_t:1.16s μ_e_t:2.33s t_t:329.11s avg_roc_auc:0.7975612941938012
+e:142/4000 μ_l:0.81 e_t:2.26s μ_e_t:2.33s t_t:331.37s avg_roc_auc:0.8033788716815553
+e:143/4000 μ_l:0.86 e_t:1.20s μ_e_t:2.33s t_t:332.57s avg_roc_auc:0.8036616541334058
+e:144/4000 μ_l:0.94 e_t:1.19s μ_e_t:2.32s t_t:333.76s avg_roc_auc:0.8048015302473441
+e:145/4000 μ_l:0.66 e_t:1.16s μ_e_t:2.31s t_t:334.91s avg_roc_auc:0.8021142932058496
+e:146/4000 μ_l:0.81 e_t:1.69s μ_e_t:2.31s t_t:336.60s avg_roc_auc:0.8032015710082191
+e:147/4000 μ_l:0.77 e_t:1.18s μ_e_t:2.30s t_t:337.78s avg_roc_auc:0.8039326241542352
+e:148/4000 μ_l:0.75 e_t:1.16s μ_e_t:2.29s t_t:338.94s avg_roc_auc:0.7981000428010084
+e:149/4000 μ_l:0.83 e_t:1.16s μ_e_t:2.28s t_t:340.10s avg_roc_auc:0.8063343487218172
+e:150/4000 μ_l:0.87 e_t:1.16s μ_e_t:2.28s t_t:341.26s avg_roc_auc:0.8039305211183612
+e:151/4000 μ_l:0.88 e_t:1.15s μ_e_t:2.27s t_t:342.41s avg_roc_auc:0.8065338608964027
+e:152/4000 μ_l:0.76 e_t:1.17s μ_e_t:2.26s t_t:343.58s avg_roc_auc:0.8059098044667825
+e:153/4000 μ_l:0.72 e_t:2.15s μ_e_t:2.26s t_t:345.72s avg_roc_auc:0.8044144508882711
+e:154/4000 μ_l:0.79 e_t:2.26s μ_e_t:2.26s t_t:347.98s avg_roc_auc:0.8024655540147883
+e:155/4000 μ_l:0.90 e_t:1.16s μ_e_t:2.25s t_t:349.14s avg_roc_auc:0.8045109794086802
+e:156/4000 μ_l:0.87 e_t:1.15s μ_e_t:2.25s t_t:350.29s avg_roc_auc:0.8053369032341199
+e:157/4000 μ_l:0.73 e_t:2.41s μ_e_t:2.25s t_t:352.70s avg_roc_auc:0.8044030577079713
+e:158/4000 μ_l:0.81 e_t:2.29s μ_e_t:2.25s t_t:354.99s avg_roc_auc:0.8040846920463948
+e:159/4000 μ_l:0.58 e_t:1.16s μ_e_t:2.24s t_t:356.15s avg_roc_auc:0.8053298518012754
+e:160/4000 μ_l:0.81 e_t:1.17s μ_e_t:2.23s t_t:357.32s avg_roc_auc:0.7985755264451635
+e:161/4000 μ_l:0.71 e_t:2.23s μ_e_t:2.23s t_t:359.56s avg_roc_auc:0.7979279956687563
+e:162/4000 μ_l:0.81 e_t:1.17s μ_e_t:2.23s t_t:360.73s avg_roc_auc:0.8011415456872036
+e:163/4000 μ_l:0.80 e_t:2.16s μ_e_t:2.23s t_t:362.89s avg_roc_auc:0.8009551426993756
+e:164/4000 μ_l:0.82 e_t:1.16s μ_e_t:2.22s t_t:364.06s avg_roc_auc:0.8038263249845972
+e:165/4000 μ_l:0.68 e_t:1.15s μ_e_t:2.21s t_t:365.21s avg_roc_auc:0.8018540071731557
+e:166/4000 μ_l:0.82 e_t:1.15s μ_e_t:2.21s t_t:366.36s avg_roc_auc:0.8005328335363385
+e:167/4000 μ_l:0.81 e_t:1.15s μ_e_t:2.20s t_t:367.51s avg_roc_auc:0.7993148420170045
+e:168/4000 μ_l:0.77 e_t:1.16s μ_e_t:2.19s t_t:368.67s avg_roc_auc:0.8044442127880822
+e:169/4000 μ_l:0.87 e_t:2.07s μ_e_t:2.19s t_t:370.74s avg_roc_auc:0.79974748906095
+e:170/4000 μ_l:0.78 e_t:2.36s μ_e_t:2.19s t_t:373.10s avg_roc_auc:0.8055421142972538
+e:171/4000 μ_l:0.83 e_t:1.18s μ_e_t:2.19s t_t:374.29s avg_roc_auc:0.7982451385075183
+e:172/4000 μ_l:0.67 e_t:1.16s μ_e_t:2.18s t_t:375.44s avg_roc_auc:0.8038162736747866
+e:173/4000 μ_l:0.85 e_t:1.17s μ_e_t:2.18s t_t:376.62s avg_roc_auc:0.7980829603807442
+e:174/4000 μ_l:0.81 e_t:1.16s μ_e_t:2.17s t_t:377.78s avg_roc_auc:0.8025106629228682
+e:175/4000 μ_l:0.77 e_t:1.16s μ_e_t:2.17s t_t:378.94s avg_roc_auc:0.8037853174712936
+e:176/4000 μ_l:0.79 e_t:2.58s μ_e_t:2.17s t_t:381.53s avg_roc_auc:0.8061446552878121
+e:177/4000 μ_l:0.76 e_t:1.18s μ_e_t:2.16s t_t:382.71s avg_roc_auc:0.804537280093564
+e:178/4000 μ_l:0.69 e_t:2.57s μ_e_t:2.16s t_t:385.28s avg_roc_auc:0.8073648985890053
+====================================================================================================
+datasets seen: 11392
+record time in mins: 6.42
+====================================================================================================
+config:
+  type: classification
+  experiments_dir: workdir/experiments
+  classification_dump: workdir/dumps/dump-d256000b1r1000c20-8.h5
+  seed: 11
+  batch_size: 1
+  lr: 0.001
+  steps: 64
+  epochs: 4000
+  a: 4
+  e: 256
+  h: 768
+  l: 6
+  o: 8
+  eval_folds: 5
+  eval_subsample_samples: 1000
+  eval_subsample_features: 100
+  max_train_mins: 80
+  jackpot: 0.8068462330697953
+  residual_decay: 0.95
+====================================================================================================
+params: 4,947,720 (trainable: 4,947,720)
+====================================================================================================
+peak memory allocated: 1387 MiB
+peak memory reserved: 2056 MiB
+====================================================================================================
+end timestamp: 2026-03-10 03:02:14
+script runtime: 33.48 mins
+experiment done: 260310-022845-d0387e29-new2-s11
