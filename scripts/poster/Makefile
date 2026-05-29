@@ -1,15 +1,15 @@
 .PHONY: main clean FORCE
 
-main: poster.pdf
+BUILD := build
 
-poster.pdf: FORCE
-	latexmk -quiet -pdflatex='lualatex -interaction nonstopmode' -pdf poster.tex
+main: $(BUILD)/poster.pdf
+
+$(BUILD)/poster.pdf: poster.tex FORCE | $(BUILD)
+	latexmk -quiet -outdir=$(BUILD) -pdflatex='lualatex -interaction nonstopmode' -pdf poster.tex
+
+$(BUILD):
+	mkdir -p $(BUILD)
 
 clean:
-	latexmk -pdf -C
-
-pdfclean:
-	latexmk -pdf -c poster.tex
-
-deepclean:
-	latexmk -pdf -C && rm -f poster.{bbl,nav,snm}
+	latexmk -outdir=$(BUILD) -pdf -C
+	rm -rf $(BUILD)
