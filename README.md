@@ -94,6 +94,18 @@ Evaluation is on all of 38 TabArena classification tasks.
   - average over all tasks
 
 
+## Citation
+
+```bibtex
+@misc{ozturk2025moddednanotabpfn,
+  author = {Öztürk, Salih Bora},
+  title  = {modded-nanotabpfn: speedrunning TFM pretraining},
+  year   = {2025},
+  url    = {https://github.com/borawhocodess/modded-nanotabpfn},
+}
+```
+
+
 ## References
 
 1. [S. Müller et al. Transformers Can Do Bayesian Inference. arXiv preprint (2021).](https://arxiv.org/abs/2112.10510)
