@@ -1,6 +1,8 @@
 """Reproduce the bias-variance experiment of Nagler (2023),
 "Statistical Foundations of Prior-Data Fitted Networks", Section 6.5 / Figure 1.
 
+Paper: https://arxiv.org/abs/2305.11097
+
 Faithful port of the author's R gist:
 https://gist.github.com/tnagler/62f6ce1f996333c799c81f1aef147e72
 
