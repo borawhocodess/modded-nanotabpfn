@@ -15,6 +15,20 @@ EPOCH_RE = re.compile(r"\be:(\d+)(?:/\d+)?\b")
 DATASETS_RE = re.compile(r"\bdatasets seen\s*:\s*(\d+)\b", re.IGNORECASE)
 SCRIPT_RUNTIME_RE = re.compile(r"script runtime\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*mins", re.IGNORECASE)
 
+# per-epoch diagnostic fields (for --trace). value may be a float or "nan".
+_NUM = r"(nan|[0-9]+(?:\.[0-9]+)?)"
+TRACE_FIELDS = {
+    "loss": re.compile(r"μ_l:" + _NUM),
+    "g": re.compile(r"\bg:" + _NUM),
+    "g_max": re.compile(r"\bg_max:" + _NUM),
+    "clip": re.compile(r"\bclip:" + _NUM),
+    "d_mu": re.compile(r"\bd_mu:" + _NUM),
+    "d_ad": re.compile(r"\bd_ad:" + _NUM),
+    "d0_mu": re.compile(r"\bd0_mu:" + _NUM),
+    "d0_ad": re.compile(r"\bd0_ad:" + _NUM),
+    "roc_auc": ROC_RE,
+}
+
 COLUMNS = [
     {
         "key": "experiment_id",
@@ -631,6 +645,111 @@ def print_summary(top_dirs, args, exclude_ids):
     return 0
 
 
+def _to_float(m):
+    if not m:
+        return None
+    v = m.group(1)
+    return float("nan") if v == "nan" else float(v)
+
+
+def resolve_trace_log(arg, experiments_dir):
+    """Accept a log file, a run dir, or an experiment name; return the log path."""
+    p = Path(arg)
+    if p.is_file():
+        return p
+    if p.is_dir():
+        logs = sorted(p.glob("**/*-log.txt"))
+        return logs[-1] if logs else None
+    cand = experiments_dir / arg
+    if cand.is_dir():
+        logs = sorted(cand.glob("**/*-log.txt"))
+        return logs[-1] if logs else None
+    logs = sorted(experiments_dir.glob(f"**/*{arg}*-log.txt"))
+    return logs[-1] if logs else None
+
+
+def parse_run_trace(log_path):
+    """Pull per-epoch diagnostic series out of one run's log."""
+    series = {"epoch": []}
+    series.update({k: [] for k in TRACE_FIELDS})
+    with open(log_path, encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            em = EPOCH_RE.search(line)
+            # only real metric lines: have an epoch count AND a numeric g:/μ_l:
+            if not em or not (TRACE_FIELDS["g"].search(line) or TRACE_FIELDS["loss"].search(line)):
+                continue
+            series["epoch"].append(float(em.group(1)))
+            for key, rx in TRACE_FIELDS.items():
+                series[key].append(_to_float(rx.search(line)))
+    return series
+
+
+def plot_run_trace(series, out_path, title=""):
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception:
+        return None
+
+    x = series["epoch"]
+    if len(x) < 2:
+        return None
+
+    def clean(vals):
+        return [float("nan") if v is None else v for v in vals]
+
+    def has(vals):
+        return any(v is not None and v == v for v in vals)
+
+    fig, axes = plt.subplots(2, 2, figsize=(12, 7))
+    fig.suptitle(title or "run trace")
+
+    ax = axes[0][0]
+    ax.plot(x, clean(series["loss"]), color="tab:blue", label="μ_l")
+    ax.set_xlabel("epoch")
+    ax.set_ylabel("loss", color="tab:blue")
+    axr = ax.twinx()
+    axr.plot(x, clean(series["roc_auc"]), color="tab:green", label="roc_auc")
+    axr.set_ylabel("roc_auc", color="tab:green")
+    ax.set_title("loss & roc_auc")
+
+    ax = axes[0][1]
+    ax.plot(x, clean(series["g"]), color="tab:blue", label="g")
+    ax.plot(x, clean(series["g_max"]), color="tab:red", label="g_max")
+    ax.set_xlabel("epoch")
+    ax.set_ylabel("grad norm")
+    ax.legend(loc="upper right", fontsize="small")
+    if has(series["clip"]):
+        axr = ax.twinx()
+        axr.plot(x, clean(series["clip"]), color="tab:orange", linestyle="--", label="clip")
+        axr.set_ylabel("clip rate", color="tab:orange")
+        axr.set_ylim(0, 1.05)
+    ax.set_title("grad norm & clip rate")
+
+    ax = axes[1][0]
+    ax.plot(x, clean(series["d_mu"]), color="tab:purple", label="d_mu")
+    ax.plot(x, clean(series["d_ad"]), color="tab:brown", label="d_ad")
+    ax.set_xlabel("epoch")
+    ax.set_ylabel("consecutive drift")
+    ax.legend(fontsize="small")
+    ax.set_title("per-epoch drift (muon vs adam)")
+
+    ax = axes[1][1]
+    ax.plot(x, clean(series["d0_mu"]), color="tab:purple", label="d0_mu")
+    ax.plot(x, clean(series["d0_ad"]), color="tab:brown", label="d0_ad")
+    ax.set_xlabel("epoch")
+    ax.set_ylabel("drift from init")
+    ax.legend(fontsize="small")
+    ax.set_title("from-init drift (muon vs adam)")
+
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=120)
+    plt.close(fig)
+    return out_path
+
+
 def main():
     parser = argparse.ArgumentParser(description="Summarize experiment logs.")
     parser.add_argument("--experiments-dir", "--dir", "-d", default="workdir/experiments")
@@ -648,7 +767,28 @@ def main():
     )
     parser.add_argument("--exclude", default="", help="comma-separated experiment ids to exclude")
     parser.add_argument("--summary", action="store_true", help="one-row-per-group summary table")
+    parser.add_argument(
+        "--trace",
+        metavar="RUN",
+        help="plot per-epoch diagnostics (loss/gnorm/clip/drift) for a single run: "
+        "a log path, a run dir, or an experiment name under --experiments-dir",
+    )
     args = parser.parse_args()
+
+    if args.trace:
+        log_path = resolve_trace_log(args.trace, Path(args.experiments_dir))
+        if not log_path:
+            print(f"trace: no log found for {args.trace!r}")
+            return 1
+        series = parse_run_trace(log_path)
+        ts = datetime.now().strftime("%y%m%d-%H%M%S")
+        out_path = Path("workdir/plots") / f"{ts}-trace.png"
+        saved = plot_run_trace(series, out_path, title=log_path.stem)
+        if saved:
+            print(f"trace: {saved}  ({len(series['epoch'])} epochs from {log_path})")
+            return 0
+        print("trace: matplotlib missing or not enough data")
+        return 1
 
     if args.plot and args.group_host and not args.x_host:
         args.x_host = True
