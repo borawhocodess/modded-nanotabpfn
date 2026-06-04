@@ -94,7 +94,7 @@ Evaluation is on all of 38 TabArena classification tasks.
   - average over all tasks
 
 
-## Citation
+## Repo Citation
 
 ```bibtex
 @misc{ozturk2025moddednanotabpfn,
@@ -102,6 +102,23 @@ Evaluation is on all of 38 TabArena classification tasks.
   title  = {modded-nanotabpfn: speedrunning TFM pretraining},
   year   = {2025},
   url    = {https://github.com/borawhocodess/modded-nanotabpfn},
+}
+```
+
+
+## Paper Citation
+
+This repo now has an accompanying paper, *Speedrunning Tabular Foundation Model Pretraining* ([arXiv](https://arxiv.org/abs/2606.03681)), accepted ([OpenReview](https://openreview.net/forum?id=QT1ySCPeW3)) at the [FM4SD](https://icml-structured-fm-workshop.github.io) workshop at ICML 2026.
+
+```bibtex
+@misc{ozturk2026speedrunningtabularfoundationmodel,
+      title={Speedrunning Tabular Foundation Model Pretraining},
+      author={Salih Bora Ozturk and Alexander Pfefferle and Frank Hutter},
+      year={2026},
+      eprint={2606.03681},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2606.03681},
 }
 ```
 
