@@ -98,7 +98,7 @@ Evaluation is on all of 38 TabArena classification tasks.
 
 ```bibtex
 @misc{ozturk2025moddednanotabpfn,
-  author = {Öztürk, Salih Bora},
+  author = {Öztürk, Salih Bora and Prince, Carter},
   title  = {modded-nanotabpfn: speedrunning TFM pretraining},
   year   = {2025},
   url    = {https://github.com/borawhocodess/modded-nanotabpfn},
