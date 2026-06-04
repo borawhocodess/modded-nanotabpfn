@@ -651,6 +651,7 @@ for epoch in range(1, c.epochs + 1):
     optimizer_adam.train()
     total_loss = 0.0
     num_valid = 0
+    gnorms = []
     for i, full_data in enumerate(prior):
         sep = full_data["sep"]
         x = full_data["x"]
@@ -674,7 +675,7 @@ for epoch in range(1, c.epochs + 1):
 
         total_loss += loss.detach()
 
-        torch.nn.utils.clip_grad_norm_(model.parameters(), c.grad_clip)
+        gnorms.append(torch.nn.utils.clip_grad_norm_(model.parameters(), c.grad_clip))
         for opt in optimizers:
             opt.step()
 
@@ -684,6 +685,10 @@ for epoch in range(1, c.epochs + 1):
     mu_e_t = t_t / epoch
 
     mean_loss = (total_loss / num_valid).cpu().item()
+
+    gnorm_stack = torch.stack(gnorms)
+    mean_gnorm = gnorm_stack.mean().cpu().item()
+    max_gnorm = gnorm_stack.max().cpu().item()
 
     if t_t > c.max_train_mins * 60:
         print0("exceeded max train time", console=True)
@@ -761,6 +766,7 @@ for epoch in range(1, c.epochs + 1):
 
     print0(
         f"e:{epoch}/{c.epochs} μ_l:{mean_loss:.2f} "
+        f"g:{mean_gnorm:.2f} g_max:{max_gnorm:.2f} "
         f"e_t:{e_t:.2f}s μ_e_t:{mu_e_t:.2f}s t_t:{t_t:.2f}s "
         f"avg_roc_auc:{avg_auc}",
         console=True,
