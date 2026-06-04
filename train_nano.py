@@ -693,6 +693,7 @@ for epoch in range(1, c.epochs + 1):
     gnorm_stack = torch.stack(gnorms)
     mean_gnorm = gnorm_stack.mean().cpu().item()
     max_gnorm = gnorm_stack.max().cpu().item()
+    clip_rate = (gnorm_stack > c.grad_clip).float().mean().cpu().item()
 
     cur_muon = torch.cat([p.detach().flatten() for p in muon_params])
     cur_adam = torch.cat([p.detach().flatten() for p in adam_params])
@@ -779,7 +780,7 @@ for epoch in range(1, c.epochs + 1):
 
     print0(
         f"e:{epoch}/{c.epochs} μ_l:{mean_loss:.2f} "
-        f"g:{mean_gnorm:.2f} g_max:{max_gnorm:.2f} "
+        f"g:{mean_gnorm:.2f} g_max:{max_gnorm:.2f} clip:{clip_rate:.2f} "
         f"d_mu:{drift_mu:.2f} d_ad:{drift_ad:.2f} "
         f"d0_mu:{drift0_mu:.2f} d0_ad:{drift0_ad:.2f} "
         f"e_t:{e_t:.2f}s μ_e_t:{mu_e_t:.2f}s t_t:{t_t:.2f}s "
