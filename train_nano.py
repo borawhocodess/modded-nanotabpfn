@@ -66,7 +66,7 @@ class Config:
     eval_folds: int = 5
     eval_subsample_samples: int | None = 1000
     eval_subsample_features: int | None = 100
-    max_train_mins: float = 4
+    max_train_mins: float = 2
     jackpot: float = 0.8068462330697953
 
 
