@@ -470,6 +470,7 @@ class PriorDumpDataLoader(DataLoader):
             self.datasets = f["X"].shape[0]
             self.max_rows = f["X"].shape[1]
             self.max_cols = f["X"].shape[2]
+            self.sep_key = "single_eval_pos" if "single_eval_pos" in f else "train_test_split_index"
         self.device = device
         self.pointer = 0
 
@@ -481,7 +482,7 @@ class PriorDumpDataLoader(DataLoader):
                 num_features = f["num_features"][self.pointer : end].max()
                 x = torch.from_numpy(f["X"][self.pointer : end, :, :num_features])
                 y = torch.from_numpy(f["y"][self.pointer : end])
-                sep = f["single_eval_pos"][self.pointer : end]
+                sep = f[self.sep_key][self.pointer : end]
 
                 self.pointer += self.batch_size
                 if self.pointer >= self.datasets:
