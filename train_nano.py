@@ -67,7 +67,7 @@ class Config:
     eval_subsample_samples: int | None = 1000
     eval_subsample_features: int | None = 100
     max_train_mins: float = 2
-    jackpot: float = 0.8068462330697953
+    jackpot: float = 0.8068462330697953  # 0.8760712024651358
 
 
 parser = argparse.ArgumentParser()
@@ -172,6 +172,38 @@ TABARENA_CLASSIFICATION_TASKS = [
     363707,  # (  1353,   10) website_phishing
     363711,  # (  1699,  112) MIC
     363712,  # ( 10885,   22) jm1
+]
+
+TABPFN_PAPER_CLASSIFICATION_TASKS = [
+    168850,  # 41156 ada
+    146818,  # 40981 Australian
+    10101,   # 1464  blood-transfusion-service-center
+    146821,  # 40975 car
+    146227,  # 40701 churn
+    23,      # 23    cmc
+    31,      # 31    credit-g
+    146197,  # 40670 dna
+    2079,    # 188   eucalyptus
+    9985,    # 1475  first-order-theorem-proving
+    14969,   # 4538  gesturephase-segmentation-processed
+    168854,  # 41143 jasmine
+    3917,    # 1067  kc1
+    3,       # 3     kr-vs-kp
+    189863,  # 41144 madeline
+    # 12,      # 12    mfeat-factors # 10>o=8
+    9978,    # 1487  ozone-level-8hr
+    3902,    # 1049  pc4
+    189864,  # 41145 philippine
+    9952,    # 1489  phoneme
+    9957,    # 1494  qsar-biodeg
+    167211,  # 40900 Satellite
+    146822,  # 40984 segment
+    146817,  # 40982 steel-plates-fault
+    168853,  # 41146 sylvine
+    53,      # 54    vehicle
+    146820,  # 40983 wilt
+    # 145681,  # 40498 wine-quality-white # 6 7
+    # 2073,    # 181   yeast # 10>o=8
 ]
 
 
