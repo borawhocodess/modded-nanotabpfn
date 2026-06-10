@@ -1,6 +1,6 @@
 # modded-nanoTabPFN
 
-> **Disclaimer:** The training code has gotten a bit crowded. For a simpler starting point, check out commit [b0f29b7](https://github.com/borawhocodess/modded-nanotabpfn/commit/b0f29b7) (`git log --oneline -- train_nano.py`)
+> **Disclaimer:** The training code has gotten a bit crowded. For a simpler starting point, check out commit [b0f29b7](https://github.com/borawhocodess/modded-nanotabpfn/blob/b0f29b7406e048125bbe939a6365eeb70acabc90/train_nano.py) (`git log --oneline -- train_nano.py`)
 
 This repository hosts the *nanoTabPFN speedrun*, in which we (collaboratively|competitively) search for the fastest way to use 1 NVIDIA L40S to train a tabular foundation model (nanoTabPFN) that beats Random Forest on [TabArena](https://github.com/autogluon/tabarena) datasets.
 
