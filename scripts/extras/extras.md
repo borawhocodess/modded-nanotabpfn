@@ -54,3 +54,42 @@ New parameters were routed to Adam by the existing `ndim != 2` split with the de
 `adam_wd=0.01` (same treatment as every other scalar), so the ~0.89 plateau may be biased
 slightly low by weight decay. Learned values were logged per epoch via an extra fragment
 in the `print0` line, captured before the LAWA swap.
+
+## Related work / what to cite
+
+Per-layer scalar reweighting of residual paths is well explored — learned on the branch
+(ReZero, LayerScale, LAuReL), learned on the stream (Admin, modded-nanogpt lambdas), or
+fixed >1 on the stream for depth stability (DeepNorm) — but a fixed geometric decay of the
+stream (`0.95**i`), chosen for time-to-accuracy rather than stability, appears unexplored;
+our ablations show the learned variants converge near this schedule without beating it.
+
+Must cite:
+
+- **Admin** — Liu et al., "Understanding the Difficulty of Training Transformers", EMNLP 2020,
+  arXiv:2004.08249. Only prior work scaling the *accumulated stream* per layer
+  (`ω_l ⊙ x_l + f(x_l)`); ours is a fixed geometric schedule instead of an
+  initialized-then-learned vector.
+- **DeepNorm** — Wang et al., "DeepNet: Scaling Transformers to 1,000 Layers", 2022,
+  arXiv:2203.00555. Fixed constant on the stream like ours but α > 1 for depth stability —
+  same knob, opposite direction, different goal.
+- **modded-nanogpt** — Jordan et al., github.com/KellerJordan/modded-nanogpt. Method lineage;
+  its learned per-layer stream lambdas are the learned analog (theirs settle > 1 in LM
+  pretraining, ours want ~0.89–0.95).
+- **ReZero** — Bachlechner et al. 2020, arXiv:2003.04887; **LayerScale** — Touvron et al.,
+  CaiT, ICCV 2021, arXiv:2103.17239. The branch-scaling family: they scale `f(x)`, we scale `x`.
+
+Should cite:
+
+- **Curse of Depth / LayerNorm Scaling** — Sun et al. 2025, arXiv:2502.05795. Motivation:
+  residual-stream norm grows with depth and makes deep layers lazy; decay attacks this
+  preemptively.
+- **LAuReL** — Menghani et al., ICML 2025, arXiv:2411.07501. Learned `α·f + β·x`
+  generalization; preempts "why not learn it", which the ablation above answers.
+
+Optional (one sentence each): **DenseFormer** (arXiv:2402.02622) — our decay is the
+zero-parameter special case of learned depth-weighted averaging; **nGPT** (arXiv:2410.01131)
+— the norm-controlled-stream extreme.
+
+Citation traps from an earlier LLM lit pass: CompleteP (arXiv:2505.01618) α=1 means 1/L on
+the *branch*, not "no decay"; arXiv:2206.03126 is Noci et al. (rank collapse), not
+Takase & Kiyono (theirs is B2T, arXiv:2206.00330); ProRes (arXiv:2603.05369) unverified.
