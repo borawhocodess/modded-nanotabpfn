@@ -58,7 +58,7 @@ def p0(x):
 # Registry of target functions P(Y=1 | x), each mapping (n, D) -> (n,).
 # Two sweeps share this registry:
 #   * frequency sweep  : sin(w * 1^T X) for w in {0.5, 1, 2, 3, 4}  (freq1 == baseline)
-#   * diverse structure: linear / highfreq / radial / interaction / xor
+#   * diverse structure: linear / highfreq / radial / interaction / aniso
 DGPS = {
     "freq0.5": lambda x: 0.5 + 0.5 * np.sin(0.5 * x.sum(axis=1)),
     "freq1": lambda x: 0.5 + 0.5 * np.sin(1.0 * x.sum(axis=1)),  # == baseline p0
@@ -66,10 +66,12 @@ DGPS = {
     "freq3": lambda x: 0.5 + 0.5 * np.sin(3.0 * x.sum(axis=1)),
     "freq4": lambda x: 0.5 + 0.5 * np.sin(4.0 * x.sum(axis=1)),
     "linear": lambda x: 1.0 / (1.0 + np.exp(-x.sum(axis=1) / np.sqrt(D))),
-    "highfreq": lambda x: 0.5 + 0.5 * np.sin(2.0 * x.sum(axis=1)),  # coincides w/ freq2
+    "highfreq": lambda x: 0.5 + 0.5 * np.sin(6.0 * x.sum(axis=1)),  # beyond the freq sweep
     "radial": lambda x: 0.5 + 0.5 * np.sin((x ** 2).sum(axis=1) / 2.0),
     "interaction": lambda x: 0.5 + 0.5 * np.tanh(x[:, 0] * x[:, 1]),
-    "xor": lambda x: (x[:, 0] * x[:, 1] > 0).astype(float),
+    # anisotropic ridge: argument is NOT 1^T X, so Euclidean-NN localization is
+    # not aligned with the diagonal (disentangles the NN-alignment confound)
+    "aniso": lambda x: 0.5 + 0.5 * np.sin(2.0 * x[:, 0] - x[:, 1]),
 }
 
 
@@ -350,22 +352,34 @@ def plot_data(out_dir, n=600):
         ax.set_title(title); ax.set_xlabel("x1"); ax.set_ylabel("x2")
         ax.axhline(0, color="gray", lw=0.5); ax.axvline(0, color="gray", lw=0.5)
 
+    # figure 1: sampled datasets (truth curve + noisy labels), one per target
     fig, ax = plt.subplots(2, 3, figsize=(16, 9))
     idx(ax[0, 0], DGPS["freq1"], s, "baseline:  1/2 + 1/2 sin(1^T X)", "s = 1^T X")
-    gs = np.linspace(s.min(), s.max(), 500)
-    for w, c in zip([0.5, 1, 2, 3, 4], plt.cm.viridis(np.linspace(0, 0.9, 5))):
-        ax[0, 1].plot(gs, 0.5 + 0.5 * np.sin(w * gs), color=c, label=f"w={w}")
-    ax[0, 1].set_title("frequency sweep:  sin(w * 1^T X)")
-    ax[0, 1].set_xlabel("s = 1^T X"); ax[0, 1].set_ylabel("P(Y=1)"); ax[0, 1].legend(fontsize=7)
-    idx(ax[0, 2], DGPS["linear"], s, "linear:  sigma(1^T X / sqrt(5))", "s = 1^T X")
-    idx(ax[1, 0], DGPS["radial"], r2, "radial:  1/2 + 1/2 sin(||X||^2 / 2)", "r^2 = ||X||^2")
+    idx(ax[0, 1], DGPS["linear"], s, "linear:  sigma(1^T X / sqrt(5))", "s = 1^T X")
+    idx(ax[0, 2], DGPS["radial"], r2, "radial:  1/2 + 1/2 sin(||X||^2 / 2)", "r^2 = ||X||^2")
+    idx(ax[1, 0], DGPS["aniso"], 2 * X[:, 0] - X[:, 1],
+        "aniso:  1/2 + 1/2 sin(2 x1 - x2)", "2 x1 - x2")
     sc2d(ax[1, 1], DGPS["interaction"], "interaction:  1/2 + 1/2 tanh(x1 x2)")
-    sc2d(ax[1, 2], DGPS["xor"], "xor:  1{ x1 x2 > 0 }")
+    ax[1, 2].axis("off")
     fig.suptitle(f"Synthetic datasets — {n} samples each, X ~ N(0, I_5)  "
                  "(red = y=1, blue = y=0)", fontsize=14)
     fig.tight_layout(rect=[0, 0, 1, 0.97])
     out = os.path.join(out_dir, "data-samples.png")
     fig.savefig(out, dpi=130); print(f"data    -> {out}")
+    plt.close(fig)
+
+    # figure 2: frequency sweep — curves only (the targets, not sampled data)
+    fig2, ax2 = plt.subplots(figsize=(7, 4.5))
+    gs = np.linspace(s.min(), s.max(), 500)
+    for w, c in zip([0.5, 1, 2, 3, 4, 6], plt.cm.viridis(np.linspace(0, 0.9, 6))):
+        ax2.plot(gs, 0.5 + 0.5 * np.sin(w * gs), color=c, label=f"w={w}")
+    ax2.set_title("frequency sweep:  1/2 + 1/2 sin(w * 1^T X)")
+    ax2.set_xlabel("s = 1^T X"); ax2.set_ylabel("P(Y=1)")
+    ax2.legend(fontsize=8, title="frequency w")
+    fig2.tight_layout()
+    out2 = os.path.join(out_dir, "frequency-sweep.png")
+    fig2.savefig(out2, dpi=130); print(f"freq    -> {out2}")
+    plt.close(fig2)
 
 
 def plot_grid(summary_csv, out_dir):
@@ -412,7 +426,7 @@ def plot_aggregate(out_dir, n_ref=4000):
     import matplotlib.pyplot as plt
 
     freqs = {"freq0.5": 0.5, "freq1": 1.0, "freq2": 2.0, "freq3": 3.0, "freq4": 4.0}
-    diverse = ["linear", "highfreq", "radial", "interaction", "xor"]
+    diverse = ["linear", "highfreq", "radial", "interaction", "aniso"]
     rows = []
     for path in glob.glob(os.path.join(out_dir, "fn-*-summary.csv")):
         d = pd.read_csv(path)
