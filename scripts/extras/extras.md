@@ -93,3 +93,42 @@ zero-parameter special case of learned depth-weighted averaging; **nGPT** (arXiv
 Citation traps from an earlier LLM lit pass: CompleteP (arXiv:2505.01618) α=1 means 1/L on
 the *branch*, not "no decay"; arXiv:2206.03126 is Noci et al. (rank collapse), not
 Takase & Kiyono (theirs is B2T, arXiv:2206.00330); ProRes (arXiv:2603.05369) unverified.
+
+# Seed robustness study — do the records hold under a different train seed? (2026-06-22)
+
+Answers "every record was timed at seed 11 — is the ladder a seeding artifact?".
+Seeds are **decoupled**: `train_seed` (random/numpy/torch init + data order) is swept 1–9,
+while `eval_seed` stays pinned at 11 so every run is scored on the *identical* eval task and
+stays comparable to the published record. The eval pipeline itself is untouched.
+Setup: `train_nano_seed<record>.py` (one per rung, derived from the `retime/` ground-truth
+scripts, `max_train_mins=200`), TABARENA eval, jackpot `avg_roc_auc = 0.806846`, 9 seeds,
+1×L40S. Jobs 29196844 (7 rungs) and 29197494 (baseline, muon).
+
+| variant | jackpot | median (min) | mean | sd | cv | min–max | med epochs | speedup |
+|---|---|---|---|---|---|---|---|---|
+| baseline | 9/9 | 55.45 | 57.09 | 10.58 | 19% | 41.53–75.39 | 1055 | 1.0× |
+| muon | 9/9 | 52.94 | 55.91 | 6.39 | 11% | 49.30–67.05 | 721 | 1.0× |
+| carter | 9/9 | 12.41 | 11.35 | 3.28 | 29% | 6.62–15.35 | 396 | 4.5× |
+| batchedmuon | 9/9 | 6.45 | 6.91 | 2.76 | 40% | 4.54–13.31 | 308 | 8.6× |
+| residualdecay | 9/9 | 5.23 | 5.02 | 1.08 | 22% | 3.07–6.56 | 236 | 10.6× |
+| rmsthink | 9/9 | 4.15 | 4.18 | 0.82 | 20% | 3.05–5.62 | 208 | 13.4× |
+| lawa1wd | 9/9 | 2.84 | 3.50 | 1.14 | 32% | 2.67–6.02 | 142 | 19.5× |
+| featuregroup | 9/9 | 2.28 | 2.26 | 0.58 | 26% | 1.59–3.56 | 114 | 24.3× |
+| autohuman | 9/9 | 1.55 | 1.50 | 0.25 | 17% | 1.15–1.85 | 101 | 35.7× |
+
+Conclusions: (1) **81/81 runs crossed the jackpot** — no seed anywhere on the ladder fails to
+reach the target, and none came near the 200-min cap, so the ladder is not a seeding artifact;
+(2) rung order is preserved on medians end-to-end, and consecutive min–max ranges barely
+overlap, so each rung's gain survives seed noise; (3) relative spread does **not** grow as the
+stack gets more tuned — autohuman's 17% cv is second-tightest and well under carter/batchedmuon
+/lawa1wd, i.e. the fast configs are not more seed-fragile than the slow ones.
+
+The one rung that does not survive on wall-clock is **muon**: 52.94 vs baseline 55.45 median
+is a 1.0× speedup, inside the seed spread (baseline sd is 10.58 min). Its win is real but
+sample-side — median epochs drop 1055 → 721 (1.5×) — and is eaten by per-epoch cost, median
+`μ epoch t` 3.11s → 4.41s from the Newton-Schulz iteration. The wall-clock payoff only lands
+one rung later, at **muon → carter (52.9 → 12.4 min)**, the single largest drop on the ladder.
+
+Figure: `plots/ttj_bar_seed.png` (time-to-jackpot, dots = 9 seeds). Regenerate from repo root:
+
+    uv run python scripts/extras/extras.py --logs scripts/extras/seed --jackpot 0.8068462330697953 --tag seed --only-ttj

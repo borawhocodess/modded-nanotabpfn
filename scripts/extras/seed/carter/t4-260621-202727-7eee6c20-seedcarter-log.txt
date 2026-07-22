@@ -1,0 +1,1080 @@
+import argparse
+import os
+import sys
+
+with open(sys.argv[0], "r") as f:
+    code = f.read()
+
+import platform
+import random
+import socket
+import subprocess
+import time
+import tomllib
+import uuid
+from dataclasses import dataclass, fields
+from datetime import datetime
+
+import h5py
+import numpy as np
+import openml
+import pandas as pd
+import schedulefree
+import torch
+import torch.nn.functional as F
+from sklearn.compose import ColumnTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.metrics import roc_auc_score
+from sklearn.model_selection import StratifiedKFold, train_test_split
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import FunctionTransformer, LabelEncoder, OrdinalEncoder
+from torch import nn
+from torch.utils.data import DataLoader
+
+
+# -----------------------------------------------------------------------------
+# config
+
+
+@dataclass
+class Config:
+    type: str = "classification"
+    experiments_dir: str = "workdir/experiments"
+    classification_dump: str = "workdir/dumps/dump-d256000b1r1000c20-8.h5"
+    # wget -c https://salihboraozturk.com/other/ufr/dump-d256000b1r1000c20-8.h5
+    train_seed: int = 11
+    eval_seed: int = 11
+    batch_size: int = 1
+    lr: float = 0.001
+    steps: int = 64
+    epochs: int = 4000
+    a: int = 4
+    e: int = 256
+    h: int = 768
+    l: int = 6
+    o: int | None = None
+    eval_folds: int = 5
+    eval_subsample_samples: int | None = 1000
+    eval_subsample_features: int | None = 100
+    max_train_mins: float = 200
+    jackpot: float = 0.8068462330697953
+
+
+parser = argparse.ArgumentParser(description="Train Nano model.")
+parser.add_argument("--name", default="test")
+parser.add_argument("--train_seed", type=int, default=None)
+parser.add_argument("--eval_seed", type=int, default=None)
+parser.add_argument("--epochs", type=int, default=None)
+args = parser.parse_args()
+
+c = Config()
+
+if args.train_seed is not None:
+    c.train_seed = args.train_seed
+if args.eval_seed is not None:
+    c.eval_seed = args.eval_seed
+
+if args.epochs is not None:
+    c.epochs = args.epochs
+
+random.seed(c.train_seed)
+np.random.seed(c.train_seed)
+torch.manual_seed(c.train_seed)
+torch.set_float32_matmul_precision('high')
+
+assert torch.cuda.is_available()
+
+device = "cuda"
+
+start_ts = datetime.now()
+ts = start_ts.strftime("%y%m%d-%H%M%S")
+uid = uuid.uuid4().hex[:8]
+e_name = args.name.strip()
+e_id = f"{ts}-{uid}-{e_name}" if e_name else f"{ts}-{uid}"
+e_root = os.path.join(c.experiments_dir, e_name) if e_name else c.experiments_dir
+e_dir = os.path.join(e_root, e_id)
+os.makedirs(e_dir, exist_ok=True)
+log_path = os.path.join(e_dir, f"{e_id}-log.txt")
+ckpt_path = os.path.join(e_dir, f"{e_id}-ckpt.pth")
+
+with open("pyproject.toml", "rb") as f:
+    version = tomllib.load(f)["project"]["version"]
+
+
+def print0(s, console=False):
+    with open(log_path, "a") as f:
+        if console:
+            print(s)
+        print(s, file=f)
+
+
+print0(code)
+print0("=" * 100)
+print0(f"start timestamp: {start_ts.strftime('%Y-%m-%d %H:%M:%S')}", console=True)
+print0(f"host: {socket.gethostname()}")
+print0(f"platform: {platform.platform()}")
+print0(f"python: {sys.version}")
+print0(f"torch: {torch.version.__version__}")
+print0(f"cuda: {torch.version.cuda}")
+print0(subprocess.run(["nvidia-smi"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True).stdout)
+print0("=" * 100)
+
+TABARENA_CLASSIFICATION_TASKS = [
+    363613,  # ( 32769,   10) Amazon_employee_access
+    363614,  # (   898,   39) anneal
+    363616,  # ( 76000,  171) APSFailure
+    363618,  # ( 45211,   14) bank-marketing
+    363619,  # ( 10000,   11) Bank_Customer_Churn
+    363620,  # (  3751, 1777) Bioresponse
+    363621,  # (   748,    5) blood-transfusion-service-center
+    363623,  # (  5000,   20) churn
+    363624,  # (  9822,   86) coil2000_insurance_policies
+    363626,  # (  1000,   21) credit-g
+    363627,  # ( 30000,   24) credit_card_clients_default
+    363628,  # (129880,   22) customer_satisfaction_in_airline
+    363629,  # (   768,    9) diabetes
+    363630,  # ( 71518,   48) Diabetes130US
+    363632,  # ( 10999,   11) E-CommereShippingData
+    363671,  # (  1500,    7) Fitness_Club
+    363673,  # (150000,   11) GiveMeSomeCredit
+    363674,  # (  2400,   31) hazelnut-spread-contaminant-detection
+    363676,  # ( 10459,   24) heloc
+    363677,  # (  3845, 1618) hiva_agnostic
+    363679,  # ( 19158,   13) HR_Analytics_Job_Change_of_Data_Scientists
+    363681,  # ( 12684,   25) in_vehicle_coupon_recommendation
+    363682,  # (  1723,   14) Is-this-a-good-customer
+    363683,  # ( 50000,  213) kddcup09_appetency
+    363684,  # (  2240,   26) Marketing_Campaign
+    363685,  # (  1014,    7) maternal_health_risk
+    363689,  # (  7491,   87) NATICUSdroid
+    363691,  # ( 12330,   18) online_shoppers_intention
+    363694,  # (  5910,   65) polish_companies_bankruptcy
+    363696,  # (  1054,   42) qsar-biodeg
+    363699,  # ( 78053,   12) SDSS17
+    363700,  # (  2584,   16) seismic-bumps
+    363702,  # (  3190,   61) splice
+    363704,  # (  4424,   37) students_dropout_and_academic_success
+    363706,  # (  6819,   95) taiwanese_bankruptcy_prediction
+    363707,  # (  1353,   10) website_phishing
+    363711,  # (  1699,  112) MIC
+    363712,  # ( 10885,   22) jm1
+]
+
+
+# -----------------------------------------------------------------------------
+# muon
+
+
+@torch.compile
+def zeropower_via_newtonschulz5(G, steps=10, eps=1e-7):
+    assert len(G.shape) == 2
+    a, b, c = (3.4445, -4.7750,  2.0315)
+    X = G.bfloat16()
+    X /= (X.norm() + eps)
+    if G.size(0) > G.size(1):
+        X = X.T
+    for _ in range(steps):
+        A = X @ X.T
+        B = A @ X
+        X = a * X + b * B + c * A @ B
+    if G.size(0) > G.size(1):
+        X = X.T
+    return X.to(G.dtype)
+
+class Muon(torch.optim.Optimizer):
+    """
+    code adapted from: https://github.com/KellerJordan/modded-nanogpt/commit/b356a1f
+    """
+    def __init__(self, params, lr=3e-4, momentum=0.95, nesterov=True, backend_steps=5):
+        defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, backend_steps=backend_steps)
+        super().__init__(params, defaults)
+
+    def step(self):
+        for group in self.param_groups:
+            lr = group['lr']
+            momentum = group['momentum']
+            for p in group['params']:
+                g = p.grad
+                if g is None:
+                    continue
+                state = self.state[p]
+                if 'momentum_buffer' not in state:
+                    state['momentum_buffer'] = torch.zeros_like(g)
+                buf = state['momentum_buffer']
+                buf.mul_(momentum).add_(g)
+                if group['nesterov']:
+                    g = g.add(buf, alpha=momentum)
+                if g.size(0) == 3 * g.size(1):
+                    g = torch.cat([zeropower_via_newtonschulz5(g1, steps=group['backend_steps']) for g1 in g.split(g.size(1))])
+                    scale = g.size(1)**0.5
+                else:
+                    g = zeropower_via_newtonschulz5(g, steps=group['backend_steps'])
+                    scale = max(g.size(0), g.size(1))**0.5
+                p.data.add_(g, alpha=-lr * scale)
+
+
+# -----------------------------------------------------------------------------
+# model
+
+
+class NanoTabPFNModel(nn.Module):
+    def __init__(self, l, a, e, h, o):
+        """
+        l : num layers
+        a : num attention heads
+        e : embedding size
+        h : mlp hidden size
+        o : num outputs
+        """
+        super().__init__()
+        self.l = l
+        self.a = a
+        self.e = e
+        self.h = h
+        self.o = o
+        self.feature_encoder = FeatureEncoder(e)
+        self.target_encoder = TargetEncoder(e)
+        self.transformer_encoder = TransformerEncoderStack(l, a, e, h)
+        self.decoder = Decoder(e, h, o)
+
+        self.register_buffer("borders", None, persistent=True)
+
+    def forward(self, *args, **kwargs):
+        if len(args) == 3:
+            x = args[0]
+            if args[2] is not None:
+                x = torch.cat((x, args[2]), dim=1)
+            return self._forward((x, args[1]), sep=args[0].shape[1], **kwargs)
+        elif len(args) == 1 and isinstance(args[0], tuple):
+            return self._forward(*args, **kwargs)
+
+    def _forward(self, src, sep):
+        x_src, y_src = src
+        if len(y_src.shape) < len(x_src.shape):
+            y_src = y_src.unsqueeze(-1)
+        x_src = self.feature_encoder(x_src, sep)
+        num_rows = x_src.shape[1]
+        y_src = self.target_encoder(y_src, num_rows)
+        src = torch.cat([x_src, y_src], 2)
+        output = self.transformer_encoder(src, sep)
+        output = output[:, sep:, -1, :]
+        output = self.decoder(output)
+        return output
+
+
+class FeatureEncoder(nn.Module):
+    def __init__(self, e):
+        super().__init__()
+        self.linear_layer = nn.Linear(1, e)
+
+    def forward(self, x, sep):
+        x = x.unsqueeze(-1)
+        mean = x[:, :sep].mean(dim=1, keepdim=True)
+        std = x[:, :sep].std(dim=1, keepdim=True) + 1e-8
+        x = (x - mean) / std
+        x = torch.clip(x, min=-100, max=100)
+        return self.linear_layer(x)
+
+
+class TargetEncoder(nn.Module):
+    def __init__(self, e):
+        super().__init__()
+        self.linear_layer = nn.Linear(1, e)
+
+    def forward(self, y_train, num_rows):
+        mean = y_train.mean(dim=1, keepdim=True)
+        padding = mean.repeat(1, num_rows - y_train.shape[1], 1)
+        y = torch.cat([y_train, padding], dim=1)
+        y = y.unsqueeze(-1)
+        return self.linear_layer(y)
+
+
+class TransformerEncoderStack(nn.Module):
+    def __init__(self, l, a, e, h):
+        super().__init__()
+        self.transformer_blocks = nn.ModuleList()
+        for _ in range(l):
+            self.transformer_blocks.append(TransformerEncoderLayer(a, e, h))
+
+    def forward(self, x, sep):
+        for block in self.transformer_blocks:
+            x = block(x, sep=sep)
+        return x
+
+
+class TransformerEncoderLayer(nn.Module):
+    def __init__(self, a, e, h, eps=1e-5):
+        super().__init__()
+        self.num_heads = a
+        self.head_dim = e // a
+        assert e % a == 0, "Embedding size must be divisible by heads"
+
+        self.qkv_datapoints = nn.Linear(e, 3 * e)
+        self.qkv_features = nn.Linear(e, 3 * e)
+
+        self.linear1 = nn.Linear(e, h)
+        self.linear2 = nn.Linear(h, e)
+
+        self.norm1 = nn.LayerNorm(e, eps=eps)
+        self.norm2 = nn.LayerNorm(e, eps=eps)
+        self.norm3 = nn.LayerNorm(e, eps=eps)
+
+    def forward(self, src, sep):
+        b, r, c, e = src.shape
+
+        x = src.reshape(b * r, c, e)
+        res = x
+        x = self.norm1(x)
+
+        qkv = self.qkv_features(x)
+        qkv = qkv.reshape(b * r, c, 3, self.num_heads, self.head_dim)
+        qkv = qkv.permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+
+        x = F.scaled_dot_product_attention(q, k, v)
+        x = x.transpose(1, 2).reshape(b * r, c, e)
+
+        src = res + x
+        src = src.reshape(b, r, c, e)
+
+        x = src.transpose(1, 2).reshape(b * c, r, e)
+        res = x
+        x = self.norm2(x)
+
+        qkv = self.qkv_datapoints(x)
+        qkv = qkv.reshape(b * c, r, 3, self.num_heads, self.head_dim)
+        qkv = qkv.permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+
+        q_left, q_right = q.split([sep, r - sep], dim=2)
+
+        k_train = k[:, :, :sep, :]
+        v_train = v[:, :, :sep, :]
+
+        x_left = F.scaled_dot_product_attention(q_left, k_train, v_train)
+        x_right = F.scaled_dot_product_attention(q_right, k_train, v_train)
+
+        x = torch.cat([x_left, x_right], dim=2)
+        x = x.transpose(1, 2).reshape(b * c, r, e)
+
+        src = res + x
+        src = src.reshape(b, c, r, e).transpose(2, 1)
+
+        x = self.norm3(src)
+        x = self.linear2(F.gelu(self.linear1(x)))
+        src = src + x
+
+        return src
+
+
+class Decoder(nn.Module):
+    def __init__(self, e, h, o):
+        super().__init__()
+        self.linear1 = nn.Linear(e, h)
+        self.linear2 = nn.Linear(h, o)
+
+    def forward(self, x):
+        return self.linear2(F.gelu(self.linear1(x)))
+
+
+# -----------------------------------------------------------------------------
+# priors
+
+
+class PriorDumpDataLoader(DataLoader):
+    def __init__(self, filename, num_steps, batch_size, device):
+        self.filename = filename
+        self.num_steps = num_steps
+        self.batch_size = batch_size
+        with h5py.File(self.filename, "r") as f:
+            self.max_num_classes = f["max_num_classes"][0] if "max_num_classes" in f else None
+            self.problem_type = f["problem_type"][()].decode("utf-8")
+            self.datasets = f["X"].shape[0]
+            self.max_rows = f["X"].shape[1]
+            self.max_cols = f["X"].shape[2]
+        self.device = device
+        self.pointer = 0
+
+    def __iter__(self):
+        with h5py.File(self.filename, "r") as f:
+            for _ in range(self.num_steps):
+                end = self.pointer + self.batch_size
+
+                num_features = f["num_features"][self.pointer : end].max()
+                x = torch.from_numpy(f["X"][self.pointer : end, :, :num_features])
+                y = torch.from_numpy(f["y"][self.pointer : end])
+                sep = f["single_eval_pos"][self.pointer : end]
+
+                self.pointer += self.batch_size
+                if self.pointer >= self.datasets:
+                    print("pointer >= datasets, will reset!")
+                    self.pointer = 0
+
+                yield dict(
+                    x=x.to(self.device),
+                    y=y.to(self.device),
+                    target_y=y.to(self.device),
+                    sep=sep[0].item(),
+                )
+
+    def __len__(self):
+        return self.num_steps
+
+
+# -----------------------------------------------------------------------------
+# interface
+
+
+def init_model_from_ckpt_file(file_path):
+    ckpt = torch.load(file_path, map_location="cpu")
+    model = NanoTabPFNModel(
+        l=ckpt["arch"]["l"],
+        a=ckpt["arch"]["a"],
+        e=ckpt["arch"]["e"],
+        h=ckpt["arch"]["h"],
+        o=ckpt["arch"]["o"],
+    )
+    if "borders" in ckpt["model"]:
+        model.borders = ckpt["model"]["borders"]
+    model.load_state_dict(ckpt["model"])
+    return model
+
+
+def to_pandas(x):
+    return pd.DataFrame(x) if not isinstance(x, pd.DataFrame) else x
+
+
+def to_numeric(x):
+    return x.apply(pd.to_numeric, errors="coerce").to_numpy()
+
+
+def get_feature_preprocessor(X):
+    X = pd.DataFrame(X)
+    num_mask = []
+    cat_mask = []
+    for col in X:
+        unique_non_nan_entries = X[col].dropna().unique()
+        if len(unique_non_nan_entries) <= 1:
+            num_mask.append(False)
+            cat_mask.append(False)
+            continue
+        non_nan_entries = X[col].notna().sum()
+        numeric_entries = pd.to_numeric(X[col], errors="coerce").notna().sum()
+        num_mask.append(non_nan_entries == numeric_entries)
+        cat_mask.append(non_nan_entries != numeric_entries)
+
+    num_transformer = Pipeline(
+        [
+            ("to_pandas", FunctionTransformer(to_pandas)),
+            ("to_numeric", FunctionTransformer(to_numeric)),
+            ("imputer", SimpleImputer(strategy="mean")),
+        ],
+    )
+    cat_transformer = Pipeline(
+        [
+            ("encoder", OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=np.nan)),
+            ("imputer", SimpleImputer(strategy="most_frequent")),
+        ],
+    )
+
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ("num", num_transformer, np.array(num_mask)),
+            ("cat", cat_transformer, np.array(cat_mask)),
+        ],
+    )
+    return preprocessor
+
+
+class NanoTabPFNClassifier:
+    def __init__(self, model=None):
+        device = "cuda"
+        if model is None:
+            raise ValueError("model is None")
+        if isinstance(model, str):
+            model = init_model_from_ckpt_file(model)
+        self.model = model.to(device)
+        self.device = device
+
+    def fit(self, X_train, y_train):
+        self.feature_preprocessor = get_feature_preprocessor(X_train)
+        self.X_train = self.feature_preprocessor.fit_transform(X_train)
+        self.y_train = y_train
+        self.num_classes = max(set(y_train)) + 1
+
+    def predict(self, X_test):
+        predicted_probabilities = self.predict_proba(X_test)
+        return predicted_probabilities.argmax(axis=1)
+
+    def predict_proba(self, X_test):
+        x = np.concatenate((self.X_train, self.feature_preprocessor.transform(X_test)))
+        y = self.y_train
+        with torch.no_grad():
+            x = torch.from_numpy(x).unsqueeze(0).to(torch.float).to(self.device)
+            y = torch.from_numpy(y).unsqueeze(0).to(torch.float).to(self.device)
+
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                out = self.model((x, y), sep=len(self.X_train)).squeeze(0)
+                out = out[:, : self.num_classes]
+                probabilities = F.softmax(out, dim=1)
+
+            return probabilities.to("cpu").numpy()
+
+
+# -----------------------------------------------------------------------------
+# main
+
+
+prior = PriorDumpDataLoader(
+    filename=c.classification_dump,
+    num_steps=c.steps,
+    batch_size=c.batch_size,
+    device=device,
+)
+c.o = prior.max_num_classes
+
+model = NanoTabPFNModel(l=c.l, a=c.a, e=c.e, h=c.h, o=c.o).to(device)
+
+muon_params = []
+adam_params = []
+for name, p in model.named_parameters():
+    if p.ndim != 2:
+        adam_params.append(p)
+    elif "transformer_encoder" in name:
+        muon_params.append(p)
+    else:
+        adam_params.append(p)
+
+optimizer_muon = Muon(muon_params, lr=0.1*c.lr, momentum=0.95)
+optimizer_adam = schedulefree.AdamWScheduleFree(adam_params, lr=c.lr, weight_decay=0.0, warmup_steps=1000)
+
+optimizers = [optimizer_muon, optimizer_adam]
+
+criterion = nn.CrossEntropyLoss()
+
+t_t = 0.0
+prev_muon = None
+prev_adam = None
+init_muon = torch.cat([p.detach().flatten() for p in muon_params])
+init_adam = torch.cat([p.detach().flatten() for p in adam_params])
+
+
+for epoch in range(1, c.epochs + 1):
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    model.train()
+    optimizer_adam.train()
+    total_loss = 0.0
+    num_valid = 0
+    gnorms = []
+    for i, full_data in enumerate(prior):
+        sep = full_data["sep"]
+        x = full_data["x"]
+        y = full_data["y"][:, :sep]
+        targets = full_data["target_y"][:, sep:]
+
+        if torch.isnan(x).any() or torch.isnan(y).any():
+            continue
+        num_valid += 1
+
+        for opt in optimizers:
+            opt.zero_grad(set_to_none=True)
+
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            output = model((x, y), sep=sep)
+            output = output.reshape(-1, output.shape[-1])
+            targets = targets.reshape((-1,)).to(torch.long)
+            loss = criterion(output, targets)
+
+        loss.backward()
+
+        total_loss += loss.detach()
+
+        gnorms.append(torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0))
+        for opt in optimizers:
+            opt.step()
+
+    torch.cuda.synchronize()
+    e_t = time.perf_counter() - t0
+    t_t += e_t
+    mu_e_t = t_t / epoch
+
+    mean_loss = (total_loss / num_valid).cpu().item()
+
+    gnorm_stack = torch.stack(gnorms)
+    mean_gnorm = gnorm_stack.mean().cpu().item()
+    max_gnorm = gnorm_stack.max().cpu().item()
+    clip_rate = (gnorm_stack > 1.0).float().mean().cpu().item()
+
+    cur_muon = torch.cat([p.detach().flatten() for p in muon_params])
+    cur_adam = torch.cat([p.detach().flatten() for p in adam_params])
+    drift_mu = (cur_muon - prev_muon).norm().cpu().item() if prev_muon is not None else float("nan")
+    drift_ad = (cur_adam - prev_adam).norm().cpu().item() if prev_adam is not None else float("nan")
+    drift0_mu = (cur_muon - init_muon).norm().cpu().item()
+    drift0_ad = (cur_adam - init_adam).norm().cpu().item()
+    prev_muon = cur_muon
+    prev_adam = cur_adam
+
+    if t_t > c.max_train_mins * 60:
+        print0("exceeded max train time", console=True)
+        sys.exit(0)
+
+    model.eval()
+    optimizer_adam.eval()
+
+    clf = NanoTabPFNClassifier(model)
+    aucs = []
+
+    for task_id in TABARENA_CLASSIFICATION_TASKS:
+        task = openml.tasks.get_task(task_id, download_splits=False)
+
+        dataset = task.get_dataset(download_data=False)
+        X, y, _, _ = dataset.get_data(target=task.target_name, dataset_format="dataframe")
+
+        len_features = X.shape[1]
+        if c.eval_subsample_features is not None and len_features > c.eval_subsample_features:
+            rng = np.random.default_rng(c.eval_seed)
+            feature_choices = rng.choice(len_features, size=c.eval_subsample_features, replace=False)
+            X = X.iloc[:, feature_choices]
+
+        if c.eval_subsample_samples is not None and len(X) > c.eval_subsample_samples:
+            _, X, _, y = train_test_split(X, y, test_size=c.eval_subsample_samples, stratify=y, random_state=c.eval_seed)
+            X = X.reset_index(drop=True)
+            y = y.reset_index(drop=True)
+
+        cv = StratifiedKFold(n_splits=c.eval_folds, shuffle=True, random_state=c.eval_seed)
+
+        targets = []
+        probabilities = []
+
+        for _, (train_indices, test_indices) in enumerate(cv.split(X, y)):
+            X_train = X.iloc[train_indices].to_numpy()
+            y_train = y.iloc[train_indices].to_numpy()
+            X_test = X.iloc[test_indices].to_numpy()
+            y_test = y.iloc[test_indices].to_numpy()
+
+            label_encoder = LabelEncoder()
+            y_train = label_encoder.fit_transform(y_train)
+            y_test = label_encoder.transform(y_test)
+            targets.append(y_test)
+
+            clf.fit(X_train, y_train)
+            y_proba = clf.predict_proba(X_test)
+            if y_proba.shape[1] == 2:
+                y_proba = y_proba[:, 1]
+            probabilities.append(y_proba)
+
+        y_true = np.concatenate(targets, axis=0)
+        y_proba = np.concatenate(probabilities, axis=0) if len(probabilities) > 0 else None
+
+        auc = (
+            roc_auc_score(y_true, y_proba, multi_class="ovr")
+            if getattr(y_proba, "ndim", 1) > 1
+            else roc_auc_score(y_true, y_proba)
+        )
+        aucs.append(auc)
+
+    avg_auc = (sum(aucs) / len(aucs)) if len(aucs) > 0 else float("nan")
+
+    print0(
+        f"e:{epoch}/{c.epochs} μ_l:{mean_loss:.2f} "
+        f"g:{mean_gnorm:.2f} g_max:{max_gnorm:.2f} clip:{clip_rate:.2f} "
+        f"d_mu:{drift_mu:.2f} d_ad:{drift_ad:.2f} "
+        f"d0_mu:{drift0_mu:.2f} d0_ad:{drift0_ad:.2f} "
+        f"e_t:{e_t:.2f}s μ_e_t:{mu_e_t:.2f}s t_t:{t_t:.2f}s "
+        f"avg_roc_auc:{avg_auc}",
+        console=True,
+    )
+
+    if avg_auc >= c.jackpot:
+        ckpt = {
+            "version": version,
+            "timestamp": ts,
+            "uid": uid,
+            "type": c.type,
+            "arch": {
+                "e": model.e,
+                "a": model.a,
+                "h": model.h,
+                "l": model.l,
+                "o": model.o,
+            },
+            "model": model.state_dict(),
+        }
+        torch.save(ckpt, ckpt_path)
+        print0("=" * 100)
+        print0(f"datasets seen: {epoch * c.batch_size * c.steps}", console=True)
+        print0(f"record time in mins: {t_t / 60:.2f}", console=True)
+        break
+
+print0("=" * 100)
+print0("config:")
+for f in fields(Config):
+    print0(f"  {f.name}: {getattr(c, f.name)}")
+print0("=" * 100)
+total_params = sum(p.numel() for p in model.parameters())
+trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+print0(f"params: {total_params:,} (trainable: {trainable_params:,})")
+print0("=" * 100)
+print0(f"peak memory allocated: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB", console=True)
+print0(f"peak memory reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB", console=True)
+print0("=" * 100)
+end_ts = datetime.now()
+print0(f"end timestamp: {end_ts.strftime('%Y-%m-%d %H:%M:%S')}", console=True)
+print0(f"script runtime: {(end_ts - start_ts).total_seconds() / 60:.2f} mins")
+print0(f"experiment done: {e_id}", console=True)
+
+
+====================================================================================================
+start timestamp: 2026-06-21 20:27:27
+host: dlc2gpu13
+platform: Linux-6.8.0-117-generic-x86_64-with-glibc2.35
+python: 3.13.12 (main, Mar  3 2026, 15:01:51) [Clang 21.1.4 ]
+torch: 2.9.1+cu128
+cuda: 12.8
+Sun Jun 21 20:27:27 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 595.71.05              Driver Version: 595.71.05      CUDA Version: 13.2     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA L40S                    Off |   00000000:21:00.0 Off |                    0 |
+| N/A   39C    P0             64W /  350W |       3MiB /  46068MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+
+====================================================================================================
+e:1/4000 μ_l:1.24 g:14.16 g_max:33.65 clip:1.00 d_mu:nan d_ad:nan d0_mu:2.64 d0_ad:0.12 e_t:4.29s μ_e_t:4.29s t_t:4.29s avg_roc_auc:0.536869158799139
+e:2/4000 μ_l:1.15 g:11.58 g_max:34.89 clip:0.97 d_mu:3.12 d_ad:0.14 d0_mu:4.80 d0_ad:0.21 e_t:1.91s μ_e_t:3.10s t_t:6.19s avg_roc_auc:0.48831187348789973
+e:3/4000 μ_l:1.13 g:11.11 g_max:29.44 clip:0.95 d_mu:2.77 d_ad:0.20 d0_mu:6.15 d0_ad:0.31 e_t:1.90s μ_e_t:2.70s t_t:8.10s avg_roc_auc:0.48601444721421716
+e:4/4000 μ_l:0.97 g:8.06 g_max:23.91 clip:0.91 d_mu:2.99 d_ad:0.23 d0_mu:7.33 d0_ad:0.43 e_t:1.90s μ_e_t:2.50s t_t:9.99s avg_roc_auc:0.5703511099840209
+e:5/4000 μ_l:1.03 g:7.42 g_max:21.37 clip:0.92 d_mu:3.11 d_ad:0.27 d0_mu:8.36 d0_ad:0.57 e_t:1.89s μ_e_t:2.38s t_t:11.89s avg_roc_auc:0.5571855944210609
+e:6/4000 μ_l:0.94 g:6.95 g_max:22.13 clip:0.94 d_mu:2.94 d_ad:0.28 d0_mu:9.34 d0_ad:0.71 e_t:1.88s μ_e_t:2.29s t_t:13.77s avg_roc_auc:0.5837343421670332
+e:7/4000 μ_l:1.12 g:7.43 g_max:34.14 clip:0.91 d_mu:3.19 d_ad:0.35 d0_mu:10.24 d0_ad:0.88 e_t:1.90s μ_e_t:2.24s t_t:15.67s avg_roc_auc:0.5898193777136156
+e:8/4000 μ_l:1.01 g:6.63 g_max:22.25 clip:0.86 d_mu:3.34 d_ad:0.36 d0_mu:11.14 d0_ad:1.08 e_t:1.89s μ_e_t:2.19s t_t:17.56s avg_roc_auc:0.5627251575476155
+e:9/4000 μ_l:0.93 g:6.41 g_max:28.40 clip:0.92 d_mu:3.14 d_ad:0.37 d0_mu:11.92 d0_ad:1.27 e_t:1.91s μ_e_t:2.16s t_t:19.47s avg_roc_auc:0.5763286384437876
+e:10/4000 μ_l:1.06 g:5.35 g_max:13.72 clip:0.89 d_mu:3.19 d_ad:0.42 d0_mu:12.68 d0_ad:1.47 e_t:1.90s μ_e_t:2.14s t_t:21.38s avg_roc_auc:0.58215293506661
+e:11/4000 μ_l:0.97 g:5.09 g_max:18.92 clip:0.91 d_mu:3.23 d_ad:0.43 d0_mu:13.47 d0_ad:1.69 e_t:1.90s μ_e_t:2.12s t_t:23.28s avg_roc_auc:0.5745672502131537
+e:12/4000 μ_l:1.09 g:5.66 g_max:29.36 clip:0.88 d_mu:3.30 d_ad:0.51 d0_mu:14.16 d0_ad:1.94 e_t:1.90s μ_e_t:2.10s t_t:25.18s avg_roc_auc:0.5768985420835188
+e:13/4000 μ_l:0.97 g:4.49 g_max:14.57 clip:0.83 d_mu:3.27 d_ad:0.49 d0_mu:14.94 d0_ad:2.20 e_t:1.89s μ_e_t:2.08s t_t:27.07s avg_roc_auc:0.5934915392513698
+e:14/4000 μ_l:1.01 g:3.64 g_max:12.75 clip:0.84 d_mu:3.39 d_ad:0.57 d0_mu:15.59 d0_ad:2.46 e_t:1.91s μ_e_t:2.07s t_t:28.98s avg_roc_auc:0.5745756929937688
+e:15/4000 μ_l:0.90 g:3.96 g_max:11.87 clip:0.89 d_mu:3.39 d_ad:0.51 d0_mu:16.28 d0_ad:2.74 e_t:1.89s μ_e_t:2.06s t_t:30.87s avg_roc_auc:0.6330392341347201
+e:16/4000 μ_l:0.90 g:4.36 g_max:16.14 clip:0.88 d_mu:3.31 d_ad:0.47 d0_mu:17.01 d0_ad:2.99 e_t:1.90s μ_e_t:2.05s t_t:32.77s avg_roc_auc:0.6153011312391211
+e:17/4000 μ_l:1.01 g:3.75 g_max:14.10 clip:0.91 d_mu:3.46 d_ad:0.52 d0_mu:17.71 d0_ad:3.23 e_t:1.91s μ_e_t:2.04s t_t:34.68s avg_roc_auc:0.6800472634905992
+e:18/4000 μ_l:0.87 g:3.86 g_max:19.06 clip:0.86 d_mu:3.84 d_ad:0.50 d0_mu:18.46 d0_ad:3.46 e_t:1.90s μ_e_t:2.03s t_t:36.58s avg_roc_auc:0.6802249769029314
+e:19/4000 μ_l:1.00 g:4.17 g_max:12.76 clip:0.94 d_mu:3.58 d_ad:0.52 d0_mu:19.15 d0_ad:3.68 e_t:1.91s μ_e_t:2.03s t_t:38.48s avg_roc_auc:0.7102787336963593
+e:20/4000 μ_l:0.87 g:4.04 g_max:15.96 clip:0.86 d_mu:3.80 d_ad:0.47 d0_mu:19.87 d0_ad:3.89 e_t:1.91s μ_e_t:2.02s t_t:40.39s avg_roc_auc:0.7252330964347935
+e:21/4000 μ_l:0.94 g:4.05 g_max:14.09 clip:0.88 d_mu:3.84 d_ad:0.47 d0_mu:20.53 d0_ad:4.09 e_t:1.90s μ_e_t:2.01s t_t:42.29s avg_roc_auc:0.7159730154350854
+e:22/4000 μ_l:0.93 g:3.36 g_max:11.12 clip:0.86 d_mu:3.98 d_ad:0.42 d0_mu:21.19 d0_ad:4.28 e_t:1.91s μ_e_t:2.01s t_t:44.20s avg_roc_auc:0.7373997881858333
+e:23/4000 μ_l:0.85 g:3.47 g_max:13.66 clip:0.89 d_mu:3.97 d_ad:0.43 d0_mu:21.84 d0_ad:4.47 e_t:1.89s μ_e_t:2.00s t_t:46.09s avg_roc_auc:0.7305590794704188
+e:24/4000 μ_l:0.96 g:3.59 g_max:8.95 clip:0.91 d_mu:3.95 d_ad:0.36 d0_mu:22.45 d0_ad:4.64 e_t:1.90s μ_e_t:2.00s t_t:47.99s avg_roc_auc:0.740710450135959
+e:25/4000 μ_l:1.00 g:3.77 g_max:11.38 clip:0.88 d_mu:3.62 d_ad:0.43 d0_mu:23.08 d0_ad:4.82 e_t:1.89s μ_e_t:2.00s t_t:49.88s avg_roc_auc:0.7398107072867449
+e:26/4000 μ_l:0.97 g:3.28 g_max:10.35 clip:0.86 d_mu:4.22 d_ad:0.40 d0_mu:23.67 d0_ad:4.98 e_t:1.89s μ_e_t:1.99s t_t:51.77s avg_roc_auc:0.7385230688064933
+e:27/4000 μ_l:0.91 g:3.19 g_max:12.48 clip:0.78 d_mu:3.88 d_ad:0.37 d0_mu:24.26 d0_ad:5.15 e_t:1.90s μ_e_t:1.99s t_t:53.67s avg_roc_auc:0.7448180223162849
+e:28/4000 μ_l:0.91 g:3.14 g_max:10.44 clip:0.73 d_mu:3.89 d_ad:0.32 d0_mu:24.82 d0_ad:5.30 e_t:1.91s μ_e_t:1.99s t_t:55.58s avg_roc_auc:0.7507643613904174
+e:29/4000 μ_l:0.71 g:2.92 g_max:9.40 clip:0.75 d_mu:3.95 d_ad:0.30 d0_mu:25.37 d0_ad:5.44 e_t:1.89s μ_e_t:1.98s t_t:57.47s avg_roc_auc:0.7500970192402098
+e:30/4000 μ_l:0.97 g:3.02 g_max:7.52 clip:0.81 d_mu:3.83 d_ad:0.33 d0_mu:25.89 d0_ad:5.58 e_t:1.89s μ_e_t:1.98s t_t:59.37s avg_roc_auc:0.7489375588733242
+e:31/4000 μ_l:0.96 g:3.61 g_max:10.11 clip:0.89 d_mu:4.12 d_ad:0.32 d0_mu:26.44 d0_ad:5.71 e_t:1.90s μ_e_t:1.98s t_t:61.27s avg_roc_auc:0.7471414220701087
+e:32/4000 μ_l:0.92 g:2.95 g_max:10.42 clip:0.81 d_mu:3.82 d_ad:0.29 d0_mu:26.99 d0_ad:5.84 e_t:1.90s μ_e_t:1.97s t_t:63.17s avg_roc_auc:0.7387687903266655
+e:33/4000 μ_l:0.81 g:2.93 g_max:9.81 clip:0.80 d_mu:4.16 d_ad:0.29 d0_mu:27.57 d0_ad:5.96 e_t:1.88s μ_e_t:1.97s t_t:65.06s avg_roc_auc:0.7641222074528374
+e:34/4000 μ_l:0.93 g:2.97 g_max:9.63 clip:0.83 d_mu:4.00 d_ad:0.36 d0_mu:28.08 d0_ad:6.09 e_t:1.91s μ_e_t:1.97s t_t:66.96s avg_roc_auc:0.7578079207990127
+e:35/4000 μ_l:0.94 g:2.74 g_max:8.13 clip:0.83 d_mu:4.28 d_ad:0.34 d0_mu:28.68 d0_ad:6.22 e_t:1.90s μ_e_t:1.97s t_t:68.86s avg_roc_auc:0.7567304969237153
+e:36/4000 μ_l:0.66 g:2.55 g_max:10.18 clip:0.78 d_mu:4.21 d_ad:0.30 d0_mu:29.24 d0_ad:6.33 e_t:1.89s μ_e_t:1.97s t_t:70.75s avg_roc_auc:0.749668926441749
+e:37/4000 μ_l:0.75 g:3.75 g_max:19.58 clip:0.75 d_mu:4.08 d_ad:0.30 d0_mu:29.78 d0_ad:6.45 e_t:1.91s μ_e_t:1.96s t_t:72.66s avg_roc_auc:0.7562211658481612
+e:38/4000 μ_l:0.93 g:3.06 g_max:10.95 clip:0.77 d_mu:4.26 d_ad:0.28 d0_mu:30.25 d0_ad:6.56 e_t:1.90s μ_e_t:1.96s t_t:74.56s avg_roc_auc:0.7403236369267748
+e:39/4000 μ_l:0.91 g:2.98 g_max:9.95 clip:0.75 d_mu:4.00 d_ad:0.32 d0_mu:30.68 d0_ad:6.67 e_t:1.92s μ_e_t:1.96s t_t:76.47s avg_roc_auc:0.741555852428046
+e:40/4000 μ_l:0.84 g:2.69 g_max:8.68 clip:0.80 d_mu:4.08 d_ad:0.31 d0_mu:31.14 d0_ad:6.77 e_t:1.89s μ_e_t:1.96s t_t:78.37s avg_roc_auc:0.7551839004018951
+e:41/4000 μ_l:0.88 g:2.96 g_max:22.05 clip:0.80 d_mu:4.09 d_ad:0.31 d0_mu:31.58 d0_ad:6.88 e_t:1.91s μ_e_t:1.96s t_t:80.27s avg_roc_auc:0.7504628096975797
+e:42/4000 μ_l:0.83 g:2.50 g_max:9.78 clip:0.70 d_mu:4.44 d_ad:0.32 d0_mu:32.15 d0_ad:6.98 e_t:1.89s μ_e_t:1.96s t_t:82.16s avg_roc_auc:0.7670035047810051
+e:43/4000 μ_l:0.87 g:2.74 g_max:11.07 clip:0.78 d_mu:4.46 d_ad:0.35 d0_mu:32.67 d0_ad:7.08 e_t:1.89s μ_e_t:1.95s t_t:84.05s avg_roc_auc:0.7618602183419799
+e:44/4000 μ_l:0.84 g:2.87 g_max:10.47 clip:0.78 d_mu:4.65 d_ad:0.27 d0_mu:33.18 d0_ad:7.18 e_t:1.89s μ_e_t:1.95s t_t:85.95s avg_roc_auc:0.7626136621955174
+e:45/4000 μ_l:0.85 g:2.78 g_max:9.55 clip:0.72 d_mu:4.52 d_ad:0.25 d0_mu:33.66 d0_ad:7.28 e_t:1.89s μ_e_t:1.95s t_t:87.83s avg_roc_auc:0.7615738790489841
+e:46/4000 μ_l:0.87 g:3.08 g_max:13.12 clip:0.80 d_mu:4.19 d_ad:0.27 d0_mu:34.13 d0_ad:7.37 e_t:1.89s μ_e_t:1.95s t_t:89.72s avg_roc_auc:0.7608053732645291
+e:47/4000 μ_l:0.98 g:2.77 g_max:7.28 clip:0.84 d_mu:4.66 d_ad:0.29 d0_mu:34.59 d0_ad:7.47 e_t:1.90s μ_e_t:1.95s t_t:91.62s avg_roc_auc:0.7473331806005056
+e:48/4000 μ_l:0.90 g:3.49 g_max:16.22 clip:0.80 d_mu:4.14 d_ad:0.29 d0_mu:35.00 d0_ad:7.56 e_t:1.88s μ_e_t:1.95s t_t:93.50s avg_roc_auc:0.7653064886744266
+e:49/4000 μ_l:0.96 g:2.68 g_max:9.63 clip:0.83 d_mu:4.46 d_ad:0.27 d0_mu:35.46 d0_ad:7.66 e_t:1.90s μ_e_t:1.95s t_t:95.40s avg_roc_auc:0.7637288426139854
+e:50/4000 μ_l:0.91 g:2.80 g_max:10.84 clip:0.84 d_mu:4.38 d_ad:0.29 d0_mu:35.88 d0_ad:7.75 e_t:1.88s μ_e_t:1.95s t_t:97.29s avg_roc_auc:0.7632892733392694
+e:51/4000 μ_l:0.81 g:2.32 g_max:8.85 clip:0.72 d_mu:4.15 d_ad:0.27 d0_mu:36.32 d0_ad:7.84 e_t:1.90s μ_e_t:1.94s t_t:99.19s avg_roc_auc:0.7611568951925156
+e:52/4000 μ_l:0.82 g:2.73 g_max:10.47 clip:0.77 d_mu:4.65 d_ad:0.30 d0_mu:36.73 d0_ad:7.93 e_t:1.89s μ_e_t:1.94s t_t:101.07s avg_roc_auc:0.7733977888081885
+e:53/4000 μ_l:0.71 g:2.41 g_max:6.44 clip:0.72 d_mu:4.47 d_ad:0.32 d0_mu:37.19 d0_ad:8.02 e_t:1.88s μ_e_t:1.94s t_t:102.96s avg_roc_auc:0.756524003709157
+e:54/4000 μ_l:0.71 g:2.16 g_max:8.18 clip:0.64 d_mu:4.80 d_ad:0.25 d0_mu:37.68 d0_ad:8.10 e_t:1.90s μ_e_t:1.94s t_t:104.86s avg_roc_auc:0.7654622632998194
+e:55/4000 μ_l:0.90 g:2.96 g_max:14.24 clip:0.77 d_mu:4.75 d_ad:0.29 d0_mu:38.09 d0_ad:8.19 e_t:1.89s μ_e_t:1.94s t_t:106.74s avg_roc_auc:0.76924834612344
+e:56/4000 μ_l:0.89 g:2.73 g_max:12.21 clip:0.84 d_mu:4.54 d_ad:0.29 d0_mu:38.55 d0_ad:8.28 e_t:1.90s μ_e_t:1.94s t_t:108.64s avg_roc_auc:0.7646849013019628
+e:57/4000 μ_l:0.90 g:2.60 g_max:10.16 clip:0.72 d_mu:4.79 d_ad:0.28 d0_mu:38.97 d0_ad:8.36 e_t:1.91s μ_e_t:1.94s t_t:110.55s avg_roc_auc:0.7440099335256374
+e:58/4000 μ_l:0.84 g:2.64 g_max:8.15 clip:0.83 d_mu:4.64 d_ad:0.24 d0_mu:39.41 d0_ad:8.44 e_t:1.89s μ_e_t:1.94s t_t:112.44s avg_roc_auc:0.7723048592458661
+e:59/4000 μ_l:0.92 g:3.03 g_max:12.26 clip:0.89 d_mu:4.64 d_ad:0.27 d0_mu:39.80 d0_ad:8.52 e_t:1.91s μ_e_t:1.94s t_t:114.35s avg_roc_auc:0.771811270714226
+e:60/4000 μ_l:0.84 g:2.37 g_max:8.77 clip:0.78 d_mu:4.51 d_ad:0.25 d0_mu:40.27 d0_ad:8.61 e_t:1.89s μ_e_t:1.94s t_t:116.24s avg_roc_auc:0.7759158530191638
+e:61/4000 μ_l:0.85 g:2.75 g_max:9.13 clip:0.72 d_mu:4.47 d_ad:0.28 d0_mu:40.64 d0_ad:8.69 e_t:1.88s μ_e_t:1.94s t_t:118.12s avg_roc_auc:0.7746877742798673
+e:62/4000 μ_l:0.93 g:2.66 g_max:11.48 clip:0.81 d_mu:4.77 d_ad:0.32 d0_mu:41.01 d0_ad:8.77 e_t:1.91s μ_e_t:1.94s t_t:120.03s avg_roc_auc:0.7720587343743612
+e:63/4000 μ_l:0.74 g:2.66 g_max:10.00 clip:0.78 d_mu:5.12 d_ad:0.23 d0_mu:41.51 d0_ad:8.85 e_t:1.90s μ_e_t:1.94s t_t:121.93s avg_roc_auc:0.7743297012947621
+e:64/4000 μ_l:0.83 g:2.71 g_max:12.66 clip:0.73 d_mu:4.00 d_ad:0.25 d0_mu:41.90 d0_ad:8.93 e_t:1.90s μ_e_t:1.93s t_t:123.83s avg_roc_auc:0.7745683663848123
+e:65/4000 μ_l:0.77 g:2.23 g_max:7.67 clip:0.66 d_mu:5.06 d_ad:0.24 d0_mu:42.37 d0_ad:9.01 e_t:1.89s μ_e_t:1.93s t_t:125.73s avg_roc_auc:0.7797581265403482
+e:66/4000 μ_l:0.78 g:2.74 g_max:23.14 clip:0.80 d_mu:4.98 d_ad:0.27 d0_mu:42.79 d0_ad:9.08 e_t:1.90s μ_e_t:1.93s t_t:127.63s avg_roc_auc:0.7595808095954063
+e:67/4000 μ_l:0.72 g:2.27 g_max:7.37 clip:0.73 d_mu:5.26 d_ad:0.27 d0_mu:43.27 d0_ad:9.16 e_t:1.88s μ_e_t:1.93s t_t:129.52s avg_roc_auc:0.7698592940082032
+e:68/4000 μ_l:0.82 g:2.71 g_max:7.90 clip:0.78 d_mu:4.78 d_ad:0.25 d0_mu:43.68 d0_ad:9.23 e_t:1.88s μ_e_t:1.93s t_t:131.40s avg_roc_auc:0.7745915044864999
+e:69/4000 μ_l:0.98 g:2.84 g_max:8.48 clip:0.78 d_mu:4.71 d_ad:0.26 d0_mu:44.09 d0_ad:9.31 e_t:1.89s μ_e_t:1.93s t_t:133.29s avg_roc_auc:0.7791668924250658
+e:70/4000 μ_l:0.85 g:2.60 g_max:10.49 clip:0.70 d_mu:4.57 d_ad:0.24 d0_mu:44.47 d0_ad:9.38 e_t:1.89s μ_e_t:1.93s t_t:135.18s avg_roc_auc:0.7818681851925524
+e:71/4000 μ_l:0.82 g:3.05 g_max:11.54 clip:0.77 d_mu:4.85 d_ad:0.24 d0_mu:44.85 d0_ad:9.46 e_t:1.89s μ_e_t:1.93s t_t:137.07s avg_roc_auc:0.7791168354942396
+e:72/4000 μ_l:0.79 g:2.78 g_max:9.70 clip:0.73 d_mu:4.89 d_ad:0.28 d0_mu:45.24 d0_ad:9.53 e_t:1.90s μ_e_t:1.93s t_t:138.97s avg_roc_auc:0.7751795655128888
+e:73/4000 μ_l:0.89 g:3.01 g_max:10.51 clip:0.80 d_mu:4.95 d_ad:0.29 d0_mu:45.60 d0_ad:9.60 e_t:1.90s μ_e_t:1.93s t_t:140.87s avg_roc_auc:0.7776656607445357
+e:74/4000 μ_l:0.74 g:2.71 g_max:14.07 clip:0.72 d_mu:4.64 d_ad:0.24 d0_mu:45.98 d0_ad:9.67 e_t:1.88s μ_e_t:1.93s t_t:142.76s avg_roc_auc:0.7716259874836064
+e:75/4000 μ_l:0.68 g:2.17 g_max:7.32 clip:0.66 d_mu:4.80 d_ad:0.28 d0_mu:46.42 d0_ad:9.74 e_t:1.89s μ_e_t:1.93s t_t:144.64s avg_roc_auc:0.7871688741352838
+e:76/4000 μ_l:0.96 g:2.38 g_max:6.85 clip:0.73 d_mu:5.35 d_ad:0.27 d0_mu:46.81 d0_ad:9.81 e_t:1.90s μ_e_t:1.93s t_t:146.54s avg_roc_auc:0.776386742095222
+e:77/4000 μ_l:0.80 g:3.02 g_max:18.35 clip:0.77 d_mu:4.64 d_ad:0.26 d0_mu:47.20 d0_ad:9.88 e_t:1.92s μ_e_t:1.93s t_t:148.46s avg_roc_auc:0.775845015532842
+e:78/4000 μ_l:0.79 g:2.22 g_max:10.66 clip:0.67 d_mu:5.27 d_ad:0.24 d0_mu:47.59 d0_ad:9.95 e_t:1.93s μ_e_t:1.93s t_t:150.40s avg_roc_auc:0.780421577493909
+e:79/4000 μ_l:0.89 g:2.94 g_max:8.11 clip:0.89 d_mu:4.84 d_ad:0.29 d0_mu:47.91 d0_ad:10.02 e_t:1.89s μ_e_t:1.93s t_t:152.28s avg_roc_auc:0.7789428247224987
+e:80/4000 μ_l:0.79 g:2.55 g_max:10.08 clip:0.78 d_mu:4.85 d_ad:0.27 d0_mu:48.29 d0_ad:10.09 e_t:1.89s μ_e_t:1.93s t_t:154.18s avg_roc_auc:0.779675190303902
+e:81/4000 μ_l:0.80 g:3.15 g_max:17.91 clip:0.83 d_mu:4.74 d_ad:0.31 d0_mu:48.64 d0_ad:10.16 e_t:1.90s μ_e_t:1.93s t_t:156.08s avg_roc_auc:0.7675304623981131
+e:82/4000 μ_l:0.89 g:2.90 g_max:10.81 clip:0.88 d_mu:5.05 d_ad:0.27 d0_mu:49.02 d0_ad:10.23 e_t:1.88s μ_e_t:1.93s t_t:157.96s avg_roc_auc:0.7846347859474193
+e:83/4000 μ_l:0.88 g:3.13 g_max:13.41 clip:0.83 d_mu:5.06 d_ad:0.31 d0_mu:49.41 d0_ad:10.30 e_t:1.90s μ_e_t:1.93s t_t:159.86s avg_roc_auc:0.7874534173861034
+e:84/4000 μ_l:0.70 g:2.83 g_max:10.40 clip:0.77 d_mu:5.19 d_ad:0.27 d0_mu:49.82 d0_ad:10.36 e_t:1.89s μ_e_t:1.93s t_t:161.75s avg_roc_auc:0.7813455435370423
+e:85/4000 μ_l:0.82 g:2.56 g_max:8.29 clip:0.70 d_mu:4.77 d_ad:0.23 d0_mu:50.20 d0_ad:10.43 e_t:1.91s μ_e_t:1.93s t_t:163.66s avg_roc_auc:0.7821534131209331
+e:86/4000 μ_l:0.81 g:2.51 g_max:9.78 clip:0.64 d_mu:4.74 d_ad:0.22 d0_mu:50.52 d0_ad:10.50 e_t:1.89s μ_e_t:1.92s t_t:165.55s avg_roc_auc:0.7842677357955972
+e:87/4000 μ_l:0.96 g:3.10 g_max:14.40 clip:0.83 d_mu:4.88 d_ad:0.25 d0_mu:50.84 d0_ad:10.56 e_t:1.88s μ_e_t:1.92s t_t:167.43s avg_roc_auc:0.7765912543497946
+e:88/4000 μ_l:0.87 g:2.81 g_max:10.54 clip:0.73 d_mu:4.89 d_ad:0.24 d0_mu:51.18 d0_ad:10.62 e_t:1.88s μ_e_t:1.92s t_t:169.32s avg_roc_auc:0.7834104671321225
+e:89/4000 μ_l:0.82 g:2.91 g_max:10.89 clip:0.80 d_mu:5.00 d_ad:0.28 d0_mu:51.53 d0_ad:10.69 e_t:1.90s μ_e_t:1.92s t_t:171.22s avg_roc_auc:0.7779176392780212
+e:90/4000 μ_l:0.87 g:2.27 g_max:9.00 clip:0.75 d_mu:4.96 d_ad:0.24 d0_mu:51.91 d0_ad:10.75 e_t:1.89s μ_e_t:1.92s t_t:173.11s avg_roc_auc:0.7828964991957564
+e:91/4000 μ_l:0.86 g:2.82 g_max:13.49 clip:0.73 d_mu:5.13 d_ad:0.24 d0_mu:52.19 d0_ad:10.81 e_t:1.90s μ_e_t:1.92s t_t:175.00s avg_roc_auc:0.772497720467386
+e:92/4000 μ_l:0.89 g:2.53 g_max:6.44 clip:0.80 d_mu:4.48 d_ad:0.25 d0_mu:52.53 d0_ad:10.88 e_t:1.89s μ_e_t:1.92s t_t:176.89s avg_roc_auc:0.7812195538928611
+e:93/4000 μ_l:0.59 g:1.95 g_max:9.43 clip:0.62 d_mu:5.04 d_ad:0.21 d0_mu:52.86 d0_ad:10.94 e_t:1.90s μ_e_t:1.92s t_t:178.80s avg_roc_auc:0.7808058267175442
+e:94/4000 μ_l:0.81 g:2.46 g_max:10.99 clip:0.69 d_mu:5.02 d_ad:0.20 d0_mu:53.19 d0_ad:11.00 e_t:1.88s μ_e_t:1.92s t_t:180.68s avg_roc_auc:0.7768568006485882
+e:95/4000 μ_l:0.80 g:2.46 g_max:8.95 clip:0.84 d_mu:4.65 d_ad:0.23 d0_mu:53.49 d0_ad:11.06 e_t:1.90s μ_e_t:1.92s t_t:182.58s avg_roc_auc:0.7847784149946923
+e:96/4000 μ_l:0.90 g:2.70 g_max:9.85 clip:0.84 d_mu:5.20 d_ad:0.29 d0_mu:53.79 d0_ad:11.13 e_t:1.90s μ_e_t:1.92s t_t:184.48s avg_roc_auc:0.7828405850204381
+e:97/4000 μ_l:0.86 g:2.55 g_max:10.37 clip:0.72 d_mu:4.93 d_ad:0.28 d0_mu:54.13 d0_ad:11.19 e_t:1.91s μ_e_t:1.92s t_t:186.38s avg_roc_auc:0.7792574539955809
+e:98/4000 μ_l:0.96 g:2.51 g_max:9.91 clip:0.81 d_mu:4.94 d_ad:0.29 d0_mu:54.45 d0_ad:11.25 e_t:1.89s μ_e_t:1.92s t_t:188.27s avg_roc_auc:0.7813521781179444
+e:99/4000 μ_l:0.91 g:2.68 g_max:9.47 clip:0.77 d_mu:4.85 d_ad:0.25 d0_mu:54.76 d0_ad:11.31 e_t:1.89s μ_e_t:1.92s t_t:190.15s avg_roc_auc:0.7813490747900701
+e:100/4000 μ_l:0.85 g:3.10 g_max:16.64 clip:0.84 d_mu:5.04 d_ad:0.26 d0_mu:55.11 d0_ad:11.37 e_t:1.89s μ_e_t:1.92s t_t:192.05s avg_roc_auc:0.7834896655922277
+e:101/4000 μ_l:0.90 g:2.55 g_max:6.27 clip:0.80 d_mu:5.04 d_ad:0.30 d0_mu:55.44 d0_ad:11.43 e_t:1.89s μ_e_t:1.92s t_t:193.93s avg_roc_auc:0.7897241429167883
+e:102/4000 μ_l:0.82 g:2.79 g_max:8.33 clip:0.80 d_mu:5.46 d_ad:0.25 d0_mu:55.74 d0_ad:11.49 e_t:1.89s μ_e_t:1.92s t_t:195.82s avg_roc_auc:0.7770526981921807
+e:103/4000 μ_l:0.83 g:2.60 g_max:11.93 clip:0.73 d_mu:4.18 d_ad:0.22 d0_mu:56.01 d0_ad:11.55 e_t:1.90s μ_e_t:1.92s t_t:197.73s avg_roc_auc:0.7851563120494004
+e:104/4000 μ_l:0.76 g:2.46 g_max:15.30 clip:0.66 d_mu:4.71 d_ad:0.28 d0_mu:56.34 d0_ad:11.61 e_t:1.90s μ_e_t:1.92s t_t:199.63s avg_roc_auc:0.7883439143791027
+e:105/4000 μ_l:0.80 g:2.59 g_max:9.18 clip:0.80 d_mu:4.85 d_ad:0.22 d0_mu:56.63 d0_ad:11.67 e_t:1.92s μ_e_t:1.92s t_t:201.55s avg_roc_auc:0.7881685907523899
+e:106/4000 μ_l:0.78 g:2.99 g_max:11.42 clip:0.67 d_mu:5.01 d_ad:0.26 d0_mu:56.91 d0_ad:11.73 e_t:1.89s μ_e_t:1.92s t_t:203.44s avg_roc_auc:0.785504357794094
+e:107/4000 μ_l:0.72 g:2.41 g_max:9.81 clip:0.78 d_mu:5.01 d_ad:0.24 d0_mu:57.25 d0_ad:11.78 e_t:1.90s μ_e_t:1.92s t_t:205.35s avg_roc_auc:0.7859500628481715
+e:108/4000 μ_l:0.85 g:2.48 g_max:8.53 clip:0.72 d_mu:5.23 d_ad:0.26 d0_mu:57.53 d0_ad:11.84 e_t:1.89s μ_e_t:1.92s t_t:207.24s avg_roc_auc:0.7798288752372613
+e:109/4000 μ_l:0.86 g:2.80 g_max:10.89 clip:0.73 d_mu:4.91 d_ad:0.25 d0_mu:57.82 d0_ad:11.90 e_t:1.89s μ_e_t:1.92s t_t:209.13s avg_roc_auc:0.7832657295361575
+e:110/4000 μ_l:0.77 g:2.19 g_max:17.31 clip:0.72 d_mu:5.02 d_ad:0.23 d0_mu:58.13 d0_ad:11.95 e_t:1.89s μ_e_t:1.92s t_t:211.02s avg_roc_auc:0.7878190851872202
+e:111/4000 μ_l:0.85 g:2.69 g_max:10.26 clip:0.72 d_mu:5.06 d_ad:0.26 d0_mu:58.42 d0_ad:12.01 e_t:1.90s μ_e_t:1.92s t_t:212.92s avg_roc_auc:0.7894047166168309
+e:112/4000 μ_l:0.66 g:2.17 g_max:11.09 clip:0.66 d_mu:4.96 d_ad:0.24 d0_mu:58.77 d0_ad:12.07 e_t:1.88s μ_e_t:1.92s t_t:214.80s avg_roc_auc:0.788666965734115
+e:113/4000 μ_l:0.72 g:2.70 g_max:9.20 clip:0.81 d_mu:5.25 d_ad:0.21 d0_mu:59.04 d0_ad:12.13 e_t:1.90s μ_e_t:1.92s t_t:216.70s avg_roc_auc:0.7889551288589111
+e:114/4000 μ_l:0.83 g:2.31 g_max:7.70 clip:0.77 d_mu:4.74 d_ad:0.24 d0_mu:59.31 d0_ad:12.18 e_t:1.89s μ_e_t:1.92s t_t:218.59s avg_roc_auc:0.7846214904706483
+e:115/4000 μ_l:0.75 g:2.57 g_max:9.89 clip:0.70 d_mu:5.14 d_ad:0.25 d0_mu:59.63 d0_ad:12.24 e_t:1.89s μ_e_t:1.92s t_t:220.48s avg_roc_auc:0.782642015636024
+e:116/4000 μ_l:0.77 g:2.28 g_max:13.52 clip:0.69 d_mu:4.93 d_ad:0.26 d0_mu:59.93 d0_ad:12.30 e_t:1.90s μ_e_t:1.92s t_t:222.38s avg_roc_auc:0.7845557931032997
+e:117/4000 μ_l:0.81 g:2.62 g_max:9.21 clip:0.80 d_mu:5.08 d_ad:0.26 d0_mu:60.23 d0_ad:12.36 e_t:1.91s μ_e_t:1.92s t_t:224.29s avg_roc_auc:0.7871279252644783
+e:118/4000 μ_l:0.79 g:2.44 g_max:16.85 clip:0.69 d_mu:5.34 d_ad:0.24 d0_mu:60.56 d0_ad:12.41 e_t:1.90s μ_e_t:1.92s t_t:226.19s avg_roc_auc:0.7895889059235862
+e:119/4000 μ_l:0.82 g:2.90 g_max:7.33 clip:0.88 d_mu:5.33 d_ad:0.19 d0_mu:60.85 d0_ad:12.47 e_t:1.89s μ_e_t:1.92s t_t:228.08s avg_roc_auc:0.7834169203812412
+e:120/4000 μ_l:0.84 g:2.75 g_max:8.53 clip:0.81 d_mu:4.73 d_ad:0.34 d0_mu:61.12 d0_ad:12.52 e_t:1.90s μ_e_t:1.92s t_t:229.98s avg_roc_auc:0.7913261865144813
+e:121/4000 μ_l:0.85 g:2.46 g_max:12.50 clip:0.72 d_mu:5.20 d_ad:0.32 d0_mu:61.36 d0_ad:12.58 e_t:1.90s μ_e_t:1.92s t_t:231.88s avg_roc_auc:0.7780919881708313
+e:122/4000 μ_l:0.92 g:2.92 g_max:20.29 clip:0.81 d_mu:4.69 d_ad:0.24 d0_mu:61.67 d0_ad:12.64 e_t:1.89s μ_e_t:1.92s t_t:233.77s avg_roc_auc:0.7903319814803513
+e:123/4000 μ_l:0.82 g:2.42 g_max:8.52 clip:0.77 d_mu:5.06 d_ad:0.20 d0_mu:61.96 d0_ad:12.69 e_t:1.88s μ_e_t:1.92s t_t:235.65s avg_roc_auc:0.7848149320145493
+e:124/4000 μ_l:0.77 g:2.25 g_max:9.30 clip:0.70 d_mu:4.71 d_ad:0.24 d0_mu:62.21 d0_ad:12.75 e_t:1.90s μ_e_t:1.92s t_t:237.56s avg_roc_auc:0.7896277222064687
+e:125/4000 μ_l:0.78 g:2.74 g_max:18.91 clip:0.70 d_mu:4.98 d_ad:0.23 d0_mu:62.48 d0_ad:12.80 e_t:1.90s μ_e_t:1.92s t_t:239.46s avg_roc_auc:0.7926563667292055
+e:126/4000 μ_l:0.76 g:2.24 g_max:8.81 clip:0.72 d_mu:4.99 d_ad:0.24 d0_mu:62.77 d0_ad:12.86 e_t:1.90s μ_e_t:1.92s t_t:241.36s avg_roc_auc:0.7947972811963101
+e:127/4000 μ_l:0.80 g:2.92 g_max:9.01 clip:0.73 d_mu:5.09 d_ad:0.29 d0_mu:63.07 d0_ad:12.91 e_t:1.90s μ_e_t:1.92s t_t:243.26s avg_roc_auc:0.7915655863762819
+e:128/4000 μ_l:0.74 g:2.43 g_max:15.46 clip:0.73 d_mu:5.00 d_ad:0.20 d0_mu:63.37 d0_ad:12.97 e_t:1.89s μ_e_t:1.92s t_t:245.14s avg_roc_auc:0.7909361198114035
+e:129/4000 μ_l:0.83 g:2.71 g_max:8.39 clip:0.73 d_mu:4.95 d_ad:0.24 d0_mu:63.60 d0_ad:13.02 e_t:1.90s μ_e_t:1.92s t_t:247.04s avg_roc_auc:0.7838455454165525
+e:130/4000 μ_l:0.68 g:2.17 g_max:10.44 clip:0.70 d_mu:4.97 d_ad:0.25 d0_mu:63.91 d0_ad:13.07 e_t:1.89s μ_e_t:1.91s t_t:248.93s avg_roc_auc:0.792216379483559
+e:131/4000 μ_l:0.89 g:2.86 g_max:19.80 clip:0.84 d_mu:5.39 d_ad:0.28 d0_mu:64.19 d0_ad:13.12 e_t:1.89s μ_e_t:1.91s t_t:250.81s avg_roc_auc:0.7929264917545796
+e:132/4000 μ_l:0.78 g:2.28 g_max:7.97 clip:0.75 d_mu:4.89 d_ad:0.20 d0_mu:64.52 d0_ad:13.17 e_t:1.90s μ_e_t:1.91s t_t:252.71s avg_roc_auc:0.7944421357801776
+e:133/4000 μ_l:0.79 g:2.30 g_max:8.63 clip:0.70 d_mu:5.15 d_ad:0.22 d0_mu:64.81 d0_ad:13.23 e_t:1.90s μ_e_t:1.91s t_t:254.62s avg_roc_auc:0.7892236652473383
+e:134/4000 μ_l:0.75 g:2.45 g_max:8.46 clip:0.72 d_mu:5.42 d_ad:0.21 d0_mu:65.10 d0_ad:13.28 e_t:1.91s μ_e_t:1.91s t_t:256.53s avg_roc_auc:0.7917861809066695
+e:135/4000 μ_l:0.85 g:2.39 g_max:8.60 clip:0.75 d_mu:4.66 d_ad:0.27 d0_mu:65.33 d0_ad:13.33 e_t:1.89s μ_e_t:1.91s t_t:258.42s avg_roc_auc:0.7922974557545548
+e:136/4000 μ_l:0.93 g:2.88 g_max:14.84 clip:0.73 d_mu:5.31 d_ad:0.27 d0_mu:65.59 d0_ad:13.38 e_t:1.90s μ_e_t:1.91s t_t:260.32s avg_roc_auc:0.7939015207994081
+e:137/4000 μ_l:0.91 g:2.62 g_max:8.50 clip:0.77 d_mu:5.43 d_ad:0.29 d0_mu:65.83 d0_ad:13.44 e_t:1.89s μ_e_t:1.91s t_t:262.21s avg_roc_auc:0.7885069708152928
+e:138/4000 μ_l:0.72 g:2.39 g_max:8.51 clip:0.75 d_mu:5.47 d_ad:0.23 d0_mu:66.14 d0_ad:13.49 e_t:1.90s μ_e_t:1.91s t_t:264.11s avg_roc_auc:0.7900576528100859
+e:139/4000 μ_l:0.73 g:2.46 g_max:7.44 clip:0.67 d_mu:5.03 d_ad:0.24 d0_mu:66.45 d0_ad:13.54 e_t:1.90s μ_e_t:1.91s t_t:266.01s avg_roc_auc:0.793650131991833
+e:140/4000 μ_l:0.71 g:2.56 g_max:15.22 clip:0.73 d_mu:5.14 d_ad:0.39 d0_mu:66.72 d0_ad:13.59 e_t:1.90s μ_e_t:1.91s t_t:267.91s avg_roc_auc:0.7933947491446333
+e:141/4000 μ_l:0.80 g:2.78 g_max:13.50 clip:0.72 d_mu:5.07 d_ad:0.31 d0_mu:66.99 d0_ad:13.65 e_t:1.90s μ_e_t:1.91s t_t:269.81s avg_roc_auc:0.7931837020058929
+e:142/4000 μ_l:0.82 g:2.32 g_max:8.79 clip:0.72 d_mu:5.31 d_ad:0.20 d0_mu:67.25 d0_ad:13.70 e_t:1.90s μ_e_t:1.91s t_t:271.71s avg_roc_auc:0.7924955896609949
+e:143/4000 μ_l:0.87 g:2.52 g_max:6.98 clip:0.80 d_mu:4.61 d_ad:0.20 d0_mu:67.49 d0_ad:13.75 e_t:1.90s μ_e_t:1.91s t_t:273.61s avg_roc_auc:0.7932461320105629
+e:144/4000 μ_l:0.95 g:3.22 g_max:10.61 clip:0.84 d_mu:4.77 d_ad:0.25 d0_mu:67.69 d0_ad:13.80 e_t:1.90s μ_e_t:1.91s t_t:275.51s avg_roc_auc:0.7929655268904358
+e:145/4000 μ_l:0.66 g:1.93 g_max:6.05 clip:0.66 d_mu:5.09 d_ad:0.23 d0_mu:67.91 d0_ad:13.85 e_t:1.90s μ_e_t:1.91s t_t:277.41s avg_roc_auc:0.778788580507607
+e:146/4000 μ_l:0.82 g:2.74 g_max:11.81 clip:0.78 d_mu:4.98 d_ad:0.22 d0_mu:68.17 d0_ad:13.90 e_t:1.91s μ_e_t:1.91s t_t:279.32s avg_roc_auc:0.7942005850056482
+e:147/4000 μ_l:0.78 g:2.25 g_max:6.28 clip:0.72 d_mu:5.19 d_ad:0.28 d0_mu:68.43 d0_ad:13.95 e_t:1.90s μ_e_t:1.91s t_t:281.21s avg_roc_auc:0.7945523431893408
+e:148/4000 μ_l:0.76 g:2.49 g_max:12.60 clip:0.70 d_mu:5.32 d_ad:0.27 d0_mu:68.69 d0_ad:14.01 e_t:1.90s μ_e_t:1.91s t_t:283.11s avg_roc_auc:0.7879811298133601
+e:149/4000 μ_l:0.83 g:2.56 g_max:10.94 clip:0.73 d_mu:5.31 d_ad:0.25 d0_mu:68.97 d0_ad:14.06 e_t:1.89s μ_e_t:1.91s t_t:285.00s avg_roc_auc:0.79827375926127
+e:150/4000 μ_l:0.88 g:2.72 g_max:16.90 clip:0.67 d_mu:5.09 d_ad:0.24 d0_mu:69.20 d0_ad:14.11 e_t:1.90s μ_e_t:1.91s t_t:286.90s avg_roc_auc:0.7913189230057857
+e:151/4000 μ_l:0.86 g:2.82 g_max:12.97 clip:0.77 d_mu:5.12 d_ad:0.29 d0_mu:69.48 d0_ad:14.16 e_t:1.89s μ_e_t:1.91s t_t:288.79s avg_roc_auc:0.7940124027197306
+e:152/4000 μ_l:0.76 g:2.42 g_max:9.57 clip:0.67 d_mu:5.57 d_ad:0.25 d0_mu:69.77 d0_ad:14.21 e_t:1.89s μ_e_t:1.91s t_t:290.68s avg_roc_auc:0.7918371088093399
+e:153/4000 μ_l:0.72 g:2.19 g_max:11.74 clip:0.70 d_mu:5.15 d_ad:0.22 d0_mu:70.05 d0_ad:14.26 e_t:1.89s μ_e_t:1.91s t_t:292.57s avg_roc_auc:0.7948561718956658
+e:154/4000 μ_l:0.79 g:2.53 g_max:11.82 clip:0.70 d_mu:5.03 d_ad:0.24 d0_mu:70.28 d0_ad:14.31 e_t:1.89s μ_e_t:1.91s t_t:294.45s avg_roc_auc:0.7894877689950878
+e:155/4000 μ_l:0.91 g:2.65 g_max:7.18 clip:0.77 d_mu:5.38 d_ad:0.22 d0_mu:70.56 d0_ad:14.36 e_t:1.90s μ_e_t:1.91s t_t:296.35s avg_roc_auc:0.7888637927483276
+e:156/4000 μ_l:0.87 g:2.59 g_max:8.97 clip:0.78 d_mu:5.06 d_ad:0.30 d0_mu:70.75 d0_ad:14.41 e_t:1.89s μ_e_t:1.91s t_t:298.23s avg_roc_auc:0.7918051150297278
+e:157/4000 μ_l:0.74 g:2.03 g_max:8.01 clip:0.69 d_mu:5.22 d_ad:0.24 d0_mu:71.05 d0_ad:14.46 e_t:1.90s μ_e_t:1.91s t_t:300.14s avg_roc_auc:0.7905419607131223
+e:158/4000 μ_l:0.82 g:2.60 g_max:12.70 clip:0.78 d_mu:4.98 d_ad:0.25 d0_mu:71.33 d0_ad:14.51 e_t:1.89s μ_e_t:1.91s t_t:302.03s avg_roc_auc:0.791540765818874
+e:159/4000 μ_l:0.59 g:2.09 g_max:10.73 clip:0.67 d_mu:5.21 d_ad:0.23 d0_mu:71.58 d0_ad:14.56 e_t:1.91s μ_e_t:1.91s t_t:303.95s avg_roc_auc:0.783125246961357
+e:160/4000 μ_l:0.81 g:2.47 g_max:9.24 clip:0.77 d_mu:5.00 d_ad:0.22 d0_mu:71.82 d0_ad:14.61 e_t:1.89s μ_e_t:1.91s t_t:305.83s avg_roc_auc:0.7910698031077252
+e:161/4000 μ_l:0.71 g:2.34 g_max:7.36 clip:0.70 d_mu:5.19 d_ad:0.22 d0_mu:72.08 d0_ad:14.66 e_t:1.89s μ_e_t:1.91s t_t:307.72s avg_roc_auc:0.793545954268093
+e:162/4000 μ_l:0.81 g:2.48 g_max:10.17 clip:0.75 d_mu:4.97 d_ad:0.21 d0_mu:72.37 d0_ad:14.71 e_t:1.90s μ_e_t:1.91s t_t:309.63s avg_roc_auc:0.7911029602289461
+e:163/4000 μ_l:0.81 g:2.68 g_max:10.56 clip:0.73 d_mu:5.13 d_ad:0.32 d0_mu:72.58 d0_ad:14.76 e_t:1.90s μ_e_t:1.91s t_t:311.52s avg_roc_auc:0.792211790427639
+e:164/4000 μ_l:0.83 g:2.67 g_max:13.47 clip:0.72 d_mu:4.92 d_ad:0.30 d0_mu:72.86 d0_ad:14.81 e_t:1.89s μ_e_t:1.91s t_t:313.41s avg_roc_auc:0.792102356730227
+e:165/4000 μ_l:0.69 g:2.12 g_max:7.85 clip:0.69 d_mu:5.88 d_ad:0.27 d0_mu:73.13 d0_ad:14.86 e_t:1.88s μ_e_t:1.91s t_t:315.29s avg_roc_auc:0.7880183128007862
+e:166/4000 μ_l:0.82 g:2.39 g_max:15.55 clip:0.77 d_mu:5.46 d_ad:0.28 d0_mu:73.37 d0_ad:14.91 e_t:1.90s μ_e_t:1.91s t_t:317.19s avg_roc_auc:0.792273082091564
+e:167/4000 μ_l:0.81 g:2.81 g_max:12.13 clip:0.73 d_mu:4.72 d_ad:0.24 d0_mu:73.59 d0_ad:14.96 e_t:1.90s μ_e_t:1.91s t_t:319.09s avg_roc_auc:0.7871216521479649
+e:168/4000 μ_l:0.79 g:2.30 g_max:9.16 clip:0.81 d_mu:4.94 d_ad:0.20 d0_mu:73.81 d0_ad:15.01 e_t:1.89s μ_e_t:1.91s t_t:320.98s avg_roc_auc:0.7935583517953221
+e:169/4000 μ_l:0.86 g:2.56 g_max:8.91 clip:0.81 d_mu:5.24 d_ad:0.26 d0_mu:74.05 d0_ad:15.06 e_t:1.90s μ_e_t:1.91s t_t:322.88s avg_roc_auc:0.7896838872105298
+e:170/4000 μ_l:0.80 g:2.47 g_max:8.88 clip:0.78 d_mu:4.94 d_ad:0.29 d0_mu:74.32 d0_ad:15.10 e_t:1.89s μ_e_t:1.91s t_t:324.77s avg_roc_auc:0.7919511972212526
+e:171/4000 μ_l:0.84 g:2.64 g_max:11.40 clip:0.75 d_mu:5.34 d_ad:0.24 d0_mu:74.59 d0_ad:15.15 e_t:1.89s μ_e_t:1.91s t_t:326.66s avg_roc_auc:0.7939451108752158
+e:172/4000 μ_l:0.67 g:2.04 g_max:8.09 clip:0.66 d_mu:5.07 d_ad:0.18 d0_mu:74.84 d0_ad:15.20 e_t:1.91s μ_e_t:1.91s t_t:328.56s avg_roc_auc:0.7907491160003506
+e:173/4000 μ_l:0.85 g:2.25 g_max:9.06 clip:0.67 d_mu:4.97 d_ad:0.21 d0_mu:75.05 d0_ad:15.25 e_t:1.90s μ_e_t:1.91s t_t:330.46s avg_roc_auc:0.7951652743966179
+e:174/4000 μ_l:0.81 g:2.01 g_max:6.11 clip:0.69 d_mu:4.76 d_ad:0.21 d0_mu:75.26 d0_ad:15.29 e_t:1.91s μ_e_t:1.91s t_t:332.37s avg_roc_auc:0.7982300045621846
+e:175/4000 μ_l:0.78 g:2.58 g_max:11.27 clip:0.72 d_mu:5.26 d_ad:0.23 d0_mu:75.49 d0_ad:15.34 e_t:1.92s μ_e_t:1.91s t_t:334.29s avg_roc_auc:0.8007764552374685
+e:176/4000 μ_l:0.79 g:2.36 g_max:11.13 clip:0.77 d_mu:5.09 d_ad:0.35 d0_mu:75.71 d0_ad:15.39 e_t:1.89s μ_e_t:1.91s t_t:336.18s avg_roc_auc:0.8006422246997387
+e:177/4000 μ_l:0.76 g:2.31 g_max:13.98 clip:0.69 d_mu:5.49 d_ad:0.21 d0_mu:75.97 d0_ad:15.44 e_t:1.89s μ_e_t:1.91s t_t:338.08s avg_roc_auc:0.7963003126889333
+e:178/4000 μ_l:0.71 g:2.36 g_max:13.28 clip:0.70 d_mu:5.14 d_ad:0.18 d0_mu:76.23 d0_ad:15.49 e_t:1.90s μ_e_t:1.91s t_t:339.98s avg_roc_auc:0.8028214513836973
+e:179/4000 μ_l:0.75 g:2.43 g_max:14.74 clip:0.64 d_mu:5.04 d_ad:0.24 d0_mu:76.45 d0_ad:15.53 e_t:1.90s μ_e_t:1.91s t_t:341.87s avg_roc_auc:0.7981114228150828
+e:180/4000 μ_l:0.88 g:2.68 g_max:12.74 clip:0.78 d_mu:5.40 d_ad:0.26 d0_mu:76.69 d0_ad:15.58 e_t:1.92s μ_e_t:1.91s t_t:343.79s avg_roc_auc:0.7997236666585854
+e:181/4000 μ_l:0.85 g:2.78 g_max:14.59 clip:0.70 d_mu:5.22 d_ad:0.23 d0_mu:76.95 d0_ad:15.62 e_t:1.91s μ_e_t:1.91s t_t:345.70s avg_roc_auc:0.7967676115822198
+e:182/4000 μ_l:0.88 g:2.61 g_max:7.18 clip:0.73 d_mu:5.73 d_ad:0.23 d0_mu:77.19 d0_ad:15.67 e_t:1.90s μ_e_t:1.91s t_t:347.60s avg_roc_auc:0.7920232165382584
+e:183/4000 μ_l:0.73 g:2.47 g_max:30.22 clip:0.70 d_mu:4.93 d_ad:0.26 d0_mu:77.43 d0_ad:15.72 e_t:1.91s μ_e_t:1.91s t_t:349.51s avg_roc_auc:0.7960293073698962
+e:184/4000 μ_l:0.77 g:2.05 g_max:12.47 clip:0.59 d_mu:5.95 d_ad:0.21 d0_mu:77.70 d0_ad:15.76 e_t:1.88s μ_e_t:1.91s t_t:351.39s avg_roc_auc:0.8028222666141339
+e:185/4000 μ_l:0.69 g:2.40 g_max:9.71 clip:0.78 d_mu:4.62 d_ad:0.20 d0_mu:77.93 d0_ad:15.81 e_t:1.89s μ_e_t:1.91s t_t:353.28s avg_roc_auc:0.8019089926967047
+e:186/4000 μ_l:0.73 g:2.22 g_max:12.69 clip:0.67 d_mu:5.20 d_ad:0.25 d0_mu:78.15 d0_ad:15.85 e_t:1.90s μ_e_t:1.91s t_t:355.18s avg_roc_auc:0.8020980590625375
+e:187/4000 μ_l:0.75 g:2.08 g_max:6.36 clip:0.66 d_mu:5.88 d_ad:0.25 d0_mu:78.44 d0_ad:15.90 e_t:1.90s μ_e_t:1.91s t_t:357.08s avg_roc_auc:0.7924362435303344
+e:188/4000 μ_l:0.71 g:2.25 g_max:11.15 clip:0.67 d_mu:5.06 d_ad:0.20 d0_mu:78.71 d0_ad:15.94 e_t:1.90s μ_e_t:1.91s t_t:358.97s avg_roc_auc:0.7975501743204843
+e:189/4000 μ_l:0.81 g:2.65 g_max:9.90 clip:0.86 d_mu:5.07 d_ad:0.40 d0_mu:78.94 d0_ad:15.99 e_t:1.89s μ_e_t:1.91s t_t:360.87s avg_roc_auc:0.797381728231996
+e:190/4000 μ_l:0.85 g:2.79 g_max:12.54 clip:0.69 d_mu:5.86 d_ad:0.30 d0_mu:79.22 d0_ad:16.04 e_t:1.90s μ_e_t:1.91s t_t:362.77s avg_roc_auc:0.7968952190383272
+e:191/4000 μ_l:0.89 g:2.37 g_max:10.73 clip:0.67 d_mu:5.47 d_ad:0.21 d0_mu:79.46 d0_ad:16.08 e_t:1.90s μ_e_t:1.91s t_t:364.67s avg_roc_auc:0.7948693095374288
+e:192/4000 μ_l:0.69 g:2.36 g_max:16.73 clip:0.66 d_mu:5.43 d_ad:0.26 d0_mu:79.73 d0_ad:16.13 e_t:1.90s μ_e_t:1.91s t_t:366.57s avg_roc_auc:0.7949439408685375
+e:193/4000 μ_l:0.72 g:2.50 g_max:8.09 clip:0.67 d_mu:5.53 d_ad:0.23 d0_mu:79.95 d0_ad:16.17 e_t:1.89s μ_e_t:1.91s t_t:368.47s avg_roc_auc:0.7933116318037196
+e:194/4000 μ_l:0.79 g:2.25 g_max:7.36 clip:0.75 d_mu:5.24 d_ad:0.20 d0_mu:80.22 d0_ad:16.22 e_t:1.90s μ_e_t:1.91s t_t:370.36s avg_roc_auc:0.7980245725345196
+e:195/4000 μ_l:0.79 g:2.42 g_max:8.92 clip:0.78 d_mu:5.29 d_ad:0.26 d0_mu:80.47 d0_ad:16.26 e_t:1.90s μ_e_t:1.91s t_t:372.26s avg_roc_auc:0.7929814756077118
+e:196/4000 μ_l:0.65 g:2.11 g_max:8.23 clip:0.66 d_mu:5.21 d_ad:0.19 d0_mu:80.71 d0_ad:16.31 e_t:1.90s μ_e_t:1.91s t_t:374.16s avg_roc_auc:0.796908098886676
+e:197/4000 μ_l:0.84 g:2.73 g_max:9.70 clip:0.81 d_mu:5.44 d_ad:0.38 d0_mu:80.91 d0_ad:16.36 e_t:1.90s μ_e_t:1.91s t_t:376.06s avg_roc_auc:0.7948856259004888
+e:198/4000 μ_l:0.75 g:2.12 g_max:11.47 clip:0.67 d_mu:5.33 d_ad:0.22 d0_mu:81.15 d0_ad:16.40 e_t:1.90s μ_e_t:1.91s t_t:377.96s avg_roc_auc:0.7953215791392015
+e:199/4000 μ_l:0.71 g:2.33 g_max:12.10 clip:0.64 d_mu:5.29 d_ad:0.23 d0_mu:81.36 d0_ad:16.44 e_t:1.90s μ_e_t:1.91s t_t:379.86s avg_roc_auc:0.7982062230061528
+e:200/4000 μ_l:0.75 g:2.34 g_max:13.74 clip:0.59 d_mu:5.31 d_ad:0.19 d0_mu:81.58 d0_ad:16.49 e_t:1.89s μ_e_t:1.91s t_t:381.75s avg_roc_auc:0.8012485400862867
+e:201/4000 μ_l:0.77 g:2.56 g_max:14.13 clip:0.70 d_mu:5.01 d_ad:0.18 d0_mu:81.82 d0_ad:16.53 e_t:2.20s μ_e_t:1.91s t_t:383.95s avg_roc_auc:0.8006699274938989
+e:202/4000 μ_l:0.78 g:2.67 g_max:11.52 clip:0.77 d_mu:5.28 d_ad:0.24 d0_mu:82.02 d0_ad:16.58 e_t:1.91s μ_e_t:1.91s t_t:385.86s avg_roc_auc:0.799372237834662
+e:203/4000 μ_l:0.84 g:2.57 g_max:9.30 clip:0.77 d_mu:5.15 d_ad:0.26 d0_mu:82.24 d0_ad:16.62 e_t:1.90s μ_e_t:1.91s t_t:387.76s avg_roc_auc:0.8014385008907808
+e:204/4000 μ_l:0.79 g:2.81 g_max:14.98 clip:0.72 d_mu:5.15 d_ad:0.34 d0_mu:82.45 d0_ad:16.67 e_t:1.90s μ_e_t:1.91s t_t:389.66s avg_roc_auc:0.7987040520883707
+e:205/4000 μ_l:0.80 g:2.61 g_max:14.38 clip:0.73 d_mu:5.93 d_ad:0.24 d0_mu:82.71 d0_ad:16.71 e_t:1.89s μ_e_t:1.91s t_t:391.55s avg_roc_auc:0.7875634988261456
+e:206/4000 μ_l:0.77 g:2.34 g_max:6.61 clip:0.73 d_mu:4.67 d_ad:0.20 d0_mu:82.92 d0_ad:16.75 e_t:1.89s μ_e_t:1.91s t_t:393.44s avg_roc_auc:0.7999877852617693
+e:207/4000 μ_l:0.89 g:2.43 g_max:10.35 clip:0.80 d_mu:5.42 d_ad:0.21 d0_mu:83.15 d0_ad:16.79 e_t:1.89s μ_e_t:1.91s t_t:395.33s avg_roc_auc:0.8001167537604372
+e:208/4000 μ_l:0.78 g:2.48 g_max:8.36 clip:0.70 d_mu:5.44 d_ad:0.22 d0_mu:83.36 d0_ad:16.84 e_t:1.89s μ_e_t:1.91s t_t:397.22s avg_roc_auc:0.8009680719914553
+e:209/4000 μ_l:0.77 g:2.63 g_max:11.02 clip:0.75 d_mu:5.26 d_ad:0.25 d0_mu:83.60 d0_ad:16.88 e_t:1.90s μ_e_t:1.91s t_t:399.12s avg_roc_auc:0.8002215124216153
+e:210/4000 μ_l:0.74 g:2.55 g_max:25.82 clip:0.69 d_mu:5.14 d_ad:0.24 d0_mu:83.83 d0_ad:16.92 e_t:1.90s μ_e_t:1.91s t_t:401.02s avg_roc_auc:0.7994724341829403
+e:211/4000 μ_l:0.77 g:2.72 g_max:25.89 clip:0.70 d_mu:5.30 d_ad:0.20 d0_mu:84.07 d0_ad:16.97 e_t:1.89s μ_e_t:1.91s t_t:402.91s avg_roc_auc:0.8004181428391212
+e:212/4000 μ_l:0.75 g:2.46 g_max:15.77 clip:0.69 d_mu:4.92 d_ad:0.23 d0_mu:84.29 d0_ad:17.01 e_t:1.90s μ_e_t:1.91s t_t:404.80s avg_roc_auc:0.7984390013586127
+e:213/4000 μ_l:0.83 g:2.54 g_max:17.25 clip:0.70 d_mu:4.77 d_ad:0.21 d0_mu:84.46 d0_ad:17.05 e_t:1.89s μ_e_t:1.91s t_t:406.69s avg_roc_auc:0.7985134473967678
+e:214/4000 μ_l:0.85 g:2.96 g_max:12.61 clip:0.78 d_mu:5.27 d_ad:0.20 d0_mu:84.71 d0_ad:17.10 e_t:1.89s μ_e_t:1.91s t_t:408.59s avg_roc_auc:0.7969049885729899
+e:215/4000 μ_l:0.78 g:2.74 g_max:8.67 clip:0.78 d_mu:5.27 d_ad:0.33 d0_mu:84.93 d0_ad:17.14 e_t:1.88s μ_e_t:1.91s t_t:410.47s avg_roc_auc:0.8005385621828655
+e:216/4000 μ_l:0.82 g:2.17 g_max:7.12 clip:0.70 d_mu:5.77 d_ad:0.19 d0_mu:85.16 d0_ad:17.19 e_t:1.90s μ_e_t:1.91s t_t:412.37s avg_roc_auc:0.7945883005851302
+e:217/4000 μ_l:0.73 g:2.49 g_max:10.00 clip:0.69 d_mu:5.17 d_ad:0.27 d0_mu:85.38 d0_ad:17.23 e_t:1.88s μ_e_t:1.91s t_t:414.25s avg_roc_auc:0.7966847638858332
+e:218/4000 μ_l:0.94 g:3.00 g_max:16.35 clip:0.81 d_mu:5.14 d_ad:0.25 d0_mu:85.58 d0_ad:17.27 e_t:1.90s μ_e_t:1.91s t_t:416.15s avg_roc_auc:0.7948041756878939
+e:219/4000 μ_l:0.86 g:2.78 g_max:12.94 clip:0.78 d_mu:5.44 d_ad:0.25 d0_mu:85.81 d0_ad:17.31 e_t:1.88s μ_e_t:1.91s t_t:418.03s avg_roc_auc:0.7973382653640095
+e:220/4000 μ_l:0.69 g:2.06 g_max:8.70 clip:0.64 d_mu:5.27 d_ad:0.19 d0_mu:86.02 d0_ad:17.35 e_t:1.90s μ_e_t:1.91s t_t:419.93s avg_roc_auc:0.7960835077109579
+e:221/4000 μ_l:0.74 g:2.14 g_max:7.79 clip:0.66 d_mu:5.12 d_ad:0.19 d0_mu:86.23 d0_ad:17.40 e_t:1.90s μ_e_t:1.91s t_t:421.83s avg_roc_auc:0.7934731955381613
+e:222/4000 μ_l:0.77 g:2.66 g_max:10.42 clip:0.78 d_mu:5.20 d_ad:0.22 d0_mu:86.43 d0_ad:17.44 e_t:1.90s μ_e_t:1.91s t_t:423.72s avg_roc_auc:0.8000673615672058
+e:223/4000 μ_l:0.77 g:2.49 g_max:10.06 clip:0.78 d_mu:5.56 d_ad:0.18 d0_mu:86.63 d0_ad:17.48 e_t:1.91s μ_e_t:1.91s t_t:425.63s avg_roc_auc:0.7954955434007379
+e:224/4000 μ_l:0.80 g:2.25 g_max:10.51 clip:0.66 d_mu:4.91 d_ad:0.19 d0_mu:86.81 d0_ad:17.52 e_t:1.89s μ_e_t:1.91s t_t:427.52s avg_roc_auc:0.7983382871327105
+e:225/4000 μ_l:0.74 g:1.94 g_max:6.02 clip:0.69 d_mu:4.92 d_ad:0.23 d0_mu:86.98 d0_ad:17.56 e_t:1.89s μ_e_t:1.91s t_t:429.41s avg_roc_auc:0.7976036889576255
+e:226/4000 μ_l:0.82 g:2.37 g_max:9.29 clip:0.80 d_mu:5.53 d_ad:0.20 d0_mu:87.19 d0_ad:17.60 e_t:1.89s μ_e_t:1.91s t_t:431.31s avg_roc_auc:0.7991617619529733
+e:227/4000 μ_l:0.86 g:2.68 g_max:10.92 clip:0.78 d_mu:5.06 d_ad:0.18 d0_mu:87.36 d0_ad:17.64 e_t:1.89s μ_e_t:1.91s t_t:433.19s avg_roc_auc:0.7924851229994018
+e:228/4000 μ_l:0.66 g:2.18 g_max:7.97 clip:0.73 d_mu:5.48 d_ad:0.21 d0_mu:87.59 d0_ad:17.68 e_t:1.91s μ_e_t:1.91s t_t:435.11s avg_roc_auc:0.8004988245120707
+e:229/4000 μ_l:0.87 g:2.44 g_max:6.00 clip:0.77 d_mu:5.05 d_ad:0.20 d0_mu:87.81 d0_ad:17.72 e_t:1.88s μ_e_t:1.91s t_t:436.99s avg_roc_auc:0.7994552222152569
+e:230/4000 μ_l:0.74 g:2.30 g_max:11.13 clip:0.69 d_mu:5.74 d_ad:0.21 d0_mu:88.05 d0_ad:17.76 e_t:1.88s μ_e_t:1.91s t_t:438.87s avg_roc_auc:0.7997517009484937
+e:231/4000 μ_l:0.71 g:2.19 g_max:10.97 clip:0.69 d_mu:5.79 d_ad:0.18 d0_mu:88.29 d0_ad:17.80 e_t:1.90s μ_e_t:1.91s t_t:440.77s avg_roc_auc:0.801292045723307
+e:232/4000 μ_l:0.79 g:2.36 g_max:14.28 clip:0.75 d_mu:5.29 d_ad:0.24 d0_mu:88.51 d0_ad:17.84 e_t:1.91s μ_e_t:1.91s t_t:442.68s avg_roc_auc:0.801845705961972
+e:233/4000 μ_l:0.87 g:3.19 g_max:44.92 clip:0.73 d_mu:5.24 d_ad:0.19 d0_mu:88.69 d0_ad:17.89 e_t:1.90s μ_e_t:1.91s t_t:444.58s avg_roc_auc:0.8024980189578361
+e:234/4000 μ_l:0.81 g:2.38 g_max:9.11 clip:0.70 d_mu:4.79 d_ad:0.16 d0_mu:88.88 d0_ad:17.92 e_t:1.90s μ_e_t:1.91s t_t:446.47s avg_roc_auc:0.7989253572919972
+e:235/4000 μ_l:0.77 g:2.15 g_max:7.79 clip:0.66 d_mu:5.36 d_ad:0.19 d0_mu:89.07 d0_ad:17.97 e_t:1.91s μ_e_t:1.91s t_t:448.38s avg_roc_auc:0.7976595833942768
+e:236/4000 μ_l:0.76 g:2.32 g_max:11.22 clip:0.69 d_mu:5.05 d_ad:0.28 d0_mu:89.25 d0_ad:18.01 e_t:1.90s μ_e_t:1.91s t_t:450.28s avg_roc_auc:0.799176389792971
+e:237/4000 μ_l:0.80 g:2.70 g_max:9.05 clip:0.70 d_mu:5.37 d_ad:0.18 d0_mu:89.49 d0_ad:18.05 e_t:1.89s μ_e_t:1.91s t_t:452.17s avg_roc_auc:0.8040212903555007
+e:238/4000 μ_l:0.68 g:1.84 g_max:8.94 clip:0.55 d_mu:5.51 d_ad:0.21 d0_mu:89.69 d0_ad:18.09 e_t:1.90s μ_e_t:1.91s t_t:454.06s avg_roc_auc:0.8041494203632326
+e:239/4000 μ_l:0.72 g:2.51 g_max:15.95 clip:0.69 d_mu:5.22 d_ad:0.22 d0_mu:89.92 d0_ad:18.13 e_t:1.90s μ_e_t:1.91s t_t:455.96s avg_roc_auc:0.801834153015797
+e:240/4000 μ_l:0.63 g:2.19 g_max:13.01 clip:0.62 d_mu:5.35 d_ad:0.50 d0_mu:90.08 d0_ad:18.17 e_t:1.90s μ_e_t:1.91s t_t:457.86s avg_roc_auc:0.7999015846159958
+e:241/4000 μ_l:0.75 g:1.95 g_max:5.53 clip:0.66 d_mu:5.10 d_ad:0.25 d0_mu:90.31 d0_ad:18.21 e_t:1.90s μ_e_t:1.91s t_t:459.76s avg_roc_auc:0.8007006571094136
+e:242/4000 μ_l:0.76 g:2.27 g_max:10.19 clip:0.62 d_mu:5.99 d_ad:0.22 d0_mu:90.54 d0_ad:18.25 e_t:1.90s μ_e_t:1.91s t_t:461.66s avg_roc_auc:0.7971564574667657
+e:243/4000 μ_l:0.74 g:2.34 g_max:13.22 clip:0.72 d_mu:5.13 d_ad:0.25 d0_mu:90.73 d0_ad:18.30 e_t:1.91s μ_e_t:1.91s t_t:463.56s avg_roc_auc:0.7992458970544686
+e:244/4000 μ_l:0.82 g:2.15 g_max:6.97 clip:0.73 d_mu:5.45 d_ad:0.22 d0_mu:90.94 d0_ad:18.34 e_t:1.89s μ_e_t:1.91s t_t:465.45s avg_roc_auc:0.7961552334916009
+e:245/4000 μ_l:0.85 g:2.13 g_max:7.41 clip:0.81 d_mu:5.63 d_ad:0.19 d0_mu:91.15 d0_ad:18.38 e_t:1.90s μ_e_t:1.91s t_t:467.35s avg_roc_auc:0.7999512801279042
+e:246/4000 μ_l:0.80 g:2.39 g_max:8.85 clip:0.69 d_mu:4.82 d_ad:0.24 d0_mu:91.33 d0_ad:18.42 e_t:1.90s μ_e_t:1.91s t_t:469.24s avg_roc_auc:0.8030184647855273
+e:247/4000 μ_l:0.64 g:1.95 g_max:9.44 clip:0.69 d_mu:5.54 d_ad:0.23 d0_mu:91.56 d0_ad:18.46 e_t:1.89s μ_e_t:1.91s t_t:471.13s avg_roc_auc:0.803456510642816
+e:248/4000 μ_l:0.82 g:2.83 g_max:14.35 clip:0.77 d_mu:5.40 d_ad:0.28 d0_mu:91.76 d0_ad:18.50 e_t:1.90s μ_e_t:1.91s t_t:473.03s avg_roc_auc:0.8032782902102744
+e:249/4000 μ_l:0.74 g:2.18 g_max:11.13 clip:0.66 d_mu:5.14 d_ad:0.22 d0_mu:91.93 d0_ad:18.54 e_t:1.89s μ_e_t:1.91s t_t:474.92s avg_roc_auc:0.7954025295942996
+e:250/4000 μ_l:0.82 g:2.05 g_max:10.34 clip:0.61 d_mu:5.05 d_ad:0.17 d0_mu:92.13 d0_ad:18.58 e_t:1.90s μ_e_t:1.91s t_t:476.83s avg_roc_auc:0.800112356776349
+e:251/4000 μ_l:0.72 g:2.19 g_max:7.55 clip:0.70 d_mu:4.82 d_ad:0.31 d0_mu:92.32 d0_ad:18.62 e_t:1.90s μ_e_t:1.91s t_t:478.73s avg_roc_auc:0.7938979591637202
+e:252/4000 μ_l:0.66 g:1.95 g_max:7.06 clip:0.64 d_mu:4.98 d_ad:0.20 d0_mu:92.48 d0_ad:18.66 e_t:1.90s μ_e_t:1.91s t_t:480.62s avg_roc_auc:0.8002962843692196
+e:253/4000 μ_l:0.74 g:1.96 g_max:5.95 clip:0.75 d_mu:5.90 d_ad:0.31 d0_mu:92.69 d0_ad:18.70 e_t:1.89s μ_e_t:1.91s t_t:482.51s avg_roc_auc:0.8024040197133709
+e:254/4000 μ_l:0.73 g:2.18 g_max:10.21 clip:0.70 d_mu:5.08 d_ad:0.32 d0_mu:92.93 d0_ad:18.74 e_t:1.89s μ_e_t:1.91s t_t:484.40s avg_roc_auc:0.7988789608360655
+e:255/4000 μ_l:0.85 g:2.16 g_max:11.02 clip:0.72 d_mu:5.73 d_ad:0.33 d0_mu:93.10 d0_ad:18.78 e_t:1.90s μ_e_t:1.91s t_t:486.30s avg_roc_auc:0.8017173749960126
+e:256/4000 μ_l:0.85 g:2.31 g_max:7.66 clip:0.81 d_mu:5.07 d_ad:0.26 d0_mu:93.33 d0_ad:18.83 e_t:1.90s μ_e_t:1.91s t_t:488.20s avg_roc_auc:0.7969392454769583
+e:257/4000 μ_l:0.76 g:2.24 g_max:7.73 clip:0.70 d_mu:5.53 d_ad:0.44 d0_mu:93.53 d0_ad:18.87 e_t:1.89s μ_e_t:1.91s t_t:490.09s avg_roc_auc:0.8018552513819114
+e:258/4000 μ_l:0.81 g:2.40 g_max:10.52 clip:0.75 d_mu:5.41 d_ad:0.24 d0_mu:93.72 d0_ad:18.91 e_t:1.89s μ_e_t:1.91s t_t:491.98s avg_roc_auc:0.7989895972826551
+e:259/4000 μ_l:0.87 g:2.71 g_max:11.90 clip:0.81 d_mu:5.14 d_ad:0.19 d0_mu:93.92 d0_ad:18.95 e_t:1.92s μ_e_t:1.91s t_t:493.90s avg_roc_auc:0.7976205341499434
+e:260/4000 μ_l:0.77 g:2.16 g_max:7.05 clip:0.69 d_mu:5.20 d_ad:0.21 d0_mu:94.09 d0_ad:18.99 e_t:1.90s μ_e_t:1.91s t_t:495.79s avg_roc_auc:0.7976693396475943
+e:261/4000 μ_l:0.75 g:2.50 g_max:8.09 clip:0.77 d_mu:5.26 d_ad:0.17 d0_mu:94.26 d0_ad:19.03 e_t:1.89s μ_e_t:1.91s t_t:497.68s avg_roc_auc:0.7996118262616935
+e:262/4000 μ_l:0.75 g:1.93 g_max:7.60 clip:0.58 d_mu:5.36 d_ad:0.17 d0_mu:94.44 d0_ad:19.07 e_t:1.90s μ_e_t:1.91s t_t:499.58s avg_roc_auc:0.7936152819422986
+e:263/4000 μ_l:0.79 g:2.59 g_max:10.02 clip:0.69 d_mu:5.32 d_ad:0.20 d0_mu:94.61 d0_ad:19.11 e_t:1.89s μ_e_t:1.91s t_t:501.47s avg_roc_auc:0.7968715012572389
+e:264/4000 μ_l:0.66 g:2.26 g_max:9.56 clip:0.66 d_mu:5.04 d_ad:0.23 d0_mu:94.79 d0_ad:19.15 e_t:1.91s μ_e_t:1.91s t_t:503.38s avg_roc_auc:0.8041598908159604
+e:265/4000 μ_l:0.73 g:2.34 g_max:13.70 clip:0.75 d_mu:5.62 d_ad:0.20 d0_mu:95.00 d0_ad:19.19 e_t:1.90s μ_e_t:1.91s t_t:505.28s avg_roc_auc:0.8048329385247618
+e:266/4000 μ_l:0.81 g:2.57 g_max:12.04 clip:0.70 d_mu:5.44 d_ad:0.26 d0_mu:95.19 d0_ad:19.23 e_t:1.91s μ_e_t:1.91s t_t:507.19s avg_roc_auc:0.8027853377036581
+e:267/4000 μ_l:0.76 g:2.12 g_max:16.62 clip:0.62 d_mu:5.30 d_ad:0.21 d0_mu:95.39 d0_ad:19.27 e_t:1.89s μ_e_t:1.91s t_t:509.08s avg_roc_auc:0.8053029963466347
+e:268/4000 μ_l:0.80 g:2.24 g_max:7.06 clip:0.70 d_mu:4.92 d_ad:0.19 d0_mu:95.58 d0_ad:19.31 e_t:1.90s μ_e_t:1.91s t_t:510.98s avg_roc_auc:0.8028842246103578
+e:269/4000 μ_l:0.88 g:2.56 g_max:11.51 clip:0.70 d_mu:5.25 d_ad:0.23 d0_mu:95.75 d0_ad:19.35 e_t:1.89s μ_e_t:1.91s t_t:512.87s avg_roc_auc:0.8040887705513163
+e:270/4000 μ_l:0.84 g:2.61 g_max:7.87 clip:0.81 d_mu:5.44 d_ad:0.19 d0_mu:95.94 d0_ad:19.38 e_t:1.89s μ_e_t:1.91s t_t:514.76s avg_roc_auc:0.8039590769689907
+e:271/4000 μ_l:0.84 g:2.46 g_max:10.02 clip:0.72 d_mu:5.16 d_ad:0.19 d0_mu:96.13 d0_ad:19.42 e_t:1.90s μ_e_t:1.91s t_t:516.66s avg_roc_auc:0.8000199460851185
+e:272/4000 μ_l:0.65 g:2.10 g_max:6.68 clip:0.66 d_mu:5.11 d_ad:0.19 d0_mu:96.30 d0_ad:19.46 e_t:1.90s μ_e_t:1.91s t_t:518.55s avg_roc_auc:0.8012630372811352
+e:273/4000 μ_l:0.74 g:2.33 g_max:10.32 clip:0.66 d_mu:4.97 d_ad:0.17 d0_mu:96.46 d0_ad:19.50 e_t:1.89s μ_e_t:1.91s t_t:520.45s avg_roc_auc:0.7997002562740202
+e:274/4000 μ_l:0.81 g:2.21 g_max:10.39 clip:0.77 d_mu:5.35 d_ad:0.24 d0_mu:96.65 d0_ad:19.53 e_t:1.88s μ_e_t:1.91s t_t:522.33s avg_roc_auc:0.8025985548184366
+e:275/4000 μ_l:0.75 g:2.05 g_max:9.47 clip:0.62 d_mu:5.82 d_ad:0.18 d0_mu:96.86 d0_ad:19.57 e_t:1.89s μ_e_t:1.91s t_t:524.22s avg_roc_auc:0.8021236331577775
+e:276/4000 μ_l:0.77 g:2.22 g_max:10.98 clip:0.72 d_mu:5.12 d_ad:0.18 d0_mu:97.03 d0_ad:19.61 e_t:1.89s μ_e_t:1.91s t_t:526.11s avg_roc_auc:0.8003674613217076
+e:277/4000 μ_l:0.72 g:2.36 g_max:9.24 clip:0.77 d_mu:4.94 d_ad:0.19 d0_mu:97.20 d0_ad:19.65 e_t:1.91s μ_e_t:1.91s t_t:528.02s avg_roc_auc:0.8022518000704576
+e:278/4000 μ_l:0.78 g:2.73 g_max:14.43 clip:0.67 d_mu:5.33 d_ad:0.26 d0_mu:97.38 d0_ad:19.69 e_t:1.90s μ_e_t:1.91s t_t:529.92s avg_roc_auc:0.8047596310260822
+e:279/4000 μ_l:0.68 g:1.90 g_max:8.74 clip:0.58 d_mu:5.56 d_ad:0.26 d0_mu:97.56 d0_ad:19.73 e_t:1.90s μ_e_t:1.91s t_t:531.82s avg_roc_auc:0.8035269244085976
+e:280/4000 μ_l:0.72 g:2.07 g_max:6.14 clip:0.64 d_mu:5.46 d_ad:0.24 d0_mu:97.74 d0_ad:19.76 e_t:1.89s μ_e_t:1.91s t_t:533.72s avg_roc_auc:0.8042129972625925
+e:281/4000 μ_l:0.80 g:2.38 g_max:9.75 clip:0.70 d_mu:5.54 d_ad:0.21 d0_mu:97.96 d0_ad:19.80 e_t:1.92s μ_e_t:1.91s t_t:535.63s avg_roc_auc:0.8032791499099174
+e:282/4000 μ_l:0.76 g:2.52 g_max:13.22 clip:0.70 d_mu:5.53 d_ad:0.23 d0_mu:98.18 d0_ad:19.84 e_t:1.90s μ_e_t:1.91s t_t:537.53s avg_roc_auc:0.8043104544562819
+e:283/4000 μ_l:0.76 g:2.56 g_max:23.45 clip:0.66 d_mu:5.36 d_ad:0.21 d0_mu:98.36 d0_ad:19.88 e_t:1.90s μ_e_t:1.91s t_t:539.43s avg_roc_auc:0.8038519702711779
+e:284/4000 μ_l:0.64 g:1.79 g_max:10.40 clip:0.59 d_mu:5.17 d_ad:0.19 d0_mu:98.57 d0_ad:19.92 e_t:1.89s μ_e_t:1.91s t_t:541.32s avg_roc_auc:0.8046124662487524
+e:285/4000 μ_l:0.65 g:2.20 g_max:12.57 clip:0.64 d_mu:5.49 d_ad:0.22 d0_mu:98.74 d0_ad:19.96 e_t:1.91s μ_e_t:1.91s t_t:543.22s avg_roc_auc:0.7986356467444649
+e:286/4000 μ_l:0.69 g:1.59 g_max:7.21 clip:0.56 d_mu:5.04 d_ad:0.19 d0_mu:98.94 d0_ad:20.00 e_t:1.88s μ_e_t:1.91s t_t:545.11s avg_roc_auc:0.8045139976558328
+e:287/4000 μ_l:0.78 g:2.48 g_max:12.38 clip:0.75 d_mu:5.50 d_ad:0.24 d0_mu:99.14 d0_ad:20.04 e_t:1.90s μ_e_t:1.91s t_t:547.01s avg_roc_auc:0.8049856191965482
+e:288/4000 μ_l:0.71 g:2.20 g_max:13.56 clip:0.69 d_mu:5.30 d_ad:0.19 d0_mu:99.32 d0_ad:20.07 e_t:1.91s μ_e_t:1.91s t_t:548.92s avg_roc_auc:0.803151286804139
+e:289/4000 μ_l:0.63 g:1.80 g_max:9.01 clip:0.58 d_mu:5.64 d_ad:0.17 d0_mu:99.53 d0_ad:20.11 e_t:1.90s μ_e_t:1.91s t_t:550.82s avg_roc_auc:0.7995069266476217
+e:290/4000 μ_l:0.77 g:2.29 g_max:8.10 clip:0.72 d_mu:5.17 d_ad:0.20 d0_mu:99.72 d0_ad:20.15 e_t:1.90s μ_e_t:1.91s t_t:552.72s avg_roc_auc:0.806380324973945
+e:291/4000 μ_l:0.79 g:2.14 g_max:7.32 clip:0.66 d_mu:5.31 d_ad:0.21 d0_mu:99.90 d0_ad:20.18 e_t:1.90s μ_e_t:1.91s t_t:554.62s avg_roc_auc:0.8077222731487563
+====================================================================================================
+datasets seen: 18624
+record time in mins: 9.24
+====================================================================================================
+config:
+  type: classification
+  experiments_dir: workdir/experiments
+  classification_dump: workdir/dumps/dump-d256000b1r1000c20-8.h5
+  train_seed: 4
+  eval_seed: 11
+  batch_size: 1
+  lr: 0.001
+  steps: 64
+  epochs: 4000
+  a: 4
+  e: 256
+  h: 768
+  l: 6
+  o: 8
+  eval_folds: 5
+  eval_subsample_samples: 1000
+  eval_subsample_features: 100
+  max_train_mins: 200
+  jackpot: 0.8068462330697953
+====================================================================================================
+params: 4,947,720 (trainable: 4,947,720)
+====================================================================================================
+peak memory allocated: 1629 MiB
+peak memory reserved: 2866 MiB
+====================================================================================================
+end timestamp: 2026-06-21 21:21:49
+script runtime: 54.37 mins
+experiment done: 260621-202727-7eee6c20-seedcarter
