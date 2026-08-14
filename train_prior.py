@@ -16,7 +16,6 @@ import uuid
 from dataclasses import dataclass, fields
 from datetime import datetime
 
-import h5py
 import numpy as np
 import openml
 import pandas as pd
@@ -41,8 +40,6 @@ from torch.utils.data import DataLoader
 class Config:
     type: str = "classification"
     experiments_dir: str = "workdir/experiments"
-    classification_dump: str = "workdir/dumps/dump-d256000b1r1000c20-8.h5"
-    # wget -c https://salihboraozturk.com/other/ufr/dump-d256000b1r1000c20-8.h5
     seed: int = 11
     batch_size: int = 2
     lr: float = 0.001
@@ -52,7 +49,7 @@ class Config:
     e: int = 256
     h: int = 768
     l: int = 5
-    o: int | None = None
+    o: int = 8
     residual_decay: float = 0.95
     thinking_rows: int = 24
     feature_group_size: int = 5
@@ -70,6 +67,17 @@ class Config:
     jackpot: float = 0.8068462330697953  # 0.8760712024651358
 
 
+@dataclass
+class PriorConfig:
+    problem_type: str = "classification"
+    max_num_classes: int = 8
+    max_num_cols: int = 20
+    max_num_parents: int = 3
+    redirection: float = 0.5
+    max_num_rows: int = 1000
+    num_test_rows: int = 128
+
+
 parser = argparse.ArgumentParser()
 parser.add_argument("--name", default="test")
 parser.add_argument("--seed", type=int, default=None)
@@ -77,6 +85,7 @@ parser.add_argument("--epochs", type=int, default=None)
 args = parser.parse_args()
 
 c = Config()
+pc = PriorConfig()
 
 if args.seed is not None:
     c.seed = args.seed
@@ -485,45 +494,80 @@ class Decoder(nn.Module):
 # priors
 
 
-class PriorDumpDataLoader(DataLoader):
-    def __init__(self, filename, num_steps, batch_size, device):
-        self.filename = filename
+class PriorDataLoader(DataLoader):
+    def __init__(self, prior, num_steps, batch_size):
+        self.prior = prior
         self.num_steps = num_steps
         self.batch_size = batch_size
-        with h5py.File(self.filename, "r") as f:
-            self.max_num_classes = f["max_num_classes"][0] if "max_num_classes" in f else None
-            self.problem_type = f["problem_type"][()].decode("utf-8")
-            self.datasets = f["X"].shape[0]
-            self.max_rows = f["X"].shape[1]
-            self.max_cols = f["X"].shape[2]
-            self.sep_key = "single_eval_pos" if "single_eval_pos" in f else "train_test_split_index"
-        self.device = device
-        self.pointer = 0
 
     def __iter__(self):
-        with h5py.File(self.filename, "r") as f:
-            for _ in range(self.num_steps):
-                end = self.pointer + self.batch_size
-
-                num_features = f["num_features"][self.pointer : end].max()
-                x = torch.from_numpy(f["X"][self.pointer : end, :, :num_features])
-                y = torch.from_numpy(f["y"][self.pointer : end])
-                sep = f[self.sep_key][self.pointer : end]
-
-                self.pointer += self.batch_size
-                if self.pointer >= self.datasets:
-                    print("pointer >= datasets, will reset!")
-                    self.pointer = 0
-
-                yield dict(
-                    x=x.to(self.device),
-                    y=y.to(self.device),
-                    target_y=y.to(self.device),
-                    sep=sep[0].item(),
-                )
+        for _ in range(self.num_steps):
+            batch = [self.prior.dataset() for _ in range(self.batch_size)]
+            x = torch.stack([d[0] for d in batch])
+            y = torch.stack([d[1] for d in batch])
+            yield dict(
+                x=x,
+                y=y,
+                target_y=y,
+                sep=self.prior.sep,
+            )
 
     def __len__(self):
         return self.num_steps
+
+
+class Prior:
+    activations = [lambda z: z, torch.tanh, torch.sin, torch.abs, torch.square, F.softplus]
+
+    def __init__(self, pc, device):
+        self.pc = pc
+        self.device = device
+        self.nodes = pc.max_num_cols + 1
+        self.sep = pc.max_num_rows - pc.num_test_rows
+
+    def gnr(self):
+        parents = [[] for _ in range(self.nodes)]
+        for child in range(1, self.nodes):
+            chosen = set()
+            for _ in range(self.pc.max_num_parents):
+                candidate = int(np.random.randint(child))
+                if np.random.rand() < self.pc.redirection and parents[candidate]:
+                    candidate = int(np.random.choice(parents[candidate]))
+                chosen.add(candidate)
+            parents[child] = sorted(chosen)
+        return parents
+
+    def propagate(self):
+        parents = self.gnr()
+        w = np.zeros((self.nodes, self.nodes), dtype=np.float32)
+        for i in range(1, self.nodes):
+            w[i, parents[i]] = np.random.randn(len(parents[i]))
+        w = torch.from_numpy(w).to(self.device)
+        acts = np.random.randint(len(self.activations), size=self.nodes)
+        z = torch.randn(self.pc.max_num_rows, self.nodes, device=self.device)
+        for i in range(1, self.nodes):
+            zi = self.activations[acts[i]](z @ w[i]) + 0.1 * z[:, i]
+            std, mean = torch.std_mean(zi)
+            z[:, i] = (zi - mean) / (std + 1e-6)
+        return z
+
+    def target(self, z):
+        target = int(np.random.randint(1, self.nodes))
+        k = int(np.random.randint(2, self.pc.max_num_classes + 1))
+        zt = z[:, target].contiguous()
+        cuts = torch.linspace(0, 1, k + 1, device=self.device)[1:-1]
+        y = torch.bucketize(zt, zt.quantile(cuts))
+        x = torch.cat([z[:, :target], z[:, target + 1 :]], dim=1)
+        return x, y.float()
+
+    def postprocess(self, x):
+        return x
+
+    def dataset(self):
+        z = self.propagate()
+        x, y = self.target(z)
+        x = self.postprocess(x)
+        return x, y
 
 
 # -----------------------------------------------------------------------------
@@ -630,13 +674,8 @@ class NanoTabPFNClassifier:
 # main
 
 
-prior = PriorDumpDataLoader(
-    filename=c.classification_dump,
-    num_steps=c.steps,
-    batch_size=c.batch_size,
-    device=device,
-)
-c.o = prior.max_num_classes
+prior = Prior(pc=pc, device=device)
+loader = PriorDataLoader(prior=prior, num_steps=c.steps, batch_size=c.batch_size)
 
 model = NanoTabPFNModel(
     l=c.l,
@@ -683,7 +722,7 @@ for epoch in range(1, c.epochs + 1):
     total_loss = 0.0
     num_valid = 0
     gnorms = []
-    for i, full_data in enumerate(prior):
+    for i, full_data in enumerate(loader):
         sep = full_data["sep"]
         x = full_data["x"]
         y = full_data["y"][:, :sep]
@@ -845,6 +884,9 @@ print0("=" * 100)
 print0("config:")
 for f in fields(Config):
     print0(f"  {f.name}: {getattr(c, f.name)}")
+print0("prior config:")
+for f in fields(PriorConfig):
+    print0(f"  {f.name}: {getattr(pc, f.name)}")
 print0("=" * 100)
 total_params = sum(p.numel() for p in model.parameters())
 trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
