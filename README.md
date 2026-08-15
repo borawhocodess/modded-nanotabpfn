@@ -65,6 +65,7 @@ Note: The 0.8068462330697953 target was selected to match the performance of Ran
 | 7 | 3.48 minutes | 02/04/26 | LAWA, AdamW weight decay | [log](records/20260402lawa1wd/260401-183226-edb3469e-v26lawa1wd-s11-log.txt),[read](records/20260402lawa1wd/README.md),[PR](https://github.com/borawhocodess/modded-nanotabpfn/pull/16),[X](https://x.com/boratwits/status/2042729853821022644) | @borawhocodess |
 | 8 | 2.15 minutes | 11/04/26 | Repeated feature grouping | [log](records/20260411featuregroup/260411-142657-1686dd83-featuregroup-s11-log.txt),[read](records/20260411featuregroup/README.md),[PR](https://github.com/borawhocodess/modded-nanotabpfn/pull/17),[X](https://x.com/boratwits/status/2043047953502290052) | @borawhocodess |
 | 9 | 0.92 minutes | 06/05/26 | autoresearch HPO, Muon weight decay, mean feature pooling | [log](records/20260506autohuman/260506-163637-589ea1cf-autohuman-log.txt),[read](records/20260506autohuman/README.md),[PR](https://github.com/borawhocodess/modded-nanotabpfn/pull/18),[X](https://x.com/boratwits/status/2052199021775647173) | @borawhocodess |
+| 10 | *pending re-timing* | 15/08/26 | Batched Newton-Schulz, producer-thread dataloader, fused SDPA (-17.7% paired on 1x L40S, epochs-to-target unchanged) | [read](records/20260815oneiro/README.md),[data](records/20260815oneiro/l40s_paired_rounds.csv) | @oneirology |
 
 
 ## Rules

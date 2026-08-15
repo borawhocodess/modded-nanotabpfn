@@ -254,29 +254,42 @@ class Muon(torch.optim.Optimizer):
         for group in self.param_groups:
             lr = group['lr']
             momentum = group['momentum']
-            zeropower_backend = zeropower_backends[group['backend']]
-            for p in group['params']:
-                g = p.grad
-                if g is None:
-                    continue
+            params = [p for p in group['params'] if p.grad is not None]
+            grads = [p.grad for p in params]
+            bufs = []
+            for p, g in zip(params, grads):
                 state = self.state[p]
                 if 'momentum_buffer' not in state:
                     state['momentum_buffer'] = torch.zeros_like(g)
-                buf = state['momentum_buffer']
-                buf.mul_(momentum).add_(g)
-                if group['nesterov']:
-                    g = g.add(buf, alpha=momentum)
+                bufs.append(state['momentum_buffer'])
+            torch._foreach_mul_(bufs, momentum)
+            torch._foreach_add_(bufs, grads)
+            if group['nesterov']:
+                gs = torch._foreach_add(grads, bufs, alpha=momentum)
+            else:
+                gs = list(bufs)
+            buckets = {}
+            for idx, g in enumerate(gs):
                 if g.size(0) == 3 * g.size(1):
-                    g_batched = g.view(3, g.size(1), g.size(1))
-                    g_new = zeropower_via_newtonschulz5_batched(g_batched, steps=group['backend_steps'])
-                    g = g_new.view(3 * g.size(1), g.size(1))
-                    scale = g.size(1)**0.5
+                    key = ('qkv', g.size(1))
                 else:
-                    g = zeropower_backend(g, steps=group['backend_steps'])
-                    scale = max(g.size(0), g.size(1))**0.5
-                p.data.add_(g, alpha=-lr * scale)
+                    key = ('mat', g.size(0), g.size(1))
+                buckets.setdefault(key, []).append(idx)
+            for key, idxs in buckets.items():
+                if key[0] == 'qkv':
+                    n = key[1]
+                    stack = torch.stack([gs[i].view(3, n, n) for i in idxs]).view(-1, n, n)
+                    ortho = zeropower_via_newtonschulz5_batched(stack, steps=group['backend_steps'])
+                    ortho = ortho.view(len(idxs), 3 * n, n)
+                    scale = n**0.5
+                else:
+                    stack = torch.stack([gs[i] for i in idxs])
+                    ortho = zeropower_via_newtonschulz5_batched(stack, steps=group['backend_steps'])
+                    scale = max(key[1], key[2])**0.5
+                sel = [params[i].data for i in idxs]
+                torch._foreach_add_(sel, list(ortho.unbind(0)), alpha=-lr * scale)
                 if group['weight_decay'] > 0:
-                    p.data.mul_(1 - lr * group['weight_decay'])
+                    torch._foreach_mul_(sel, 1 - lr * group['weight_decay'])
 
 
 class LowerPrecisionRMSNorm(nn.RMSNorm):
@@ -450,15 +463,12 @@ class TransformerEncoderLayer(nn.Module):
         qkv = qkv.permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
 
-        q_left, q_right = q.split([sep, r - sep], dim=2)
-
         k_train = k[:, :, :sep, :]
         v_train = v[:, :, :sep, :]
 
-        x_left = F.scaled_dot_product_attention(q_left, k_train, v_train)
-        x_right = F.scaled_dot_product_attention(q_right, k_train, v_train)
-
-        x = torch.cat([x_left, x_right], dim=2)
+        # single SDPA: q_left and q_right both attend to k_train/v_train, so the
+        # split+cat is mathematically identical to one call over all query rows
+        x = F.scaled_dot_product_attention(q, k_train, v_train)
         x = x.transpose(1, 2).reshape(b * c, r, e)
 
         src = res + x
@@ -500,27 +510,38 @@ class PriorDumpDataLoader(DataLoader):
         self.device = device
         self.pointer = 0
 
-    def __iter__(self):
+    def _produce(self, q, num_steps):
         with h5py.File(self.filename, "r") as f:
-            for _ in range(self.num_steps):
+            for _ in range(num_steps):
                 end = self.pointer + self.batch_size
-
                 num_features = f["num_features"][self.pointer : end].max()
                 x = torch.from_numpy(f["X"][self.pointer : end, :, :num_features])
                 y = torch.from_numpy(f["y"][self.pointer : end])
                 sep = f[self.sep_key][self.pointer : end]
-
                 self.pointer += self.batch_size
                 if self.pointer >= self.datasets:
                     print("pointer >= datasets, will reset!")
                     self.pointer = 0
+                valid = not (torch.isnan(x).any().item() or torch.isnan(y).any().item())
+                q.put((x.pin_memory(), y.pin_memory(), sep[0].item(), valid))
 
-                yield dict(
-                    x=x.to(self.device),
-                    y=y.to(self.device),
-                    target_y=y.to(self.device),
-                    sep=sep[0].item(),
-                )
+    def __iter__(self):
+        import queue as _queue
+        import threading as _threading
+        q = _queue.Queue(maxsize=4)
+        t = _threading.Thread(target=self._produce, args=(q, self.num_steps), daemon=True)
+        t.start()
+        for _ in range(self.num_steps):
+            x, y, sep, valid = q.get()
+            xg = x.to(self.device, non_blocking=True)
+            yg = y.to(self.device, non_blocking=True)
+            yield dict(
+                x=xg,
+                y=yg,
+                target_y=yg,
+                sep=sep,
+                valid=valid,
+            )
 
     def __len__(self):
         return self.num_steps
@@ -689,7 +710,7 @@ for epoch in range(1, c.epochs + 1):
         y = full_data["y"][:, :sep]
         targets = full_data["target_y"][:, sep:]
 
-        if torch.isnan(x).any() or torch.isnan(y).any():
+        if not full_data["valid"]:
             continue
         num_valid += 1
 
