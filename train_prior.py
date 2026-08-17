@@ -268,35 +268,6 @@ class Muon(torch.optim.Optimizer):
                     p.data.mul_(1 - lr * group['weight_decay'])
 
 
-class LowerPrecisionRMSNorm(nn.RMSNorm):
-    """
-    code adapted from: https://github.com/PriorLabs/TabPFN/blob/main/src/tabpfn/architectures/tabpfn_v2_6.py
-    """
-    def forward(self, x):
-        if x.dtype in (torch.float16, torch.bfloat16):
-            with torch.amp.autocast("cuda", enabled=False):
-                return super().forward(x)
-        return super().forward(x)
-
-
-class ThinkingRows(nn.Module):
-    """
-    code adapted from: https://github.com/PriorLabs/TabPFN/blob/main/src/tabpfn/architectures/tabpfn_v2_6.py
-    """
-    def __init__(self, num_thinking_rows: int, e: int):
-        super().__init__()
-        self.num_thinking_rows = num_thinking_rows
-        self.row_tokens = nn.Parameter(torch.empty(num_thinking_rows, e))
-        nn.init.normal_(self.row_tokens)
-
-    def forward(self, x, sep):
-        b, _r, c, _e = x.shape
-        thinking = self.row_tokens.unsqueeze(0).unsqueeze(2).expand(b, -1, c, -1)
-        x = torch.cat([thinking, x], dim=1)
-        sep = sep + self.num_thinking_rows
-        return x, sep
-
-
 class ModdedNanoTabPFNModel(nn.Module):
     def __init__(self, l, a, e, h, o, residual_decay, thinking_rows, feature_group_size):
         super().__init__()
@@ -309,7 +280,9 @@ class ModdedNanoTabPFNModel(nn.Module):
         self.target_encoder = TargetEncoder(e)
         self.transformer_encoder = TransformerEncoderStack(l, a, e, h, residual_decay=residual_decay)
         self.decoder = Decoder(e, h, o)
-        self.thinking_rows = ThinkingRows(num_thinking_rows=thinking_rows, e=e)
+        self.thinking_rows = thinking_rows
+        self.row_tokens = nn.Parameter(torch.empty(thinking_rows, e))
+        nn.init.normal_(self.row_tokens)
 
         self.register_buffer("borders", None, persistent=True)
 
@@ -330,7 +303,10 @@ class ModdedNanoTabPFNModel(nn.Module):
         num_rows = x_src.shape[1]
         y_src = self.target_encoder(y_src, num_rows)
         src = torch.cat([x_src, y_src], 2)
-        src, sep = self.thinking_rows(src, sep)
+        b, _r, c, _e = src.shape
+        thinking = self.row_tokens.unsqueeze(0).unsqueeze(2).expand(b, -1, c, -1)
+        src = torch.cat([thinking, src], dim=1)
+        sep = sep + self.thinking_rows
         output = self.transformer_encoder(src, sep)
         output = output[:, sep:, :-1, :].mean(dim=2)
         output = self.decoder(output)
@@ -395,9 +371,9 @@ class TransformerEncoderLayer(nn.Module):
         self.linear1 = nn.Linear(e, h)
         self.linear2 = nn.Linear(h, e)
 
-        self.norm1 = LowerPrecisionRMSNorm(e, eps=eps)
-        self.norm2 = LowerPrecisionRMSNorm(e, eps=eps)
-        self.norm3 = LowerPrecisionRMSNorm(e, eps=eps)
+        self.norm1 = nn.RMSNorm(e, eps=eps)
+        self.norm2 = nn.RMSNorm(e, eps=eps)
+        self.norm3 = nn.RMSNorm(e, eps=eps)
 
     @torch.compile(dynamic=True)
     def forward(self, src, sep):
@@ -797,7 +773,7 @@ for step in range(1, sc.steps + 1):
                 "l": model.l,
                 "o": model.o,
                 "residual_decay": model.transformer_encoder.residual_decay,
-                "thinking_rows": model.thinking_rows.num_thinking_rows,
+                "thinking_rows": model.thinking_rows,
                 "feature_group_size": model.feature_encoder.feature_group_size,
             },
             "model": model.state_dict(),
