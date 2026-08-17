@@ -21,6 +21,7 @@ import openml
 import pandas as pd
 import schedulefree
 import torch
+import torch._dynamo
 import torch.nn.functional as F
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
@@ -29,7 +30,6 @@ from sklearn.model_selection import StratifiedKFold, train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer, LabelEncoder, OrdinalEncoder
 from torch import nn
-from torch.utils.data import DataLoader
 
 
 # -----------------------------------------------------------------------------
@@ -70,12 +70,18 @@ class Config:
 @dataclass
 class PriorConfig:
     problem_type: str = "classification"
+    min_num_classes: int = 2
     max_num_classes: int = 8
+    min_num_cols: int = 20
     max_num_cols: int = 20
-    max_num_parents: int = 3
-    redirection: float = 0.5
+    min_num_parent_attempts: int = 3
+    max_num_parent_attempts: int = 3
+    min_redirection: float = 0.5
+    max_redirection: float = 0.5
+    min_num_rows: int = 1000
     max_num_rows: int = 1000
-    num_test_rows: int = 128
+    min_num_test_rows: int = 128
+    max_num_test_rows: int = 128
 
 
 parser = argparse.ArgumentParser()
@@ -96,7 +102,6 @@ random.seed(c.seed)
 np.random.seed(c.seed)
 torch.manual_seed(c.seed)
 torch.set_float32_matmul_precision('high')
-import torch._dynamo
 torch._dynamo.config.cache_size_limit = 128
 
 assert torch.cuda.is_available()
@@ -462,7 +467,7 @@ class Decoder(nn.Module):
 # priors
 
 
-class PriorDataLoader(DataLoader):
+class PriorDataLoader:
     def __init__(self, prior, num_steps, batch_size):
         self.prior = prior
         self.num_steps = num_steps
@@ -470,9 +475,7 @@ class PriorDataLoader(DataLoader):
 
     def __iter__(self):
         for _ in range(self.num_steps):
-            batch = [self.prior.dataset() for _ in range(self.batch_size)]
-            x = torch.stack([d[0] for d in batch])
-            y = torch.stack([d[1] for d in batch])
+            x, y = self.prior.batch(self.batch_size)
             yield dict(
                 x=x,
                 y=y,
@@ -487,19 +490,29 @@ class PriorDataLoader(DataLoader):
 class Prior:
     activations = [lambda z: z, torch.tanh, torch.sin, torch.abs, torch.square, F.softplus]
 
-    def __init__(self, pc, device):
-        self.pc = pc
+    def __init__(self, config, device):
+        self.config = config
         self.device = device
-        self.nodes = pc.max_num_cols + 1
-        self.sep = pc.max_num_rows - pc.num_test_rows
+        assert self.config.max_num_test_rows < self.config.min_num_rows
+
+    def hyperparameters(self):
+        c = self.config
+        self.num_cols = int(np.random.randint(c.min_num_cols, c.max_num_cols + 1))
+        self.num_rows = int(np.random.randint(c.min_num_rows, c.max_num_rows + 1))
+        self.nodes = self.num_cols + 1
+        self.num_test_rows = int(np.random.randint(c.min_num_test_rows, c.max_num_test_rows + 1))
+        self.sep = self.num_rows - self.num_test_rows
+        self.redirection = np.random.uniform(c.min_redirection, c.max_redirection)
+        self.num_classes = int(np.random.randint(c.min_num_classes, c.max_num_classes + 1))
+        self.num_parent_attempts = int(np.random.randint(c.min_num_parent_attempts, c.max_num_parent_attempts + 1))
 
     def gnr(self):
         parents = [[] for _ in range(self.nodes)]
         for child in range(1, self.nodes):
             chosen = set()
-            for _ in range(self.pc.max_num_parents):
+            for _ in range(self.num_parent_attempts):
                 candidate = int(np.random.randint(child))
-                if np.random.rand() < self.pc.redirection and parents[candidate]:
+                if np.random.rand() < self.redirection and parents[candidate]:
                     candidate = int(np.random.choice(parents[candidate]))
                 chosen.add(candidate)
             parents[child] = sorted(chosen)
@@ -512,7 +525,7 @@ class Prior:
             w[i, parents[i]] = np.random.randn(len(parents[i]))
         w = torch.from_numpy(w).to(self.device)
         acts = np.random.randint(len(self.activations), size=self.nodes)
-        z = torch.randn(self.pc.max_num_rows, self.nodes, device=self.device)
+        z = torch.randn(self.num_rows, self.nodes, device=self.device)
         for i in range(1, self.nodes):
             zi = self.activations[acts[i]](z @ w[i]) + 0.1 * z[:, i]
             std, mean = torch.std_mean(zi)
@@ -521,9 +534,8 @@ class Prior:
 
     def target(self, z):
         target = int(np.random.randint(1, self.nodes))
-        k = int(np.random.randint(2, self.pc.max_num_classes + 1))
         zt = z[:, target].contiguous()
-        cuts = torch.linspace(0, 1, k + 1, device=self.device)[1:-1]
+        cuts = torch.linspace(0, 1, self.num_classes + 1, device=self.device)[1:-1]
         y = torch.bucketize(zt, zt.quantile(cuts))
         x = torch.cat([z[:, :target], z[:, target + 1 :]], dim=1)
         return x, y.float()
@@ -535,6 +547,13 @@ class Prior:
         z = self.propagate()
         x, y = self.target(z)
         x = self.postprocess(x)
+        return x, y
+
+    def batch(self, batch_size):
+        self.hyperparameters()
+        datasets = [self.dataset() for _ in range(batch_size)]
+        x = torch.stack([d[0] for d in datasets])
+        y = torch.stack([d[1] for d in datasets])
         return x, y
 
 
@@ -642,7 +661,7 @@ class NanoTabPFNClassifier:
 # main
 
 
-prior = Prior(pc=pc, device=device)
+prior = Prior(config=pc, device=device)
 loader = PriorDataLoader(prior=prior, num_steps=c.steps, batch_size=c.batch_size)
 
 model = NanoTabPFNModel(
