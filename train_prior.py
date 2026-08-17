@@ -63,7 +63,6 @@ class ModelConfig:
 
 @dataclass
 class PriorConfig:
-    problem_type: str = "classification"
     min_num_classes: int = 2
     max_num_classes: int = 8
     min_num_cols: int = 20
@@ -187,10 +186,6 @@ TABARENA_CLASSIFICATION_TASKS = [
 ]
 
 
-def zeropower_via_svd(G, steps=None):
-    U, S, V = G.svd()
-    return U @ V.T
-
 @torch.compile
 def zeropower_via_newtonschulz5(G, steps=10, eps=1e-7):
     assert len(G.shape) == 2
@@ -222,21 +217,18 @@ def zeropower_via_newtonschulz5_batched(G, steps=10, eps=1e-7):
         X = X.transpose(1, 2)
     return X.to(G.dtype)
 
-zeropower_backends = dict(svd=zeropower_via_svd, newtonschulz5=zeropower_via_newtonschulz5)
-
 class Muon(torch.optim.Optimizer):
     """
     code adapted from: https://github.com/KellerJordan/modded-nanogpt/commit/b356a1f
     """
-    def __init__(self, params, lr=3e-4, momentum=0.95, nesterov=True, backend='newtonschulz5', backend_steps=5, weight_decay=0.0):
-        defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, backend=backend, backend_steps=backend_steps, weight_decay=weight_decay)
+    def __init__(self, params, lr=3e-4, momentum=0.95, nesterov=True, backend_steps=5, weight_decay=0.0):
+        defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, backend_steps=backend_steps, weight_decay=weight_decay)
         super().__init__(params, defaults)
 
     def step(self):
         for group in self.param_groups:
             lr = group['lr']
             momentum = group['momentum']
-            zeropower_backend = zeropower_backends[group['backend']]
             for p in group['params']:
                 g = p.grad
                 if g is None:
@@ -254,7 +246,7 @@ class Muon(torch.optim.Optimizer):
                     g = g_new.view(3 * g.size(1), g.size(1))
                     scale = g.size(1)**0.5
                 else:
-                    g = zeropower_backend(g, steps=group['backend_steps'])
+                    g = zeropower_via_newtonschulz5(g, steps=group['backend_steps'])
                     scale = max(g.size(0), g.size(1))**0.5
                 p.data.add_(g, alpha=-lr * scale)
                 if group['weight_decay'] > 0:
