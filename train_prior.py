@@ -544,24 +544,6 @@ class Prior:
         return x, y
 
 
-def init_model_from_ckpt_file(file_path):
-    ckpt = torch.load(file_path, map_location="cpu")
-    model = NanoTabPFNModel(
-        l=ckpt["arch"]["l"],
-        a=ckpt["arch"]["a"],
-        e=ckpt["arch"]["e"],
-        h=ckpt["arch"]["h"],
-        o=ckpt["arch"]["o"],
-        residual_decay=ckpt["arch"]["residual_decay"],
-        thinking_rows=ckpt["arch"]["thinking_rows"],
-        feature_group_size=ckpt["arch"]["feature_group_size"],
-    )
-    if "borders" in ckpt["model"]:
-        model.borders = ckpt["model"]["borders"]
-    model.load_state_dict(ckpt["model"])
-    return model
-
-
 def to_pandas(x):
     return pd.DataFrame(x) if not isinstance(x, pd.DataFrame) else x
 
@@ -611,8 +593,6 @@ def get_feature_preprocessor(X):
 class NanoTabPFNClassifier:
     def __init__(self, model):
         device = "cuda"
-        if isinstance(model, str):
-            model = init_model_from_ckpt_file(model)
         self.model = model.to(device)
         self.device = device
 
