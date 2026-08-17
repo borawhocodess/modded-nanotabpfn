@@ -222,7 +222,13 @@ class Muon(torch.optim.Optimizer):
     code adapted from: https://github.com/KellerJordan/modded-nanogpt/commit/b356a1f
     """
     def __init__(self, params, lr=3e-4, momentum=0.95, nesterov=True, backend_steps=5, weight_decay=0.0):
-        defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, backend_steps=backend_steps, weight_decay=weight_decay)
+        defaults = {
+            "lr": lr,
+            "momentum": momentum,
+            "nesterov": nesterov,
+            "backend_steps": backend_steps,
+            "weight_decay": weight_decay,
+        }
         super().__init__(params, defaults)
 
     def step(self):
@@ -459,12 +465,12 @@ class PriorDataLoader:
     def __iter__(self):
         while True:
             x, y = self.prior.batch(self.batch_size)
-            yield dict(
-                x=x,
-                y=y,
-                target_y=y,
-                sep=self.prior.sep,
-            )
+            yield {
+                "x": x,
+                "y": y,
+                "target_y": y,
+                "sep": self.prior.sep,
+            }
 
 
 class Prior:
