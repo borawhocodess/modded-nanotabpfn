@@ -1,14 +1,10 @@
 import argparse
 import os
-import sys
-
-with open(sys.argv[0], "r") as f:
-    code = f.read()
-
 import platform
 import random
 import socket
 import subprocess
+import sys
 import time
 import tomllib
 import uuid
@@ -114,43 +110,16 @@ np.random.seed(sc.seed)
 torch.manual_seed(sc.seed)
 torch.set_float32_matmul_precision('high')
 torch._dynamo.config.cache_size_limit = 128
-
 assert torch.cuda.is_available()
-
 device = "cuda"
 
 start_ts = datetime.now(tz=UTC).astimezone()
-ts = start_ts.strftime("%y%m%d-%H%M%S")
-uid = uuid.uuid4().hex[:8]
-e_name = args.name.strip()
-e_id = f"{ts}-{uid}-{e_name}" if e_name else f"{ts}-{uid}"
-e_root = os.path.join(sc.experiments_dir, e_name) if e_name else sc.experiments_dir
-e_dir = os.path.join(e_root, e_id)
-os.makedirs(e_dir, exist_ok=True)
-log_path = os.path.join(e_dir, f"{e_id}-log.txt")
-ckpt_path = os.path.join(e_dir, f"{e_id}-ckpt.pth")
+
+with open(sys.argv[0], "r") as f:
+    code = f.read()
 
 with open("pyproject.toml", "rb") as f:
     version = tomllib.load(f)["project"]["version"]
-
-
-def print0(s, console=False):
-    with open(log_path, "a") as f:
-        if console:
-            print(s)
-        print(s, file=f)
-
-
-print0(code)
-print0("=" * 100)
-print0(f"start timestamp: {start_ts.strftime('%Y-%m-%d %H:%M:%S')}", console=True)
-print0(f"host: {socket.gethostname()}")
-print0(f"platform: {platform.platform()}")
-print0(f"python: {sys.version}")
-print0(f"torch: {torch.version.__version__}")
-print0(f"cuda: {torch.version.cuda}")
-print0(subprocess.run(["nvidia-smi"], capture_output=True, text=True, check=False).stdout)
-print0("=" * 100)
 
 TABARENA_CLASSIFICATION_TASKS = [
     363613,  # ( 32769,   10) Amazon_employee_access
@@ -653,6 +622,13 @@ def evaluate(model, tasks, config):
     return aucs
 
 
+def print0(s, console=False):
+    with open(log_path, "a") as f:
+        if console:
+            print(s)
+        print(s, file=f)
+
+
 prior = Prior(config=pc, device=device)
 loader = PriorDataLoader(prior=prior, batch_size=sc.batch_size)
 
@@ -695,6 +671,27 @@ optimizer_adam = schedulefree.AdamWScheduleFree(
 optimizers = [optimizer_muon, optimizer_adam]
 
 criterion = nn.CrossEntropyLoss()
+
+ts = start_ts.strftime("%y%m%d-%H%M%S")
+uid = uuid.uuid4().hex[:8]
+e_name = args.name.strip()
+e_id = f"{ts}-{uid}-{e_name}" if e_name else f"{ts}-{uid}"
+e_root = os.path.join(sc.experiments_dir, e_name) if e_name else sc.experiments_dir
+e_dir = os.path.join(e_root, e_id)
+os.makedirs(e_dir, exist_ok=True)
+log_path = os.path.join(e_dir, f"{e_id}-log.txt")
+ckpt_path = os.path.join(e_dir, f"{e_id}-ckpt.pth")
+
+print0(code)
+print0("=" * 100)
+print0(f"start timestamp: {start_ts.strftime('%Y-%m-%d %H:%M:%S')}", console=True)
+print0(f"host: {socket.gethostname()}")
+print0(f"platform: {platform.platform()}")
+print0(f"python: {sys.version}")
+print0(f"torch: {torch.version.__version__}")
+print0(f"cuda: {torch.version.cuda}")
+print0(subprocess.run(["nvidia-smi"], capture_output=True, text=True, check=False).stdout)
+print0("=" * 100)
 
 train_time = 0.0
 total_loss = 0.0
