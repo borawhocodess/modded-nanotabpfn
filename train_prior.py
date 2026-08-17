@@ -701,7 +701,7 @@ data = iter(loader)
 
 for step in range(1, sc.steps + 1):
     torch.cuda.synchronize()
-    t0 = time.perf_counter()
+    s_t0 = time.perf_counter()
     model.train()
     optimizer_adam.train()
     total_loss = 0.0
@@ -735,15 +735,17 @@ for step in range(1, sc.steps + 1):
         opt.step()
 
     torch.cuda.synchronize()
-    s_t = time.perf_counter() - t0
+    s_t = time.perf_counter() - s_t0
     t_t += s_t
-    mu_s_t = t_t / step
 
     mean_loss = (total_loss / num_valid).cpu().item()
 
     if t_t > sc.max_train_mins * 60:
         print0("exceeded max train time", console=True)
         sys.exit(0)
+
+    torch.cuda.synchronize()
+    s_e_t0 = time.perf_counter()
 
     model.eval()
     optimizer_adam.eval()
@@ -815,9 +817,17 @@ for step in range(1, sc.steps + 1):
 
     avg_auc = (sum(aucs) / len(aucs)) if len(aucs) > 0 else float("nan")
 
+    torch.cuda.synchronize()
+    s_e_t = time.perf_counter() - s_e_t0
+    r_t = (datetime.now() - start_ts).total_seconds() / 60
+
     print0(
-        f"s:{step}/{sc.steps} μ_l:{mean_loss:.2f} "
-        f"s_t:{s_t:.2f}s μ_s_t:{mu_s_t:.2f}s t_t:{t_t:.2f}s "
+        f"s:{step}/{sc.steps} "
+        f"r_t:{r_t:.2f}m "
+        f"s_e_t:{s_e_t:.2f}s "
+        f"s_t:{s_t:.2f}s "
+        f"t_t:{t_t:.2f}s "
+        f"μ_l:{mean_loss:.2f} "
         f"avg_roc_auc:{avg_auc}",
         console=True,
     )
