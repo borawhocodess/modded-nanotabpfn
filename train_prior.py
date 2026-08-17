@@ -1,5 +1,4 @@
 import argparse
-import collections
 import os
 import sys
 
@@ -44,13 +43,12 @@ class ScriptConfig:
     batch_size: int = 2
     lr: float = 0.001
     steps: int = 10000
+    eval_every: int = 100
     adam_wd: float = 0.01
     muon_wd: float = 0.1
     muon_lr_scale: float = 0.1
     muon_momentum: float = 0.96
     grad_clip: float = 2.0
-    lawa_k: int = 10
-    lawa_freq: int = 1
     eval_folds: int = 5
     eval_subsample_samples: int | None = 1000
     eval_subsample_features: int | None = 100
@@ -692,9 +690,8 @@ optimizers = [optimizer_muon, optimizer_adam]
 
 criterion = nn.CrossEntropyLoss()
 
-lawa_queue = collections.deque(maxlen=sc.lawa_k)
-
 t_t = 0.0
+total_loss = 0.0
 
 
 data = iter(loader)
@@ -704,18 +701,12 @@ for step in range(1, sc.steps + 1):
     s_t0 = time.perf_counter()
     model.train()
     optimizer_adam.train()
-    total_loss = 0.0
-    num_valid = 0
 
     full_data = next(data)
     sep = full_data["sep"]
     x = full_data["x"]
     y = full_data["y"][:, :sep]
     targets = full_data["target_y"][:, sep:]
-
-    if torch.isnan(x).any() or torch.isnan(y).any():
-        continue
-    num_valid += 1
 
     for opt in optimizers:
         opt.zero_grad(set_to_none=True)
@@ -738,11 +729,15 @@ for step in range(1, sc.steps + 1):
     s_t = time.perf_counter() - s_t0
     t_t += s_t
 
-    mean_loss = (total_loss / num_valid).cpu().item()
-
     if t_t > sc.max_train_mins * 60:
         print0("exceeded max train time", console=True)
         sys.exit(0)
+
+    if step % sc.eval_every != 0:
+        continue
+
+    mean_loss = (total_loss / sc.eval_every).cpu().item()
+    total_loss = 0.0
 
     torch.cuda.synchronize()
     s_e_t0 = time.perf_counter()
@@ -750,20 +745,7 @@ for step in range(1, sc.steps + 1):
     model.eval()
     optimizer_adam.eval()
 
-    if step % sc.lawa_freq == 0:
-        lawa_queue.append({k: v.cpu().clone() for k, v in model.state_dict().items()})
-
-    if len(lawa_queue) > 1:
-        avg_state = {}
-        for key in lawa_queue[0]:
-            avg_state[key] = sum(s[key].float() for s in lawa_queue) / len(lawa_queue)
-            avg_state[key] = avg_state[key].to(dtype=lawa_queue[0][key].dtype).to(device)
-        saved_state = {k: v.clone() for k, v in model.state_dict().items()}
-        model.load_state_dict(avg_state)
-        clf = NanoTabPFNClassifier(model)
-    else:
-        saved_state = None
-        clf = NanoTabPFNClassifier(model)
+    clf = NanoTabPFNClassifier(model)
     aucs = []
 
     for task_id in TABARENA_CLASSIFICATION_TASKS:
@@ -832,12 +814,7 @@ for step in range(1, sc.steps + 1):
         console=True,
     )
 
-    if saved_state is not None:
-        model.load_state_dict(saved_state)
-
     if avg_auc >= sc.jackpot:
-        if saved_state is not None:
-            model.load_state_dict(avg_state)
         ckpt = {
             "version": version,
             "timestamp": ts,
