@@ -41,15 +41,19 @@ class ScriptConfig:
 
 
 @dataclass
-class OptimizerConfig:
-    lr: float = 0.001
-    adam_wd: float = 0.01
-    adam_warmup_steps: int = 1000
-    muon_wd: float = 0.1
-    muon_lr_scale: float = 0.1
-    muon_momentum: float = 0.96
-    muon_ns_steps: int = 5
-    muon_ns_abc: tuple[float, float, float] = (3.4445, -4.7750, 2.0315)
+class PriorConfig:
+    min_num_classes: int = 2
+    max_num_classes: int = 8
+    min_num_cols: int = 20
+    max_num_cols: int = 20
+    min_num_parent_attempts: int = 3
+    max_num_parent_attempts: int = 3
+    min_redirection: float = 0.5
+    max_redirection: float = 0.5
+    min_num_rows: int = 1000
+    max_num_rows: int = 1000
+    min_num_test_rows: int = 128
+    max_num_test_rows: int = 128
 
 
 @dataclass
@@ -65,19 +69,15 @@ class ModelConfig:
 
 
 @dataclass
-class PriorConfig:
-    min_num_classes: int = 2
-    max_num_classes: int = 8
-    min_num_cols: int = 20
-    max_num_cols: int = 20
-    min_num_parent_attempts: int = 3
-    max_num_parent_attempts: int = 3
-    min_redirection: float = 0.5
-    max_redirection: float = 0.5
-    min_num_rows: int = 1000
-    max_num_rows: int = 1000
-    min_num_test_rows: int = 128
-    max_num_test_rows: int = 128
+class OptimizerConfig:
+    lr: float = 0.001
+    adam_wd: float = 0.01
+    adam_warmup_steps: int = 1000
+    muon_wd: float = 0.1
+    muon_lr_scale: float = 0.1
+    muon_momentum: float = 0.96
+    muon_ns_steps: int = 5
+    muon_ns_abc: tuple[float, float, float] = (3.4445, -4.7750, 2.0315)
 
 
 @dataclass
@@ -95,9 +95,9 @@ parser.add_argument("--steps", type=int, default=None)
 args = parser.parse_args()
 
 sc = ScriptConfig()
-oc = OptimizerConfig()
-mc = ModelConfig()
 pc = PriorConfig()
+mc = ModelConfig()
+oc = OptimizerConfig()
 ec = EvalConfig()
 
 if args.seed is not None:
@@ -778,15 +778,15 @@ print0("=" * 100)
 print0("script config:")
 for f in fields(ScriptConfig):
     print0(f"  {f.name}: {getattr(sc, f.name)}")
-print0("optimizer config:")
-for f in fields(OptimizerConfig):
-    print0(f"  {f.name}: {getattr(oc, f.name)}")
-print0("model config:")
-for f in fields(ModelConfig):
-    print0(f"  {f.name}: {getattr(mc, f.name)}")
 print0("prior config:")
 for f in fields(PriorConfig):
     print0(f"  {f.name}: {getattr(pc, f.name)}")
+print0("model config:")
+for f in fields(ModelConfig):
+    print0(f"  {f.name}: {getattr(mc, f.name)}")
+print0("optimizer config:")
+for f in fields(OptimizerConfig):
+    print0(f"  {f.name}: {getattr(oc, f.name)}")
 print0("eval config:")
 for f in fields(EvalConfig):
     print0(f"  {f.name}: {getattr(ec, f.name)}")
