@@ -13,7 +13,7 @@ import time
 import tomllib
 import uuid
 from dataclasses import dataclass, fields
-from datetime import datetime
+from datetime import UTC, datetime
 
 import numpy as np
 import openml
@@ -111,7 +111,7 @@ assert torch.cuda.is_available()
 
 device = "cuda"
 
-start_ts = datetime.now()
+start_ts = datetime.now(tz=UTC).astimezone()
 ts = start_ts.strftime("%y%m%d-%H%M%S")
 uid = uuid.uuid4().hex[:8]
 e_name = args.name.strip()
@@ -773,7 +773,7 @@ for step in range(1, sc.steps + 1):
     aucs = evaluate(model, TABARENA_CLASSIFICATION_TASKS, config=ec)
     avg_auc = sum(aucs) / len(aucs)
 
-    run_time = (datetime.now() - start_ts).total_seconds() / 60
+    run_time = (datetime.now(tz=UTC) - start_ts).total_seconds() / 60
 
     print0(
         f"s:{step}/{sc.steps} "
@@ -826,7 +826,7 @@ print0("=" * 100)
 print0(f"peak memory allocated: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB", console=True)
 print0(f"peak memory reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB", console=True)
 print0("=" * 100)
-end_ts = datetime.now()
+end_ts = datetime.now(tz=UTC).astimezone()
 print0(f"end timestamp: {end_ts.strftime('%Y-%m-%d %H:%M:%S')}", console=True)
 print0(f"script runtime: {(end_ts - start_ts).total_seconds() / 60:.2f} mins")
 print0(f"experiment done: {e_id}", console=True)
