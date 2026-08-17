@@ -667,7 +667,7 @@ def evaluate(model, tasks, config):
         targets = []
         probabilities = []
 
-        for _, (train_indices, test_indices) in enumerate(cv.split(X, y)):
+        for train_indices, test_indices in cv.split(X, y):
             X_train = X.iloc[train_indices].to_numpy()
             y_train = y.iloc[train_indices].to_numpy()
             X_test = X.iloc[test_indices].to_numpy()
@@ -685,11 +685,11 @@ def evaluate(model, tasks, config):
             probabilities.append(y_proba)
 
         y_true = np.concatenate(targets, axis=0)
-        y_proba = np.concatenate(probabilities, axis=0) if len(probabilities) > 0 else None
+        y_proba = np.concatenate(probabilities, axis=0)
 
         auc = (
             roc_auc_score(y_true, y_proba, multi_class="ovr")
-            if getattr(y_proba, "ndim", 1) > 1
+            if y_proba.ndim > 1
             else roc_auc_score(y_true, y_proba)
         )
         aucs.append(auc)
