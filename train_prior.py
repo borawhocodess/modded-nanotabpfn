@@ -31,10 +31,6 @@ from sklearn.preprocessing import FunctionTransformer, LabelEncoder, OrdinalEnco
 from torch import nn
 
 
-# -----------------------------------------------------------------------------
-# config
-
-
 @dataclass
 class ScriptConfig:
     type: str = "classification"
@@ -185,10 +181,6 @@ TABARENA_CLASSIFICATION_TASKS = [
 ]
 
 
-# -----------------------------------------------------------------------------
-# techniques
-
-
 def zeropower_via_svd(G, steps=None):
     U, S, V = G.svd()
     return U @ V.T
@@ -290,10 +282,6 @@ class ThinkingRows(nn.Module):
         x = torch.cat([thinking, x], dim=1)
         sep = sep + self.num_thinking_rows
         return x, sep
-
-
-# -----------------------------------------------------------------------------
-# model
 
 
 class NanoTabPFNModel(nn.Module):
@@ -465,10 +453,6 @@ class Decoder(nn.Module):
         return self.linear2(F.gelu(self.linear1(x)))
 
 
-# -----------------------------------------------------------------------------
-# priors
-
-
 class PriorDataLoader:
     def __init__(self, prior, batch_size):
         self.prior = prior
@@ -553,10 +537,6 @@ class Prior:
         x = torch.stack([d[0] for d in datasets])
         y = torch.stack([d[1] for d in datasets])
         return x, y
-
-
-# -----------------------------------------------------------------------------
-# interface
 
 
 def init_model_from_ckpt_file(file_path):
@@ -653,10 +633,6 @@ class NanoTabPFNClassifier:
                 probabilities = F.softmax(out, dim=1)
 
             return probabilities.to("cpu").numpy()
-
-
-# -----------------------------------------------------------------------------
-# main
 
 
 prior = Prior(config=pc, device=device)
