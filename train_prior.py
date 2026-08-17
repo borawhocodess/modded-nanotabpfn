@@ -695,10 +695,6 @@ criterion = nn.CrossEntropyLoss()
 lawa_queue = collections.deque(maxlen=sc.lawa_k)
 
 t_t = 0.0
-prev_muon = None
-prev_adam = None
-init_muon = torch.cat([p.detach().flatten() for p in muon_params])
-init_adam = torch.cat([p.detach().flatten() for p in adam_params])
 
 
 data = iter(loader)
@@ -710,7 +706,6 @@ for step in range(1, sc.steps + 1):
     optimizer_adam.train()
     total_loss = 0.0
     num_valid = 0
-    gnorms = []
 
     full_data = next(data)
     sep = full_data["sep"]
@@ -735,7 +730,7 @@ for step in range(1, sc.steps + 1):
 
     total_loss += loss.detach()
 
-    gnorms.append(torch.nn.utils.clip_grad_norm_(model.parameters(), sc.grad_clip))
+    torch.nn.utils.clip_grad_norm_(model.parameters(), sc.grad_clip)
     for opt in optimizers:
         opt.step()
 
@@ -745,20 +740,6 @@ for step in range(1, sc.steps + 1):
     mu_s_t = t_t / step
 
     mean_loss = (total_loss / num_valid).cpu().item()
-
-    gnorm_stack = torch.stack(gnorms)
-    mean_gnorm = gnorm_stack.mean().cpu().item()
-    max_gnorm = gnorm_stack.max().cpu().item()
-    clip_rate = (gnorm_stack > sc.grad_clip).float().mean().cpu().item()
-
-    cur_muon = torch.cat([p.detach().flatten() for p in muon_params])
-    cur_adam = torch.cat([p.detach().flatten() for p in adam_params])
-    drift_mu = (cur_muon - prev_muon).norm().cpu().item() if prev_muon is not None else float("nan")
-    drift_ad = (cur_adam - prev_adam).norm().cpu().item() if prev_adam is not None else float("nan")
-    drift0_mu = (cur_muon - init_muon).norm().cpu().item()
-    drift0_ad = (cur_adam - init_adam).norm().cpu().item()
-    prev_muon = cur_muon
-    prev_adam = cur_adam
 
     if t_t > sc.max_train_mins * 60:
         print0("exceeded max train time", console=True)
@@ -836,9 +817,6 @@ for step in range(1, sc.steps + 1):
 
     print0(
         f"s:{step}/{sc.steps} μ_l:{mean_loss:.2f} "
-        f"g:{mean_gnorm:.2f} g_max:{max_gnorm:.2f} clip:{clip_rate:.2f} "
-        f"d_mu:{drift_mu:.2f} d_ad:{drift_ad:.2f} "
-        f"d0_mu:{drift0_mu:.2f} d0_ad:{drift0_ad:.2f} "
         f"s_t:{s_t:.2f}s μ_s_t:{mu_s_t:.2f}s t_t:{t_t:.2f}s "
         f"avg_roc_auc:{avg_auc}",
         console=True,
