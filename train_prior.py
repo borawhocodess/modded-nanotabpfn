@@ -690,15 +690,14 @@ optimizers = [optimizer_muon, optimizer_adam]
 
 criterion = nn.CrossEntropyLoss()
 
-t_t = 0.0
+train_time = 0.0
 total_loss = 0.0
-
 
 data = iter(loader)
 
 for step in range(1, sc.steps + 1):
     torch.cuda.synchronize()
-    s_t0 = time.perf_counter()
+    step_t0 = time.perf_counter()
     model.train()
     optimizer_adam.train()
 
@@ -726,10 +725,10 @@ for step in range(1, sc.steps + 1):
         opt.step()
 
     torch.cuda.synchronize()
-    s_t = time.perf_counter() - s_t0
-    t_t += s_t
+    step_time = time.perf_counter() - step_t0
+    train_time += step_time
 
-    if t_t > sc.max_train_mins * 60:
+    if train_time > sc.max_train_mins * 60:
         print0("exceeded max train time", console=True)
         sys.exit(0)
 
@@ -740,7 +739,7 @@ for step in range(1, sc.steps + 1):
     total_loss = 0.0
 
     torch.cuda.synchronize()
-    s_e_t0 = time.perf_counter()
+    step_eval_t0 = time.perf_counter()
 
     model.eval()
     optimizer_adam.eval()
@@ -800,15 +799,15 @@ for step in range(1, sc.steps + 1):
     avg_auc = (sum(aucs) / len(aucs)) if len(aucs) > 0 else float("nan")
 
     torch.cuda.synchronize()
-    s_e_t = time.perf_counter() - s_e_t0
-    r_t = (datetime.now() - start_ts).total_seconds() / 60
+    step_eval_time = time.perf_counter() - step_eval_t0
+    run_time = (datetime.now() - start_ts).total_seconds() / 60
 
     print0(
         f"s:{step}/{sc.steps} "
-        f"r_t:{r_t:.2f}m "
-        f"s_e_t:{s_e_t:.2f}s "
-        f"s_t:{s_t:.2f}s "
-        f"t_t:{t_t:.2f}s "
+        f"r_t:{run_time:.2f}m "
+        f"s_e_t:{step_eval_time:.2f}s "
+        f"s_t:{step_time:.2f}s "
+        f"t_t:{train_time:.2f}s "
         f"μ_l:{mean_loss:.2f} "
         f"avg_roc_auc:{avg_auc}",
         console=True,
@@ -832,7 +831,7 @@ for step in range(1, sc.steps + 1):
         torch.save(ckpt, ckpt_path)
         print0("=" * 100)
         print0(f"datasets seen: {step * sc.batch_size}", console=True)
-        print0(f"record time in mins: {t_t / 60:.2f}", console=True)
+        print0(f"record time in mins: {train_time / 60:.2f}", console=True)
         break
 
 print0("=" * 100)
