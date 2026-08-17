@@ -45,9 +45,6 @@ class ScriptConfig:
     muon_lr_scale: float = 0.1
     muon_momentum: float = 0.96
     grad_clip: float = 2.0
-    eval_folds: int = 5
-    eval_subsample_samples: int | None = 1000
-    eval_subsample_features: int | None = 100
     max_train_mins: float = 20
     jackpot: float = 0.8068462330697953
 
@@ -81,6 +78,14 @@ class PriorConfig:
     max_num_test_rows: int = 128
 
 
+@dataclass
+class EvalConfig:
+    seed: int = 11
+    folds: int = 5
+    subsample_features: int | None = 100
+    subsample_samples: int | None = 1000
+
+
 parser = argparse.ArgumentParser()
 parser.add_argument("--name", default="test")
 parser.add_argument("--seed", type=int, default=None)
@@ -90,6 +95,7 @@ args = parser.parse_args()
 sc = ScriptConfig()
 mc = ModelConfig()
 pc = PriorConfig()
+ec = EvalConfig()
 
 if args.seed is not None:
     sc.seed = args.seed
@@ -635,6 +641,62 @@ class NanoTabPFNClassifier:
             return probabilities.to("cpu").numpy()
 
 
+def evaluate(model, tasks, config):
+    clf = NanoTabPFNClassifier(model)
+    aucs = []
+
+    for task_id in tasks:
+        task = openml.tasks.get_task(task_id, download_splits=False)
+
+        dataset = task.get_dataset(download_data=False)
+        X, y, _, _ = dataset.get_data(target=task.target_name, dataset_format="dataframe")
+
+        len_features = X.shape[1]
+        if config.subsample_features is not None and len_features > config.subsample_features:
+            rng = np.random.default_rng(config.seed)
+            feature_choices = rng.choice(len_features, size=config.subsample_features, replace=False)
+            X = X.iloc[:, feature_choices]
+
+        if config.subsample_samples is not None and len(X) > config.subsample_samples:
+            _, X, _, y = train_test_split(X, y, test_size=config.subsample_samples, stratify=y, random_state=config.seed)
+            X = X.reset_index(drop=True)
+            y = y.reset_index(drop=True)
+
+        cv = StratifiedKFold(n_splits=config.folds, shuffle=True, random_state=config.seed)
+
+        targets = []
+        probabilities = []
+
+        for _, (train_indices, test_indices) in enumerate(cv.split(X, y)):
+            X_train = X.iloc[train_indices].to_numpy()
+            y_train = y.iloc[train_indices].to_numpy()
+            X_test = X.iloc[test_indices].to_numpy()
+            y_test = y.iloc[test_indices].to_numpy()
+
+            label_encoder = LabelEncoder()
+            y_train = label_encoder.fit_transform(y_train)
+            y_test = label_encoder.transform(y_test)
+            targets.append(y_test)
+
+            clf.fit(X_train, y_train)
+            y_proba = clf.predict_proba(X_test)
+            if y_proba.shape[1] == 2:
+                y_proba = y_proba[:, 1]
+            probabilities.append(y_proba)
+
+        y_true = np.concatenate(targets, axis=0)
+        y_proba = np.concatenate(probabilities, axis=0) if len(probabilities) > 0 else None
+
+        auc = (
+            roc_auc_score(y_true, y_proba, multi_class="ovr")
+            if getattr(y_proba, "ndim", 1) > 1
+            else roc_auc_score(y_true, y_proba)
+        )
+        aucs.append(auc)
+
+    return aucs
+
+
 prior = Prior(config=pc, device=device)
 loader = PriorDataLoader(prior=prior, batch_size=sc.batch_size)
 
@@ -720,59 +782,8 @@ for step in range(1, sc.steps + 1):
     model.eval()
     optimizer_adam.eval()
 
-    clf = NanoTabPFNClassifier(model)
-    aucs = []
-
-    for task_id in TABARENA_CLASSIFICATION_TASKS:
-        task = openml.tasks.get_task(task_id, download_splits=False)
-
-        dataset = task.get_dataset(download_data=False)
-        X, y, _, _ = dataset.get_data(target=task.target_name, dataset_format="dataframe")
-
-        len_features = X.shape[1]
-        if sc.eval_subsample_features is not None and len_features > sc.eval_subsample_features:
-            rng = np.random.default_rng(sc.seed)
-            feature_choices = rng.choice(len_features, size=sc.eval_subsample_features, replace=False)
-            X = X.iloc[:, feature_choices]
-
-        if sc.eval_subsample_samples is not None and len(X) > sc.eval_subsample_samples:
-            _, X, _, y = train_test_split(X, y, test_size=sc.eval_subsample_samples, stratify=y, random_state=sc.seed)
-            X = X.reset_index(drop=True)
-            y = y.reset_index(drop=True)
-
-        cv = StratifiedKFold(n_splits=sc.eval_folds, shuffle=True, random_state=sc.seed)
-
-        targets = []
-        probabilities = []
-
-        for _, (train_indices, test_indices) in enumerate(cv.split(X, y)):
-            X_train = X.iloc[train_indices].to_numpy()
-            y_train = y.iloc[train_indices].to_numpy()
-            X_test = X.iloc[test_indices].to_numpy()
-            y_test = y.iloc[test_indices].to_numpy()
-
-            label_encoder = LabelEncoder()
-            y_train = label_encoder.fit_transform(y_train)
-            y_test = label_encoder.transform(y_test)
-            targets.append(y_test)
-
-            clf.fit(X_train, y_train)
-            y_proba = clf.predict_proba(X_test)
-            if y_proba.shape[1] == 2:
-                y_proba = y_proba[:, 1]
-            probabilities.append(y_proba)
-
-        y_true = np.concatenate(targets, axis=0)
-        y_proba = np.concatenate(probabilities, axis=0) if len(probabilities) > 0 else None
-
-        auc = (
-            roc_auc_score(y_true, y_proba, multi_class="ovr")
-            if getattr(y_proba, "ndim", 1) > 1
-            else roc_auc_score(y_true, y_proba)
-        )
-        aucs.append(auc)
-
-    avg_auc = (sum(aucs) / len(aucs)) if len(aucs) > 0 else float("nan")
+    aucs = evaluate(model, TABARENA_CLASSIFICATION_TASKS, config=ec)
+    avg_auc = sum(aucs) / len(aucs)
 
     torch.cuda.synchronize()
     step_eval_time = time.perf_counter() - step_eval_t0
@@ -820,6 +831,9 @@ for f in fields(ModelConfig):
 print0("prior config:")
 for f in fields(PriorConfig):
     print0(f"  {f.name}: {getattr(pc, f.name)}")
+print0("eval config:")
+for f in fields(EvalConfig):
+    print0(f"  {f.name}: {getattr(ec, f.name)}")
 print0("=" * 100)
 total_params = sum(p.numel() for p in model.parameters())
 trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
