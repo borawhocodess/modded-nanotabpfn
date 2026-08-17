@@ -468,7 +468,7 @@ class PriorDataLoader:
 
 
 class Prior:
-    activations = [lambda z: z, torch.tanh, torch.sin, torch.abs, torch.square, F.softplus]
+    activations = (lambda z: z, torch.tanh, torch.sin, torch.abs, torch.square, F.softplus)
 
     def __init__(self, config, device):
         self.config = config
