@@ -538,6 +538,9 @@ def init_model_from_ckpt_file(file_path):
         e=ckpt["arch"]["e"],
         h=ckpt["arch"]["h"],
         o=ckpt["arch"]["o"],
+        residual_decay=ckpt["arch"]["residual_decay"],
+        thinking_rows=ckpt["arch"]["thinking_rows"],
+        feature_group_size=ckpt["arch"]["feature_group_size"],
     )
     if "borders" in ckpt["model"]:
         model.borders = ckpt["model"]["borders"]
@@ -832,6 +835,9 @@ for epoch in range(1, c.epochs + 1):
                 "h": model.h,
                 "l": model.l,
                 "o": model.o,
+                "residual_decay": model.transformer_encoder.residual_decay,
+                "thinking_rows": model.thinking_rows.num_thinking_rows,
+                "feature_group_size": model.feature_encoder.feature_group_size,
             },
             "model": model.state_dict(),
         }

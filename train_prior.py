@@ -37,16 +37,23 @@ class ScriptConfig:
     experiments_dir: str = "workdir/experiments"
     seed: int = 11
     batch_size: int = 2
-    lr: float = 0.001
     steps: int = 10000
     eval_every: int = 100
+    grad_clip: float = 2.0
+    max_train_mins: float = 10
+    jackpot: float = 0.8068462330697953
+
+
+@dataclass
+class OptimizerConfig:
+    lr: float = 0.001
     adam_wd: float = 0.01
+    adam_warmup_steps: int = 1000
     muon_wd: float = 0.1
     muon_lr_scale: float = 0.1
     muon_momentum: float = 0.96
-    grad_clip: float = 2.0
-    max_train_mins: float = 20
-    jackpot: float = 0.8068462330697953
+    muon_backend_steps: int = 5
+    muon_backend_abc: tuple[float, float, float] = (3.4445, -4.7750, 2.0315)
 
 
 @dataclass
@@ -92,6 +99,7 @@ parser.add_argument("--steps", type=int, default=None)
 args = parser.parse_args()
 
 sc = ScriptConfig()
+oc = OptimizerConfig()
 mc = ModelConfig()
 pc = PriorConfig()
 ec = EvalConfig()
@@ -187,9 +195,9 @@ TABARENA_CLASSIFICATION_TASKS = [
 
 
 @torch.compile
-def zeropower_via_newtonschulz5(G, steps=10, eps=1e-7):
+def zeropower_via_newtonschulz5(G, steps, abc, eps=1e-7):
     assert len(G.shape) == 2
-    a, b, c = (3.4445, -4.7750,  2.0315)
+    a, b, c = abc
     X = G.bfloat16()
     X /= (X.norm() + eps)
     if G.size(0) > G.size(1):
@@ -203,8 +211,8 @@ def zeropower_via_newtonschulz5(G, steps=10, eps=1e-7):
     return X.to(G.dtype)
 
 @torch.compile
-def zeropower_via_newtonschulz5_batched(G, steps=10, eps=1e-7):
-    a, b, c = (3.4445, -4.7750,  2.0315)
+def zeropower_via_newtonschulz5_batched(G, steps, abc, eps=1e-7):
+    a, b, c = abc
     X = G.bfloat16()
     X /= (X.norm(dim=(1, 2), keepdim=True) + eps)
     if X.size(1) > X.size(2):
@@ -221,13 +229,13 @@ class Muon(torch.optim.Optimizer):
     """
     code adapted from: https://github.com/KellerJordan/modded-nanogpt/commit/b356a1f
     """
-    def __init__(self, params, lr=3e-4, momentum=0.95, nesterov=True, backend_steps=5, weight_decay=0.0):
+    def __init__(self, params, lr, momentum, weight_decay, backend_steps, backend_abc):
         defaults = {
             "lr": lr,
             "momentum": momentum,
-            "nesterov": nesterov,
-            "backend_steps": backend_steps,
             "weight_decay": weight_decay,
+            "backend_steps": backend_steps,
+            "backend_abc": backend_abc,
         }
         super().__init__(params, defaults)
 
@@ -244,15 +252,16 @@ class Muon(torch.optim.Optimizer):
                     state['momentum_buffer'] = torch.zeros_like(g)
                 buf = state['momentum_buffer']
                 buf.mul_(momentum).add_(g)
-                if group['nesterov']:
-                    g = g.add(buf, alpha=momentum)
+                g = g.add(buf, alpha=momentum)
                 if g.size(0) == 3 * g.size(1):
                     g_batched = g.view(3, g.size(1), g.size(1))
-                    g_new = zeropower_via_newtonschulz5_batched(g_batched, steps=group['backend_steps'])
+                    g_new = zeropower_via_newtonschulz5_batched(
+                        g_batched, steps=group['backend_steps'], abc=group['backend_abc'],
+                    )
                     g = g_new.view(3 * g.size(1), g.size(1))
                     scale = g.size(1)**0.5
                 else:
-                    g = zeropower_via_newtonschulz5(g, steps=group['backend_steps'])
+                    g = zeropower_via_newtonschulz5(g, steps=group['backend_steps'], abc=group['backend_abc'])
                     scale = max(g.size(0), g.size(1))**0.5
                 p.data.add_(g, alpha=-lr * scale)
                 if group['weight_decay'] > 0:
@@ -289,15 +298,7 @@ class ThinkingRows(nn.Module):
 
 
 class NanoTabPFNModel(nn.Module):
-    def __init__(self, l, a, e, h, o, residual_decay=1.0, thinking_rows=16, feature_group_size=3):
-        """
-        l : num layers
-        a : num attention heads
-        e : embedding size
-        h : mlp hidden size
-        o : num outputs
-        residual_decay : exponential decay of residual stream per layer (1.0 = no decay)
-        """
+    def __init__(self, l, a, e, h, o, residual_decay, thinking_rows, feature_group_size):
         super().__init__()
         self.l = l
         self.a = a
@@ -367,7 +368,7 @@ class TargetEncoder(nn.Module):
 
 
 class TransformerEncoderStack(nn.Module):
-    def __init__(self, l, a, e, h, residual_decay=1.0):
+    def __init__(self, l, a, e, h, residual_decay):
         super().__init__()
         self.residual_decay = residual_decay
         self.transformer_blocks = nn.ModuleList()
@@ -551,6 +552,9 @@ def init_model_from_ckpt_file(file_path):
         e=ckpt["arch"]["e"],
         h=ckpt["arch"]["h"],
         o=ckpt["arch"]["o"],
+        residual_decay=ckpt["arch"]["residual_decay"],
+        thinking_rows=ckpt["arch"]["thinking_rows"],
+        feature_group_size=ckpt["arch"]["feature_group_size"],
     )
     if "borders" in ckpt["model"]:
         model.borders = ckpt["model"]["borders"]
@@ -605,10 +609,8 @@ def get_feature_preprocessor(X):
 
 
 class NanoTabPFNClassifier:
-    def __init__(self, model=None):
+    def __init__(self, model):
         device = "cuda"
-        if model is None:
-            raise ValueError("model is None")
         if isinstance(model, str):
             model = init_model_from_ckpt_file(model)
         self.model = model.to(device)
@@ -719,8 +721,20 @@ for name, p in model.named_parameters():
     else:
         adam_params.append(p)
 
-optimizer_muon = Muon(muon_params, lr=sc.muon_lr_scale*sc.lr, momentum=sc.muon_momentum, weight_decay=sc.muon_wd)
-optimizer_adam = schedulefree.AdamWScheduleFree(adam_params, lr=sc.lr, weight_decay=sc.adam_wd, warmup_steps=1000)
+optimizer_muon = Muon(
+    muon_params,
+    lr=oc.muon_lr_scale*oc.lr,
+    momentum=oc.muon_momentum,
+    weight_decay=oc.muon_wd,
+    backend_steps=oc.muon_backend_steps,
+    backend_abc=oc.muon_backend_abc,
+)
+optimizer_adam = schedulefree.AdamWScheduleFree(
+    adam_params,
+    lr=oc.lr,
+    weight_decay=oc.adam_wd,
+    warmup_steps=oc.adam_warmup_steps,
+)
 
 optimizers = [optimizer_muon, optimizer_adam]
 
@@ -802,6 +816,9 @@ for step in range(1, sc.steps + 1):
                 "h": model.h,
                 "l": model.l,
                 "o": model.o,
+                "residual_decay": model.transformer_encoder.residual_decay,
+                "thinking_rows": model.thinking_rows.num_thinking_rows,
+                "feature_group_size": model.feature_encoder.feature_group_size,
             },
             "model": model.state_dict(),
         }
@@ -815,6 +832,9 @@ print0("=" * 100)
 print0("script config:")
 for f in fields(ScriptConfig):
     print0(f"  {f.name}: {getattr(sc, f.name)}")
+print0("optimizer config:")
+for f in fields(OptimizerConfig):
+    print0(f"  {f.name}: {getattr(oc, f.name)}")
 print0("model config:")
 for f in fields(ModelConfig):
     print0(f"  {f.name}: {getattr(mc, f.name)}")
