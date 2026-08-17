@@ -48,8 +48,8 @@ class OptimizerConfig:
     muon_wd: float = 0.1
     muon_lr_scale: float = 0.1
     muon_momentum: float = 0.96
-    muon_backend_steps: int = 5
-    muon_backend_abc: tuple[float, float, float] = (3.4445, -4.7750, 2.0315)
+    muon_ns_steps: int = 5
+    muon_ns_abc: tuple[float, float, float] = (3.4445, -4.7750, 2.0315)
 
 
 @dataclass
@@ -84,8 +84,8 @@ class PriorConfig:
 class EvalConfig:
     seed: int = 11
     folds: int = 5
-    subsample_features: int | None = 100
-    subsample_samples: int | None = 1000
+    max_features: int = 100
+    max_samples: int = 1000
 
 
 parser = argparse.ArgumentParser()
@@ -108,7 +108,7 @@ if args.steps is not None:
 random.seed(sc.seed)
 np.random.seed(sc.seed)
 torch.manual_seed(sc.seed)
-torch.set_float32_matmul_precision('high')
+torch.set_float32_matmul_precision("high")
 torch._dynamo.config.cache_size_limit = 128
 assert torch.cuda.is_available()
 device = "cuda"
@@ -168,7 +168,7 @@ def zeropower_via_newtonschulz5(G, steps, abc, eps=1e-7):
     assert len(G.shape) == 2
     a, b, c = abc
     X = G.bfloat16()
-    X /= (X.norm() + eps)
+    X /= X.norm() + eps
     if G.size(0) > G.size(1):
         X = X.T
     for _ in range(steps):
@@ -179,11 +179,12 @@ def zeropower_via_newtonschulz5(G, steps, abc, eps=1e-7):
         X = X.T
     return X.to(G.dtype)
 
+
 @torch.compile
 def zeropower_via_newtonschulz5_batched(G, steps, abc, eps=1e-7):
     a, b, c = abc
     X = G.bfloat16()
-    X /= (X.norm(dim=(1, 2), keepdim=True) + eps)
+    X /= X.norm(dim=(1, 2), keepdim=True) + eps
     if X.size(1) > X.size(2):
         X = X.transpose(1, 2)
     for _ in range(steps):
@@ -194,47 +195,47 @@ def zeropower_via_newtonschulz5_batched(G, steps, abc, eps=1e-7):
         X = X.transpose(1, 2)
     return X.to(G.dtype)
 
+
 class Muon(torch.optim.Optimizer):
     """
     code adapted from: https://github.com/KellerJordan/modded-nanogpt/commit/b356a1f
     """
-    def __init__(self, params, lr, momentum, weight_decay, backend_steps, backend_abc):
+
+    def __init__(self, params, lr, momentum, weight_decay, ns_steps, ns_abc):
         defaults = {
             "lr": lr,
             "momentum": momentum,
             "weight_decay": weight_decay,
-            "backend_steps": backend_steps,
-            "backend_abc": backend_abc,
+            "ns_steps": ns_steps,
+            "ns_abc": ns_abc,
         }
         super().__init__(params, defaults)
 
     def step(self):
         for group in self.param_groups:
-            lr = group['lr']
-            momentum = group['momentum']
-            for p in group['params']:
+            lr = group["lr"]
+            momentum = group["momentum"]
+            for p in group["params"]:
                 g = p.grad
                 if g is None:
                     continue
                 state = self.state[p]
-                if 'momentum_buffer' not in state:
-                    state['momentum_buffer'] = torch.zeros_like(g)
-                buf = state['momentum_buffer']
+                if "momentum_buffer" not in state:
+                    state["momentum_buffer"] = torch.zeros_like(g)
+                buf = state["momentum_buffer"]
                 buf.mul_(momentum).add_(g)
                 g = g.add(buf, alpha=momentum)
                 if g.size(0) == 3 * g.size(1):
                     g_batched = g.view(3, g.size(1), g.size(1))
-                    g_new = zeropower_via_newtonschulz5_batched(
-                        g_batched, steps=group['backend_steps'], abc=group['backend_abc'],
-                    )
+                    g_new = zeropower_via_newtonschulz5_batched(g_batched, steps=group["ns_steps"], abc=group["ns_abc"])
                     g = g_new.view(3 * g.size(1), g.size(1))
-                    scale = g.size(1)**0.5
+                    scale = g.size(1) ** 0.5
                 else:
-                    g = zeropower_via_newtonschulz5(g, steps=group['backend_steps'], abc=group['backend_abc'])
-                    scale = max(g.size(0), g.size(1))**0.5
+                    g = zeropower_via_newtonschulz5(g, steps=group["ns_steps"], abc=group["ns_abc"])
+                    scale = max(g.size(0), g.size(1)) ** 0.5
                 p.data.add_(g, alpha=-lr * scale)
-                if group['weight_decay'] > 0:
-                    p.data.mul_(1 - lr * group['weight_decay'])
+                if group["weight_decay"] > 0:
+                    p.data.mul_(1 - lr * group["weight_decay"])
 
 
 class ModdedNanoTabPFNModel(nn.Module):
@@ -291,7 +292,7 @@ class FeatureEncoder(nn.Module):
     def forward(self, x, sep):
         n_cols = x.shape[-1]
         idxs = torch.arange(n_cols, dtype=torch.long, device=x.device)
-        x = torch.stack([x[:, :, (idxs + (2 ** i - 1)) % n_cols] for i in range(self.feature_group_size)], dim=-1)
+        x = torch.stack([x[:, :, (idxs + (2**i - 1)) % n_cols] for i in range(self.feature_group_size)], dim=-1)
         mean = x[:, :sep].mean(dim=1, keepdim=True)
         std = x[:, :sep].std(dim=1, keepdim=True) + 1e-8
         x = (x - mean) / std
@@ -322,7 +323,7 @@ class TransformerEncoderStack(nn.Module):
 
     def forward(self, x, sep):
         for i, block in enumerate(self.transformer_blocks):
-            x = x * (self.residual_decay ** i)
+            x = x * (self.residual_decay**i)
             x = block(x, sep=sep)
         return x
 
@@ -577,13 +578,13 @@ def evaluate(model, tasks, config):
         X, y, _, _ = dataset.get_data(target=task.target_name, dataset_format="dataframe")
 
         len_features = X.shape[1]
-        if config.subsample_features is not None and len_features > config.subsample_features:
+        if len_features > config.max_features:
             rng = np.random.default_rng(config.seed)
-            feature_choices = rng.choice(len_features, size=config.subsample_features, replace=False)
+            feature_choices = rng.choice(len_features, size=config.max_features, replace=False)
             X = X.iloc[:, feature_choices]
 
-        if config.subsample_samples is not None and len(X) > config.subsample_samples:
-            _, X, _, y = train_test_split(X, y, test_size=config.subsample_samples, stratify=y, random_state=config.seed)
+        if len(X) > config.max_samples:
+            _, X, _, y = train_test_split(X, y, test_size=config.max_samples, stratify=y, random_state=config.seed)
             X = X.reset_index(drop=True)
             y = y.reset_index(drop=True)
 
@@ -612,11 +613,7 @@ def evaluate(model, tasks, config):
         y_true = np.concatenate(targets, axis=0)
         y_proba = np.concatenate(probabilities, axis=0)
 
-        auc = (
-            roc_auc_score(y_true, y_proba, multi_class="ovr")
-            if y_proba.ndim > 1
-            else roc_auc_score(y_true, y_proba)
-        )
+        auc = roc_auc_score(y_true, y_proba, multi_class="ovr") if y_proba.ndim > 1 else roc_auc_score(y_true, y_proba)
         aucs.append(auc)
 
     return aucs
@@ -655,11 +652,11 @@ for name, p in model.named_parameters():
 
 optimizer_muon = Muon(
     muon_params,
-    lr=oc.muon_lr_scale*oc.lr,
+    lr=oc.muon_lr_scale * oc.lr,
     momentum=oc.muon_momentum,
     weight_decay=oc.muon_wd,
-    backend_steps=oc.muon_backend_steps,
-    backend_abc=oc.muon_backend_abc,
+    ns_steps=oc.muon_ns_steps,
+    ns_abc=oc.muon_ns_abc,
 )
 optimizer_adam = schedulefree.AdamWScheduleFree(
     adam_params,
@@ -749,11 +746,7 @@ for step in range(1, sc.steps + 1):
     run_time = (datetime.now(tz=UTC) - start_ts).total_seconds() / 60
 
     print0(
-        f"s:{step}/{sc.steps} "
-        f"r_t:{run_time:.2f}m "
-        f"t_t:{train_time:.2f}s "
-        f"μ_l:{mean_loss:.2f} "
-        f"avg_roc_auc:{avg_auc}",
+        f"s:{step}/{sc.steps} r_t:{run_time:.2f}m t_t:{train_time:.2f}s μ_l:{mean_loss:.2f} avg_roc_auc:{avg_auc}",
         console=True,
     )
 
