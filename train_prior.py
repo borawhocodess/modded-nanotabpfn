@@ -121,7 +121,7 @@ with open(sys.argv[0], "r") as f:
 with open("pyproject.toml", "rb") as f:
     version = tomllib.load(f)["project"]["version"]
 
-TABARENA_CLASSIFICATION_TASKS = [
+tabarena_classification_tasks = [
     363613,  # ( 32769,   10) Amazon_employee_access
     363614,  # (   898,   39) anneal
     363616,  # ( 76000,  171) APSFailure
@@ -740,7 +740,7 @@ for step in range(1, sc.steps + 1):
     model.eval()
     optimizer_adam.eval()
 
-    aucs = evaluate(model, TABARENA_CLASSIFICATION_TASKS, config=ec)
+    aucs = evaluate(model, tabarena_classification_tasks, config=ec)
     avg_auc = sum(aucs) / len(aucs)
 
     run_time = (datetime.now(tz=UTC) - start_ts).total_seconds() / 60
