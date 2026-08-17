@@ -37,7 +37,7 @@ from torch import nn
 
 
 @dataclass
-class Config:
+class ScriptConfig:
     type: str = "classification"
     experiments_dir: str = "workdir/experiments"
     seed: int = 11
@@ -45,14 +45,6 @@ class Config:
     lr: float = 0.001
     steps: int = 32
     epochs: int = 4000
-    a: int = 4
-    e: int = 256
-    h: int = 768
-    l: int = 5
-    o: int = 8
-    residual_decay: float = 0.95
-    thinking_rows: int = 24
-    feature_group_size: int = 5
     adam_wd: float = 0.01
     muon_wd: float = 0.1
     muon_lr_scale: float = 0.1
@@ -65,6 +57,18 @@ class Config:
     eval_subsample_features: int | None = 100
     max_train_mins: float = 20
     jackpot: float = 0.8068462330697953
+
+
+@dataclass
+class ModelConfig:
+    a: int = 4
+    e: int = 256
+    h: int = 768
+    l: int = 5
+    o: int = 8
+    residual_decay: float = 0.95
+    thinking_rows: int = 24
+    feature_group_size: int = 5
 
 
 @dataclass
@@ -90,17 +94,18 @@ parser.add_argument("--seed", type=int, default=None)
 parser.add_argument("--epochs", type=int, default=None)
 args = parser.parse_args()
 
-c = Config()
+sc = ScriptConfig()
+mc = ModelConfig()
 pc = PriorConfig()
 
 if args.seed is not None:
-    c.seed = args.seed
+    sc.seed = args.seed
 if args.epochs is not None:
-    c.epochs = args.epochs
+    sc.epochs = args.epochs
 
-random.seed(c.seed)
-np.random.seed(c.seed)
-torch.manual_seed(c.seed)
+random.seed(sc.seed)
+np.random.seed(sc.seed)
+torch.manual_seed(sc.seed)
 torch.set_float32_matmul_precision('high')
 torch._dynamo.config.cache_size_limit = 128
 
@@ -113,7 +118,7 @@ ts = start_ts.strftime("%y%m%d-%H%M%S")
 uid = uuid.uuid4().hex[:8]
 e_name = args.name.strip()
 e_id = f"{ts}-{uid}-{e_name}" if e_name else f"{ts}-{uid}"
-e_root = os.path.join(c.experiments_dir, e_name) if e_name else c.experiments_dir
+e_root = os.path.join(sc.experiments_dir, e_name) if e_name else sc.experiments_dir
 e_dir = os.path.join(e_root, e_id)
 os.makedirs(e_dir, exist_ok=True)
 log_path = os.path.join(e_dir, f"{e_id}-log.txt")
@@ -662,17 +667,17 @@ class NanoTabPFNClassifier:
 
 
 prior = Prior(config=pc, device=device)
-loader = PriorDataLoader(prior=prior, num_steps=c.steps, batch_size=c.batch_size)
+loader = PriorDataLoader(prior=prior, num_steps=sc.steps, batch_size=sc.batch_size)
 
 model = NanoTabPFNModel(
-    l=c.l,
-    a=c.a,
-    e=c.e,
-    h=c.h,
-    o=c.o,
-    residual_decay=c.residual_decay,
-    thinking_rows=c.thinking_rows,
-    feature_group_size=c.feature_group_size,
+    l=mc.l,
+    a=mc.a,
+    e=mc.e,
+    h=mc.h,
+    o=mc.o,
+    residual_decay=mc.residual_decay,
+    thinking_rows=mc.thinking_rows,
+    feature_group_size=mc.feature_group_size,
 ).to(device)
 
 muon_params = []
@@ -685,14 +690,14 @@ for name, p in model.named_parameters():
     else:
         adam_params.append(p)
 
-optimizer_muon = Muon(muon_params, lr=c.muon_lr_scale*c.lr, momentum=c.muon_momentum, weight_decay=c.muon_wd)
-optimizer_adam = schedulefree.AdamWScheduleFree(adam_params, lr=c.lr, weight_decay=c.adam_wd, warmup_steps=1000)
+optimizer_muon = Muon(muon_params, lr=sc.muon_lr_scale*sc.lr, momentum=sc.muon_momentum, weight_decay=sc.muon_wd)
+optimizer_adam = schedulefree.AdamWScheduleFree(adam_params, lr=sc.lr, weight_decay=sc.adam_wd, warmup_steps=1000)
 
 optimizers = [optimizer_muon, optimizer_adam]
 
 criterion = nn.CrossEntropyLoss()
 
-lawa_queue = collections.deque(maxlen=c.lawa_k)
+lawa_queue = collections.deque(maxlen=sc.lawa_k)
 
 t_t = 0.0
 prev_muon = None
@@ -701,7 +706,7 @@ init_muon = torch.cat([p.detach().flatten() for p in muon_params])
 init_adam = torch.cat([p.detach().flatten() for p in adam_params])
 
 
-for epoch in range(1, c.epochs + 1):
+for epoch in range(1, sc.epochs + 1):
     torch.cuda.synchronize()
     t0 = time.perf_counter()
     model.train()
@@ -732,7 +737,7 @@ for epoch in range(1, c.epochs + 1):
 
         total_loss += loss.detach()
 
-        gnorms.append(torch.nn.utils.clip_grad_norm_(model.parameters(), c.grad_clip))
+        gnorms.append(torch.nn.utils.clip_grad_norm_(model.parameters(), sc.grad_clip))
         for opt in optimizers:
             opt.step()
 
@@ -746,7 +751,7 @@ for epoch in range(1, c.epochs + 1):
     gnorm_stack = torch.stack(gnorms)
     mean_gnorm = gnorm_stack.mean().cpu().item()
     max_gnorm = gnorm_stack.max().cpu().item()
-    clip_rate = (gnorm_stack > c.grad_clip).float().mean().cpu().item()
+    clip_rate = (gnorm_stack > sc.grad_clip).float().mean().cpu().item()
 
     cur_muon = torch.cat([p.detach().flatten() for p in muon_params])
     cur_adam = torch.cat([p.detach().flatten() for p in adam_params])
@@ -757,14 +762,14 @@ for epoch in range(1, c.epochs + 1):
     prev_muon = cur_muon
     prev_adam = cur_adam
 
-    if t_t > c.max_train_mins * 60:
+    if t_t > sc.max_train_mins * 60:
         print0("exceeded max train time", console=True)
         sys.exit(0)
 
     model.eval()
     optimizer_adam.eval()
 
-    if epoch % c.lawa_freq == 0:
+    if epoch % sc.lawa_freq == 0:
         lawa_queue.append({k: v.cpu().clone() for k, v in model.state_dict().items()})
 
     if len(lawa_queue) > 1:
@@ -787,17 +792,17 @@ for epoch in range(1, c.epochs + 1):
         X, y, _, _ = dataset.get_data(target=task.target_name, dataset_format="dataframe")
 
         len_features = X.shape[1]
-        if c.eval_subsample_features is not None and len_features > c.eval_subsample_features:
-            rng = np.random.default_rng(c.seed)
-            feature_choices = rng.choice(len_features, size=c.eval_subsample_features, replace=False)
+        if sc.eval_subsample_features is not None and len_features > sc.eval_subsample_features:
+            rng = np.random.default_rng(sc.seed)
+            feature_choices = rng.choice(len_features, size=sc.eval_subsample_features, replace=False)
             X = X.iloc[:, feature_choices]
 
-        if c.eval_subsample_samples is not None and len(X) > c.eval_subsample_samples:
-            _, X, _, y = train_test_split(X, y, test_size=c.eval_subsample_samples, stratify=y, random_state=c.seed)
+        if sc.eval_subsample_samples is not None and len(X) > sc.eval_subsample_samples:
+            _, X, _, y = train_test_split(X, y, test_size=sc.eval_subsample_samples, stratify=y, random_state=sc.seed)
             X = X.reset_index(drop=True)
             y = y.reset_index(drop=True)
 
-        cv = StratifiedKFold(n_splits=c.eval_folds, shuffle=True, random_state=c.seed)
+        cv = StratifiedKFold(n_splits=sc.eval_folds, shuffle=True, random_state=sc.seed)
 
         targets = []
         probabilities = []
@@ -832,7 +837,7 @@ for epoch in range(1, c.epochs + 1):
     avg_auc = (sum(aucs) / len(aucs)) if len(aucs) > 0 else float("nan")
 
     print0(
-        f"e:{epoch}/{c.epochs} μ_l:{mean_loss:.2f} "
+        f"e:{epoch}/{sc.epochs} μ_l:{mean_loss:.2f} "
         f"g:{mean_gnorm:.2f} g_max:{max_gnorm:.2f} clip:{clip_rate:.2f} "
         f"d_mu:{drift_mu:.2f} d_ad:{drift_ad:.2f} "
         f"d0_mu:{drift0_mu:.2f} d0_ad:{drift0_ad:.2f} "
@@ -844,14 +849,14 @@ for epoch in range(1, c.epochs + 1):
     if saved_state is not None:
         model.load_state_dict(saved_state)
 
-    if avg_auc >= c.jackpot:
+    if avg_auc >= sc.jackpot:
         if saved_state is not None:
             model.load_state_dict(avg_state)
         ckpt = {
             "version": version,
             "timestamp": ts,
             "uid": uid,
-            "type": c.type,
+            "type": sc.type,
             "arch": {
                 "e": model.e,
                 "a": model.a,
@@ -863,14 +868,17 @@ for epoch in range(1, c.epochs + 1):
         }
         torch.save(ckpt, ckpt_path)
         print0("=" * 100)
-        print0(f"datasets seen: {epoch * c.batch_size * c.steps}", console=True)
+        print0(f"datasets seen: {epoch * sc.batch_size * sc.steps}", console=True)
         print0(f"record time in mins: {t_t / 60:.2f}", console=True)
         break
 
 print0("=" * 100)
-print0("config:")
-for f in fields(Config):
-    print0(f"  {f.name}: {getattr(c, f.name)}")
+print0("script config:")
+for f in fields(ScriptConfig):
+    print0(f"  {f.name}: {getattr(sc, f.name)}")
+print0("model config:")
+for f in fields(ModelConfig):
+    print0(f"  {f.name}: {getattr(mc, f.name)}")
 print0("prior config:")
 for f in fields(PriorConfig):
     print0(f"  {f.name}: {getattr(pc, f.name)}")
