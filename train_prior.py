@@ -297,7 +297,7 @@ class ThinkingRows(nn.Module):
         return x, sep
 
 
-class NanoTabPFNModel(nn.Module):
+class ModdedNanoTabPFNModel(nn.Module):
     def __init__(self, l, a, e, h, o, residual_decay, thinking_rows, feature_group_size):
         super().__init__()
         self.l = l
@@ -590,7 +590,7 @@ def get_feature_preprocessor(X):
     return preprocessor
 
 
-class NanoTabPFNClassifier:
+class ModdedNanoTabPFNClassifier:
     def __init__(self, model):
         device = "cuda"
         self.model = model.to(device)
@@ -622,7 +622,7 @@ class NanoTabPFNClassifier:
 
 
 def evaluate(model, tasks, config):
-    clf = NanoTabPFNClassifier(model)
+    clf = ModdedNanoTabPFNClassifier(model)
     aucs = []
 
     for task_id in tasks:
@@ -680,7 +680,7 @@ def evaluate(model, tasks, config):
 prior = Prior(config=pc, device=device)
 loader = PriorDataLoader(prior=prior, batch_size=sc.batch_size)
 
-model = NanoTabPFNModel(
+model = ModdedNanoTabPFNModel(
     l=mc.l,
     a=mc.a,
     e=mc.e,
