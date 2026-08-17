@@ -141,7 +141,7 @@ print0(f"platform: {platform.platform()}")
 print0(f"python: {sys.version}")
 print0(f"torch: {torch.version.__version__}")
 print0(f"cuda: {torch.version.cuda}")
-print0(subprocess.run(["nvidia-smi"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True).stdout)
+print0(subprocess.run(["nvidia-smi"], capture_output=True, text=True, check=False).stdout)
 print0("=" * 100)
 
 TABARENA_CLASSIFICATION_TASKS = [
