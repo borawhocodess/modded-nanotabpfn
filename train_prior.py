@@ -43,8 +43,7 @@ class ScriptConfig:
     seed: int = 11
     batch_size: int = 2
     lr: float = 0.001
-    steps: int = 32
-    epochs: int = 4000
+    steps: int = 10000
     adam_wd: float = 0.01
     muon_wd: float = 0.1
     muon_lr_scale: float = 0.1
@@ -91,7 +90,7 @@ class PriorConfig:
 parser = argparse.ArgumentParser()
 parser.add_argument("--name", default="test")
 parser.add_argument("--seed", type=int, default=None)
-parser.add_argument("--epochs", type=int, default=None)
+parser.add_argument("--steps", type=int, default=None)
 args = parser.parse_args()
 
 sc = ScriptConfig()
@@ -100,8 +99,8 @@ pc = PriorConfig()
 
 if args.seed is not None:
     sc.seed = args.seed
-if args.epochs is not None:
-    sc.epochs = args.epochs
+if args.steps is not None:
+    sc.steps = args.steps
 
 random.seed(sc.seed)
 np.random.seed(sc.seed)
@@ -473,13 +472,12 @@ class Decoder(nn.Module):
 
 
 class PriorDataLoader:
-    def __init__(self, prior, num_steps, batch_size):
+    def __init__(self, prior, batch_size):
         self.prior = prior
-        self.num_steps = num_steps
         self.batch_size = batch_size
 
     def __iter__(self):
-        for _ in range(self.num_steps):
+        while True:
             x, y = self.prior.batch(self.batch_size)
             yield dict(
                 x=x,
@@ -487,9 +485,6 @@ class PriorDataLoader:
                 target_y=y,
                 sep=self.prior.sep,
             )
-
-    def __len__(self):
-        return self.num_steps
 
 
 class Prior:
@@ -667,7 +662,7 @@ class NanoTabPFNClassifier:
 
 
 prior = Prior(config=pc, device=device)
-loader = PriorDataLoader(prior=prior, num_steps=sc.steps, batch_size=sc.batch_size)
+loader = PriorDataLoader(prior=prior, batch_size=sc.batch_size)
 
 model = NanoTabPFNModel(
     l=mc.l,
@@ -706,7 +701,9 @@ init_muon = torch.cat([p.detach().flatten() for p in muon_params])
 init_adam = torch.cat([p.detach().flatten() for p in adam_params])
 
 
-for epoch in range(1, sc.epochs + 1):
+data = iter(loader)
+
+for step in range(1, sc.steps + 1):
     torch.cuda.synchronize()
     t0 = time.perf_counter()
     model.train()
@@ -714,37 +711,38 @@ for epoch in range(1, sc.epochs + 1):
     total_loss = 0.0
     num_valid = 0
     gnorms = []
-    for i, full_data in enumerate(loader):
-        sep = full_data["sep"]
-        x = full_data["x"]
-        y = full_data["y"][:, :sep]
-        targets = full_data["target_y"][:, sep:]
 
-        if torch.isnan(x).any() or torch.isnan(y).any():
-            continue
-        num_valid += 1
+    full_data = next(data)
+    sep = full_data["sep"]
+    x = full_data["x"]
+    y = full_data["y"][:, :sep]
+    targets = full_data["target_y"][:, sep:]
 
-        for opt in optimizers:
-            opt.zero_grad(set_to_none=True)
+    if torch.isnan(x).any() or torch.isnan(y).any():
+        continue
+    num_valid += 1
 
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            output = model((x, y), sep=sep)
-            output = output.reshape(-1, output.shape[-1])
-            targets = targets.reshape((-1,)).to(torch.long)
-            loss = criterion(output, targets)
+    for opt in optimizers:
+        opt.zero_grad(set_to_none=True)
 
-        loss.backward()
+    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        output = model((x, y), sep=sep)
+        output = output.reshape(-1, output.shape[-1])
+        targets = targets.reshape((-1,)).to(torch.long)
+        loss = criterion(output, targets)
 
-        total_loss += loss.detach()
+    loss.backward()
 
-        gnorms.append(torch.nn.utils.clip_grad_norm_(model.parameters(), sc.grad_clip))
-        for opt in optimizers:
-            opt.step()
+    total_loss += loss.detach()
+
+    gnorms.append(torch.nn.utils.clip_grad_norm_(model.parameters(), sc.grad_clip))
+    for opt in optimizers:
+        opt.step()
 
     torch.cuda.synchronize()
-    e_t = time.perf_counter() - t0
-    t_t += e_t
-    mu_e_t = t_t / epoch
+    s_t = time.perf_counter() - t0
+    t_t += s_t
+    mu_s_t = t_t / step
 
     mean_loss = (total_loss / num_valid).cpu().item()
 
@@ -769,7 +767,7 @@ for epoch in range(1, sc.epochs + 1):
     model.eval()
     optimizer_adam.eval()
 
-    if epoch % sc.lawa_freq == 0:
+    if step % sc.lawa_freq == 0:
         lawa_queue.append({k: v.cpu().clone() for k, v in model.state_dict().items()})
 
     if len(lawa_queue) > 1:
@@ -837,11 +835,11 @@ for epoch in range(1, sc.epochs + 1):
     avg_auc = (sum(aucs) / len(aucs)) if len(aucs) > 0 else float("nan")
 
     print0(
-        f"e:{epoch}/{sc.epochs} μ_l:{mean_loss:.2f} "
+        f"s:{step}/{sc.steps} μ_l:{mean_loss:.2f} "
         f"g:{mean_gnorm:.2f} g_max:{max_gnorm:.2f} clip:{clip_rate:.2f} "
         f"d_mu:{drift_mu:.2f} d_ad:{drift_ad:.2f} "
         f"d0_mu:{drift0_mu:.2f} d0_ad:{drift0_ad:.2f} "
-        f"e_t:{e_t:.2f}s μ_e_t:{mu_e_t:.2f}s t_t:{t_t:.2f}s "
+        f"s_t:{s_t:.2f}s μ_s_t:{mu_s_t:.2f}s t_t:{t_t:.2f}s "
         f"avg_roc_auc:{avg_auc}",
         console=True,
     )
@@ -868,7 +866,7 @@ for epoch in range(1, sc.epochs + 1):
         }
         torch.save(ckpt, ckpt_path)
         print0("=" * 100)
-        print0(f"datasets seen: {epoch * sc.batch_size * sc.steps}", console=True)
+        print0(f"datasets seen: {step * sc.batch_size}", console=True)
         print0(f"record time in mins: {t_t / 60:.2f}", console=True)
         break
 
