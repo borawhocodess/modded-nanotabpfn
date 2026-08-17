@@ -490,14 +490,6 @@ class Muon(torch.optim.Optimizer):
                     p.data.mul_(1 - lr * group["weight_decay"])
 
 
-def to_pandas(x):
-    return pd.DataFrame(x) if not isinstance(x, pd.DataFrame) else x
-
-
-def to_numeric(x):
-    return x.apply(pd.to_numeric, errors="coerce").to_numpy()
-
-
 def get_feature_preprocessor(X):
     X = pd.DataFrame(X)
     num_mask = []
@@ -515,8 +507,7 @@ def get_feature_preprocessor(X):
 
     num_transformer = Pipeline(
         [
-            ("to_pandas", FunctionTransformer(to_pandas)),
-            ("to_numeric", FunctionTransformer(to_numeric)),
+            ("to_numeric", FunctionTransformer(lambda x: pd.DataFrame(x).apply(pd.to_numeric, errors="coerce"))),
             ("imputer", SimpleImputer(strategy="mean")),
         ],
     )
