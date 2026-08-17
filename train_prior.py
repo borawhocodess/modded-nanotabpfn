@@ -275,7 +275,7 @@ class ThinkingRows(nn.Module):
         nn.init.normal_(self.row_tokens)
 
     def forward(self, x, sep):
-        b, r, c, e = x.shape
+        b, _r, c, _e = x.shape
         thinking = self.row_tokens.unsqueeze(0).unsqueeze(2).expand(b, -1, c, -1)
         x = torch.cat([thinking, x], dim=1)
         sep = sep + self.num_thinking_rows
