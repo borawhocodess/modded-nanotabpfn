@@ -727,7 +727,7 @@ data = iter(loader)
 
 for step in range(1, sc.steps + 1):
     torch.cuda.synchronize()
-    step_t0 = time.perf_counter()
+    t0 = time.perf_counter()
     model.train()
     optimizer_adam.train()
 
@@ -755,8 +755,7 @@ for step in range(1, sc.steps + 1):
         opt.step()
 
     torch.cuda.synchronize()
-    step_time = time.perf_counter() - step_t0
-    train_time += step_time
+    train_time += time.perf_counter() - t0
 
     if train_time > sc.max_train_mins * 60:
         print0("exceeded max train time", console=True)
@@ -768,24 +767,17 @@ for step in range(1, sc.steps + 1):
     mean_loss = (total_loss / sc.eval_every).cpu().item()
     total_loss = 0.0
 
-    torch.cuda.synchronize()
-    step_eval_t0 = time.perf_counter()
-
     model.eval()
     optimizer_adam.eval()
 
     aucs = evaluate(model, TABARENA_CLASSIFICATION_TASKS, config=ec)
     avg_auc = sum(aucs) / len(aucs)
 
-    torch.cuda.synchronize()
-    step_eval_time = time.perf_counter() - step_eval_t0
     run_time = (datetime.now() - start_ts).total_seconds() / 60
 
     print0(
         f"s:{step}/{sc.steps} "
         f"r_t:{run_time:.2f}m "
-        f"s_e_t:{step_eval_time:.2f}s "
-        f"s_t:{step_time:.2f}s "
         f"t_t:{train_time:.2f}s "
         f"μ_l:{mean_loss:.2f} "
         f"avg_roc_auc:{avg_auc}",
