@@ -258,8 +258,6 @@ class ModdedNanoTabPFNModel(nn.Module):
         self.row_tokens = nn.Parameter(torch.empty(thinking_rows, e))
         nn.init.normal_(self.row_tokens)
 
-        self.register_buffer("borders", None, persistent=True)
-
     def forward(self, X_train, y_train, X_test):
         sep = X_train.shape[1]
         x_src = torch.cat([X_train, X_test], dim=1)
