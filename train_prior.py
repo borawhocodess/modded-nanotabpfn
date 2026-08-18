@@ -35,7 +35,6 @@ class ScriptConfig:
     steps: int = 10000
     eval_every: int = 100
     grad_clip: float = 2.0
-    jackpot: float = 0.8068462330697953
 
 
 @dataclass
@@ -666,19 +665,15 @@ for step in range(1, sc.steps + 1):
         console=True,
     )
 
-    if avg_auc >= sc.jackpot:
-        ckpt = {
-            "version": version,
-            "timestamp": ts,
-            "uid": uid,
-            "type": sc.type,
-            "arch": asdict(model.config),
-            "model": model.state_dict(),
-        }
-        torch.save(ckpt, ckpt_path)
-        print0("=" * 100)
-        print0(f"datasets seen: {step * sc.batch_size}", console=True)
-        break
+    ckpt = {
+        "version": version,
+        "timestamp": ts,
+        "uid": uid,
+        "type": sc.type,
+        "arch": asdict(model.config),
+        "model": model.state_dict(),
+    }
+    torch.save(ckpt, ckpt_path)
 
 print0("=" * 100)
 print0("script config:")
