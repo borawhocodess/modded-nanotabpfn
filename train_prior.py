@@ -267,19 +267,10 @@ class ModdedNanoTabPFNModel(nn.Module):
 
         self.register_buffer("borders", None, persistent=True)
 
-    def forward(self, *args, **kwargs):
-        if len(args) == 3:
-            x = args[0]
-            if args[2] is not None:
-                x = torch.cat((x, args[2]), dim=1)
-            return self._forward((x, args[1]), sep=args[0].shape[1], **kwargs)
-        elif len(args) == 1 and isinstance(args[0], tuple):
-            return self._forward(*args, **kwargs)
-
-    def _forward(self, src, sep):
-        x_src, y_src = src
-        if len(y_src.shape) < len(x_src.shape):
-            y_src = y_src.unsqueeze(-1)
+    def forward(self, X_train, y_train, X_test):
+        sep = X_train.shape[1]
+        x_src = torch.cat([X_train, X_test], dim=1)
+        y_src = y_train.unsqueeze(-1)
         x_src = self.feature_encoder(x_src, sep)
         num_rows = x_src.shape[1]
         y_src = self.target_encoder(y_src, num_rows)
@@ -544,14 +535,14 @@ class ModdedNanoTabPFNClassifier:
         return predicted_probabilities.argmax(axis=1)
 
     def predict_proba(self, X_test):
-        x = np.concatenate((self.X_train, self.feature_preprocessor.transform(X_test)))
-        y = self.y_train
+        x_test = self.feature_preprocessor.transform(X_test)
         with torch.no_grad():
-            x = torch.from_numpy(x).unsqueeze(0).to(torch.float).to(self.device)
-            y = torch.from_numpy(y).unsqueeze(0).to(torch.float).to(self.device)
+            x_train = torch.from_numpy(self.X_train).unsqueeze(0).to(torch.float).to(self.device)
+            y_train = torch.from_numpy(self.y_train).unsqueeze(0).to(torch.float).to(self.device)
+            x_test = torch.from_numpy(x_test).unsqueeze(0).to(torch.float).to(self.device)
 
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                out = self.model((x, y), sep=len(self.X_train)).squeeze(0)
+                out = self.model(x_train, y_train, x_test).squeeze(0)
                 out = out[:, : self.num_classes]
                 probabilities = F.softmax(out, dim=1)
 
@@ -694,15 +685,16 @@ for step in range(1, sc.steps + 1):
 
     full_data = next(data)
     sep = full_data["sep"]
-    x = full_data["x"]
-    y = full_data["y"][:, :sep]
+    x_train = full_data["x"][:, :sep]
+    x_test = full_data["x"][:, sep:]
+    y_train = full_data["y"][:, :sep]
     targets = full_data["target_y"][:, sep:]
 
     for opt in optimizers:
         opt.zero_grad(set_to_none=True)
 
     with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-        output = model((x, y), sep=sep)
+        output = model(x_train, y_train, x_test)
         output = output.reshape(-1, output.shape[-1])
         targets = targets.reshape((-1,)).to(torch.long)
         loss = criterion(output, targets)
