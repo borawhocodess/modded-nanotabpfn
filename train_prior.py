@@ -5,7 +5,6 @@ import random
 import socket
 import subprocess
 import sys
-import time
 import tomllib
 import uuid
 from dataclasses import dataclass, fields
@@ -36,7 +35,6 @@ class ScriptConfig:
     steps: int = 10000
     eval_every: int = 100
     grad_clip: float = 2.0
-    max_train_mins: float = 10
     jackpot: float = 0.8068462330697953
 
 
@@ -668,12 +666,9 @@ print0(f"cuda: {torch.version.cuda}")
 print0(subprocess.run(["nvidia-smi"], capture_output=True, text=True, check=False).stdout)
 print0("=" * 100)
 
-train_time = 0.0
 total_loss = 0.0
 
 for step in range(1, sc.steps + 1):
-    torch.cuda.synchronize()
-    t0 = time.perf_counter()
     model.train()
     optimizer_adam.train()
 
@@ -696,13 +691,6 @@ for step in range(1, sc.steps + 1):
     for opt in optimizers:
         opt.step()
 
-    torch.cuda.synchronize()
-    train_time += time.perf_counter() - t0
-
-    if train_time > sc.max_train_mins * 60:
-        print0("exceeded max train time", console=True)
-        sys.exit(0)
-
     if step % sc.eval_every != 0:
         continue
 
@@ -718,7 +706,7 @@ for step in range(1, sc.steps + 1):
     run_time = (datetime.now(tz=UTC) - start_ts).total_seconds() / 60
 
     print0(
-        f"s:{step}/{sc.steps} r_t:{run_time:.2f}m t_t:{train_time:.2f}s μ_l:{mean_loss:.2f} avg_roc_auc:{avg_auc}",
+        f"s:{step}/{sc.steps} r_t:{run_time:.2f}m μ_l:{mean_loss:.2f} avg_roc_auc:{avg_auc}",
         console=True,
     )
 
@@ -743,7 +731,6 @@ for step in range(1, sc.steps + 1):
         torch.save(ckpt, ckpt_path)
         print0("=" * 100)
         print0(f"datasets seen: {step * sc.batch_size}", console=True)
-        print0(f"record time in mins: {train_time / 60:.2f}", console=True)
         break
 
 print0("=" * 100)
