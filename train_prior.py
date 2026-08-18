@@ -70,7 +70,7 @@ class ModelConfig:
 class OptimizerConfig:
     lr: float = 0.001
     adam_wd: float = 0.01
-    adam_warmup_steps: int = 1000
+    adam_warmup: int = 1000
     muon_wd: float = 0.1
     muon_lr_scale: float = 0.1
     muon_momentum: float = 0.96
@@ -608,23 +608,18 @@ model = ModdedNanoTabPFNModel(
     feature_group_size=mc.feature_group_size,
 ).to(device)
 
-muon_params = []
-adam_params = []
+muon_p = []
+adam_p = []
 for name, p in model.named_parameters():
     if p.ndim != 2:
-        adam_params.append(p)
+        adam_p.append(p)
     elif "transformer_encoder" in name:
-        muon_params.append(p)
+        muon_p.append(p)
     else:
-        adam_params.append(p)
+        adam_p.append(p)
 
-optimizer_muon = Muon(muon_params, config=oc)
-optimizer_adam = schedulefree.AdamWScheduleFree(
-    adam_params,
-    lr=oc.lr,
-    weight_decay=oc.adam_wd,
-    warmup_steps=oc.adam_warmup_steps,
-)
+optimizer_muon = Muon(muon_p, config=oc)
+optimizer_adam = schedulefree.AdamWScheduleFree(adam_p, lr=oc.lr, weight_decay=oc.adam_wd, warmup_steps=oc.adam_warmup)
 
 optimizers = [optimizer_muon, optimizer_adam]
 
