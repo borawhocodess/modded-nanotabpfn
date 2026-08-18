@@ -230,7 +230,8 @@ class Prior:
         datasets = [self.dataset() for _ in range(batch_size)]
         x = torch.stack([d[0] for d in datasets])
         y = torch.stack([d[1] for d in datasets])
-        return x, y
+        sep = self.sep
+        return x[:, :sep], y[:, :sep], x[:, sep:], y[:, sep:]
 
 
 class PriorDataLoader:
@@ -240,13 +241,7 @@ class PriorDataLoader:
 
     def __iter__(self):
         while True:
-            x, y = self.prior.batch(self.batch_size)
-            yield {
-                "x": x,
-                "y": y,
-                "target_y": y,
-                "sep": self.prior.sep,
-            }
+            yield self.prior.batch(self.batch_size)
 
 
 class ModdedNanoTabPFNModel(nn.Module):
@@ -610,6 +605,7 @@ def print0(s, console=False):
 
 prior = Prior(config=pc, device=device)
 loader = PriorDataLoader(prior=prior, batch_size=sc.batch_size)
+batches = iter(loader)
 
 model = ModdedNanoTabPFNModel(
     l=mc.l,
@@ -675,20 +671,13 @@ print0("=" * 100)
 train_time = 0.0
 total_loss = 0.0
 
-data = iter(loader)
-
 for step in range(1, sc.steps + 1):
     torch.cuda.synchronize()
     t0 = time.perf_counter()
     model.train()
     optimizer_adam.train()
 
-    full_data = next(data)
-    sep = full_data["sep"]
-    x_train = full_data["x"][:, :sep]
-    x_test = full_data["x"][:, sep:]
-    y_train = full_data["y"][:, :sep]
-    targets = full_data["target_y"][:, sep:]
+    x_train, y_train, x_test, y_test = next(batches)
 
     for opt in optimizers:
         opt.zero_grad(set_to_none=True)
@@ -696,7 +685,7 @@ for step in range(1, sc.steps + 1):
     with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
         output = model(x_train, y_train, x_test)
         output = output.reshape(-1, output.shape[-1])
-        targets = targets.reshape((-1,)).to(torch.long)
+        targets = y_test.reshape((-1,)).to(torch.long)
         loss = criterion(output, targets)
 
     loss.backward()
