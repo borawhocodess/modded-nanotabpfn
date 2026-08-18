@@ -435,20 +435,14 @@ class Muon(torch.optim.Optimizer):
     code adapted from: https://github.com/KellerJordan/modded-nanogpt/commit/b356a1f
     """
 
-    def __init__(self, params, lr, momentum, weight_decay, ns_steps, ns_abc):
-        defaults = {
-            "lr": lr,
-            "momentum": momentum,
-            "weight_decay": weight_decay,
-            "ns_steps": ns_steps,
-            "ns_abc": ns_abc,
-        }
-        super().__init__(params, defaults)
+    def __init__(self, params, config):
+        super().__init__(params, {})
+        self.config = config
 
     def step(self):
+        c = self.config
+        lr = c.muon_lr_scale * c.lr
         for group in self.param_groups:
-            lr = group["lr"]
-            momentum = group["momentum"]
             for p in group["params"]:
                 g = p.grad
                 if g is None:
@@ -457,19 +451,19 @@ class Muon(torch.optim.Optimizer):
                 if "momentum_buffer" not in state:
                     state["momentum_buffer"] = torch.zeros_like(g)
                 buf = state["momentum_buffer"]
-                buf.mul_(momentum).add_(g)
-                g = g.add(buf, alpha=momentum)
+                buf.mul_(c.muon_momentum).add_(g)
+                g = g.add(buf, alpha=c.muon_momentum)
                 if g.size(0) == 3 * g.size(1):
                     g_batched = g.view(3, g.size(1), g.size(1))
-                    g_new = zeropower_via_newtonschulz5_batched(g_batched, steps=group["ns_steps"], abc=group["ns_abc"])
+                    g_new = zeropower_via_newtonschulz5_batched(g_batched, steps=c.muon_ns_steps, abc=c.muon_ns_abc)
                     g = g_new.view(3 * g.size(1), g.size(1))
                     scale = g.size(1) ** 0.5
                 else:
-                    g = zeropower_via_newtonschulz5(g, steps=group["ns_steps"], abc=group["ns_abc"])
+                    g = zeropower_via_newtonschulz5(g, steps=c.muon_ns_steps, abc=c.muon_ns_abc)
                     scale = max(g.size(0), g.size(1)) ** 0.5
                 p.data.add_(g, alpha=-lr * scale)
-                if group["weight_decay"] > 0:
-                    p.data.mul_(1 - lr * group["weight_decay"])
+                if c.muon_wd > 0:
+                    p.data.mul_(1 - lr * c.muon_wd)
 
 
 def get_feature_preprocessor(X):
@@ -624,14 +618,7 @@ for name, p in model.named_parameters():
     else:
         adam_params.append(p)
 
-optimizer_muon = Muon(
-    muon_params,
-    lr=oc.muon_lr_scale * oc.lr,
-    momentum=oc.muon_momentum,
-    weight_decay=oc.muon_wd,
-    ns_steps=oc.muon_ns_steps,
-    ns_abc=oc.muon_ns_abc,
-)
+optimizer_muon = Muon(muon_params, config=oc)
 optimizer_adam = schedulefree.AdamWScheduleFree(
     adam_params,
     lr=oc.lr,
