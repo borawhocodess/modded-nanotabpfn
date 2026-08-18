@@ -463,51 +463,39 @@ class Muon(torch.optim.Optimizer):
                     p.data.mul_(1 - lr * c.muon_wd)
 
 
-def get_feature_preprocessor(X):
-    X = pd.DataFrame(X)
-    num_mask = []
-    cat_mask = []
-    for col in X:
-        unique_non_nan_entries = X[col].dropna().unique()
-        if len(unique_non_nan_entries) <= 1:
-            num_mask.append(False)
-            cat_mask.append(False)
-            continue
-        non_nan_entries = X[col].notna().sum()
-        numeric_entries = pd.to_numeric(X[col], errors="coerce").notna().sum()
-        num_mask.append(non_nan_entries == numeric_entries)
-        cat_mask.append(non_nan_entries != numeric_entries)
-
-    num_transformer = Pipeline(
-        [
-            ("to_numeric", FunctionTransformer(lambda x: pd.DataFrame(x).apply(pd.to_numeric, errors="coerce"))),
-            ("imputer", SimpleImputer(strategy="mean")),
-        ],
-    )
-    cat_transformer = Pipeline(
-        [
-            ("encoder", OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=np.nan)),
-            ("imputer", SimpleImputer(strategy="most_frequent")),
-        ],
-    )
-
-    preprocessor = ColumnTransformer(
-        transformers=[
-            ("num", num_transformer, np.array(num_mask)),
-            ("cat", cat_transformer, np.array(cat_mask)),
-        ],
-    )
-    return preprocessor
-
-
 class ModdedNanoTabPFNClassifier:
     def __init__(self, model):
         device = "cuda"
         self.model = model.to(device)
         self.device = device
 
+    @staticmethod
+    def get_feature_preprocessor(X):
+        X = pd.DataFrame(X)
+        num_mask = []
+        cat_mask = []
+        for col in X.columns:
+            informative = X[col].nunique() > 1
+            parses = pd.to_numeric(X[col], errors="coerce").notna().sum() == X[col].notna().sum()
+            num_mask.append(informative and parses)
+            cat_mask.append(informative and not parses)
+
+        num_steps = [
+            ("to_numeric", FunctionTransformer(lambda x: pd.DataFrame(x).apply(pd.to_numeric, errors="coerce"))),
+            ("imputer", SimpleImputer(strategy="mean")),
+        ]
+        cat_steps = [
+            ("encoder", OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=np.nan)),
+            ("imputer", SimpleImputer(strategy="most_frequent")),
+        ]
+        transformers = [
+            ("num", Pipeline(num_steps), np.array(num_mask)),
+            ("cat", Pipeline(cat_steps), np.array(cat_mask)),
+        ]
+        return ColumnTransformer(transformers)
+
     def fit(self, X_train, y_train):
-        self.feature_preprocessor = get_feature_preprocessor(X_train)
+        self.feature_preprocessor = self.get_feature_preprocessor(X_train)
         self.X_train = self.feature_preprocessor.fit_transform(X_train)
         self.y_train = y_train
         self.num_classes = max(set(y_train)) + 1
