@@ -7,7 +7,7 @@ import subprocess
 import sys
 import tomllib
 import uuid
-from dataclasses import dataclass, fields
+from dataclasses import asdict, dataclass, fields
 from datetime import UTC, datetime
 
 import numpy as np
@@ -56,14 +56,14 @@ class PriorConfig:
 
 @dataclass
 class ModelConfig:
+    l: int = 5
     a: int = 4
     e: int = 256
     h: int = 768
-    l: int = 5
     o: int = 8
-    residual_decay: float = 0.95
-    thinking_rows: int = 24
     feature_group_size: int = 5
+    thinking_rows: int = 24
+    residual_decay: float = 0.95
 
 
 @dataclass
@@ -243,19 +243,16 @@ class PriorDataLoader:
 
 
 class ModdedNanoTabPFNModel(nn.Module):
-    def __init__(self, l, a, e, h, o, residual_decay, thinking_rows, feature_group_size):
+    def __init__(self, config):
         super().__init__()
-        self.l = l
-        self.a = a
-        self.e = e
-        self.h = h
-        self.o = o
-        self.feature_encoder = FeatureEncoder(e, feature_group_size=feature_group_size)
-        self.target_encoder = TargetEncoder(e)
-        self.transformer_encoder = TransformerEncoderStack(l, a, e, h, residual_decay=residual_decay)
-        self.decoder = Decoder(e, h, o)
-        self.thinking_rows = thinking_rows
-        self.row_tokens = nn.Parameter(torch.empty(thinking_rows, e))
+        c = config
+        self.config = config
+        self.feature_encoder = FeatureEncoder(c.e, feature_group_size=c.feature_group_size)
+        self.target_encoder = TargetEncoder(c.e)
+        self.transformer_encoder = TransformerEncoderStack(c.l, c.a, c.e, c.h, residual_decay=c.residual_decay)
+        self.decoder = Decoder(c.e, c.h, c.o)
+        self.thinking_rows = c.thinking_rows
+        self.row_tokens = nn.Parameter(torch.empty(c.thinking_rows, c.e))
         nn.init.normal_(self.row_tokens)
 
     def forward(self, X_train, y_train, X_test):
@@ -597,16 +594,7 @@ prior = Prior(config=pc, device=device)
 loader = PriorDataLoader(prior=prior, batch_size=sc.batch_size)
 batches = iter(loader)
 
-model = ModdedNanoTabPFNModel(
-    l=mc.l,
-    a=mc.a,
-    e=mc.e,
-    h=mc.h,
-    o=mc.o,
-    residual_decay=mc.residual_decay,
-    thinking_rows=mc.thinking_rows,
-    feature_group_size=mc.feature_group_size,
-).to(device)
+model = ModdedNanoTabPFNModel(config=mc).to(device)
 
 muon_p = []
 adam_p = []
@@ -696,16 +684,7 @@ for step in range(1, sc.steps + 1):
             "timestamp": ts,
             "uid": uid,
             "type": sc.type,
-            "arch": {
-                "e": model.e,
-                "a": model.a,
-                "h": model.h,
-                "l": model.l,
-                "o": model.o,
-                "residual_decay": model.transformer_encoder.residual_decay,
-                "thinking_rows": model.thinking_rows,
-                "feature_group_size": model.feature_encoder.feature_group_size,
-            },
+            "arch": asdict(model.config),
             "model": model.state_dict(),
         }
         torch.save(ckpt, ckpt_path)
