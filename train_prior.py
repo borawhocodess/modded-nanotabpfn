@@ -32,7 +32,8 @@ class ScriptConfig:
     experiments_dir: str = "workdir/experiments"
     seed: int = 11
     batch_size: int = 2
-    steps: int = 10000
+    steps: int = 8000
+    datasets: int = 16000
     eval_every: int = 100
     grad_clip: float = 2.0
 
@@ -85,22 +86,22 @@ class EvalConfig:
     max_samples: int = 1000
 
 
-parser = argparse.ArgumentParser()
-parser.add_argument("--name", default="test")
-parser.add_argument("--seed", type=int, default=None)
-parser.add_argument("--steps", type=int, default=None)
-args = parser.parse_args()
-
 sc = ScriptConfig()
 pc = PriorConfig()
 mc = ModelConfig()
 oc = OptimizerConfig()
 ec = EvalConfig()
 
-if args.seed is not None:
-    sc.seed = args.seed
-if args.steps is not None:
-    sc.steps = args.steps
+sc.steps = sc.datasets // sc.batch_size
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--name", default="test")
+parser.add_argument("--seed", type=int, default=None)
+parser.add_argument("--steps", type=int, default=None)
+args = parser.parse_args()
+
+sc.seed = args.seed if args.seed is not None else sc.seed
+sc.steps = args.steps if args.steps is not None else sc.steps
 
 random.seed(sc.seed)
 np.random.seed(sc.seed)
