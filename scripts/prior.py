@@ -1,5 +1,5 @@
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -8,6 +8,15 @@ import torch
 import torch.nn.functional as F
 
 PLOTS = Path(__file__).resolve().parent.parent / "workdir" / "plots" / "prior"
+
+SETTINGS = {
+    "f3": {"features": 3, "rows": 100, "test_rows": 20},
+    "f4": {"features": 4, "rows": 1000, "test_rows": 128},
+    "f9": {"features": 9, "rows": 1000, "test_rows": 128},
+    "f11": {"features": 11, "rows": 1000, "test_rows": 128},
+    "f14": {"features": 14, "rows": 1000, "test_rows": 128},
+    "f20": {"features": 20, "rows": 1000, "test_rows": 128},
+}
 
 
 @dataclass
@@ -39,21 +48,24 @@ class Prior:
         c = self.config
         self.num_cols = int(np.random.randint(c.min_num_cols, c.max_num_cols + 1))
         self.num_rows = int(np.random.randint(c.min_num_rows, c.max_num_rows + 1))
-        self.nodes = self.num_cols + 1
         self.num_test_rows = int(np.random.randint(c.min_num_test_rows, c.max_num_test_rows + 1))
         self.sep = self.num_rows - self.num_test_rows
+        self.nodes = self.num_cols + 1
         self.redirection = np.random.uniform(c.min_redirection, c.max_redirection)
         self.num_classes = int(np.random.randint(c.min_num_classes, c.max_num_classes + 1))
         self.num_parent_attempts = int(np.random.randint(c.min_num_parent_attempts, c.max_num_parent_attempts + 1))
 
     def gnr(self):
         parents = [[] for _ in range(self.nodes)]
+        self.attempts = self.redirects = 0
         for child in range(1, self.nodes):
             chosen = set()
             for _ in range(self.num_parent_attempts):
                 candidate = int(np.random.randint(child))
+                self.attempts += 1
                 if np.random.rand() < self.redirection and parents[candidate]:
                     candidate = int(np.random.choice(parents[candidate]))
+                    self.redirects += 1
                 chosen.add(candidate)
             parents[child] = sorted(chosen)
         return parents
@@ -100,8 +112,124 @@ class Prior:
         return x[:, :sep], y[:, :sep], x[:, sep:], y[:, sep:]
 
 
+def plot_hyperparameters(config, device, path, samples=5000, ncols=4):
+    fields = (
+        ("num_cols", "sampled", "min_num_cols", "max_num_cols"),
+        ("num_rows", "sampled", "min_num_rows", "max_num_rows"),
+        ("num_test_rows", "sampled", "min_num_test_rows", "max_num_test_rows"),
+        ("sep", "derived", None, None),
+        ("nodes", "derived", None, None),
+        ("redirection", "sampled", "min_redirection", "max_redirection"),
+        ("num_classes", "sampled", "min_num_classes", "max_num_classes"),
+        ("num_parent_attempts", "sampled", "min_num_parent_attempts", "max_num_parent_attempts"),
+    )
+    prior = Prior(config, device)
+    drawn = {name: [] for name, *_ in fields}
+    for _ in range(samples):
+        prior.hyperparameters()
+        for name, *_ in fields:
+            drawn[name].append(getattr(prior, name))
+
+    colours = {"sampled": "tab:blue", "derived": "tab:orange"}
+    rows = int(np.ceil(len(fields) / ncols))
+    fig, axes = plt.subplots(rows, ncols, figsize=(3.1 * ncols, 2.6 * rows), squeeze=False)
+    for k, (name, kind, lo_attr, hi_attr) in enumerate(fields):
+        ax = axes[k // ncols][k % ncols]
+        v = np.asarray(drawn[name])
+        uniq = np.unique(v)
+        if len(uniq) == 1:
+            bins = np.array([uniq[0] - 0.5, uniq[0] + 0.5])
+        elif v.dtype.kind in "iu" and len(uniq) <= 30:
+            bins = np.arange(uniq.min() - 0.5, uniq.max() + 1.5, 1.0)
+        else:
+            bins = 40
+        ax.hist(v, bins=bins, color=colours[kind], edgecolor="white", lw=0.4)
+        rng = "" if lo_attr is None else f"  [{getattr(config, lo_attr)}, {getattr(config, hi_attr)}]"
+        fixed = "  · fixed" if len(uniq) == 1 else ""
+        ax.set_title(f"{name}{rng}{fixed}", fontsize=8)
+        ax.set_ylabel("draws", fontsize=7)
+        ax.tick_params(labelsize=6)
+        if len(uniq) == 1:
+            ax.set_xlim(uniq[0] - 1, uniq[0] + 1)
+            ax.set_xticks([uniq[0]])
+    for k in range(len(fields), rows * ncols):
+        axes[k // ncols][k % ncols].axis("off")
+    handles = [plt.Rectangle((0, 0), 1, 1, color=c) for c in colours.values()]
+    fig.legend(handles, list(colours), loc="lower center", ncol=2, fontsize=8, frameon=False)
+    varying = sum(len(np.unique(drawn[n])) > 1 for n, *_ in fields)
+    fig.suptitle(
+        f"prior hyperparameters — {samples} draws of hyperparameters(), "
+        f"{varying}/{len(fields)} non-degenerate under this config",
+        fontsize=10,
+    )
+    fig.tight_layout(rect=(0, 0.05, 1, 0.95))
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+
+def plot_growth(config, device, path, ncols=5):
+    prior = Prior(config, device)
+    prior.hyperparameters()
+    parents = prior.gnr()
+    n = len(parents)
+
+    depth = [0] * n
+    for i in range(1, n):
+        depth[i] = 1 + max(depth[p] for p in parents[i])
+    levels, pos = {}, {}
+    for i in range(n):
+        d = depth[i]
+        k = levels.get(d, 0)
+        levels[d] = k + 1
+        pos[i] = [d, k]
+    for i in range(n):
+        pos[i][1] -= (levels[depth[i]] - 1) / 2
+    span = max(levels.values())
+
+    marker, label = 40 + 240 / n, 5 + 10 / n
+    rows = int(np.ceil(n / ncols))
+    fig, axes = plt.subplots(rows, ncols, figsize=(2.5 * ncols, 1.8 * rows), squeeze=False)
+    for k in range(rows * ncols):
+        ax = axes[k // ncols][k % ncols]
+        ax.set_axis_off()
+        if k >= n:
+            continue
+        shown = k + 1
+        edges = 0
+        for i in range(1, shown):
+            for p in parents[i]:
+                edges += 1
+                new = i == k
+                ax.annotate(
+                    "",
+                    xy=pos[i],
+                    xytext=pos[p],
+                    arrowprops={
+                        "arrowstyle": "-|>",
+                        "color": "tab:green" if new else "0.75",
+                        "lw": 1.1 if new else 0.7,
+                        "shrinkA": 5,
+                        "shrinkB": 6,
+                    },
+                )
+        for i in range(shown):
+            colour = "tab:green" if i == k else ("0.4" if i == 0 else "tab:blue")
+            ax.scatter(*pos[i], s=marker, color=colour, zorder=3, edgecolors="w", lw=0.8)
+            ax.text(*pos[i], str(i), color="w", ha="center", va="center", fontsize=label, zorder=4)
+        ax.set_title(f"{shown} node{'' if shown == 1 else 's'} · {edges} edge{'' if edges == 1 else 's'}", fontsize=8)
+        ax.set_xlim(-0.6, max(depth) + 0.6)
+        ax.set_ylim(-span / 2 - 0.6, span / 2 + 0.6)
+    fig.suptitle(
+        f"gnr() building one graph node by node — grey = root, green = the node just added, "
+        f"redirection {config.min_redirection}, {config.min_num_parent_attempts} parent attempts",
+        fontsize=10,
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+
 def plot_dataset(x, y, sep, path, cols=4):
-    """Scatter grid of the first `cols` features, coloured by class; test rows drawn hollow."""
     classes = np.unique(y)
     cmap = plt.get_cmap("tab10")
     train = np.arange(len(y)) < sep
@@ -143,13 +271,6 @@ def plot_dataset(x, y, sep, path, cols=4):
 
 
 def plot_latents(z, acts, names, target, cuts, path, ncols=5):
-    """One marginal per node of the SCM, in topological order, labelled with its activation.
-
-    Node 0 is the raw gaussian input and never gets an activation. Every later node is a
-    standardised nonlinearity of its parents, so the shapes drift away from gaussian as depth
-    grows -- `abs`/`square` go one-sided, `sin` goes multimodal, `tanh` saturates. The target
-    node is highlighted and its class cuts drawn, since that column is what `y` is binned from.
-    """
     n = z.shape[1]
     rows = int(np.ceil(n / ncols))
     fig, axes = plt.subplots(rows, ncols, figsize=(2.4 * ncols, 2.1 * rows), squeeze=False)
@@ -174,13 +295,6 @@ def plot_latents(z, acts, names, target, cuts, path, ncols=5):
 
 
 def plot_dag(parents, acts, names, target, path):
-    """The sampled causal graph, laid out left-to-right by depth.
-
-    Node 0 is the root gaussian; every other node is a function of its parents, so depth is
-    1 + max(depth of parents). Marker area scales with out-degree, which is where `redirection`
-    shows up: redirection resamples a candidate parent as *its* parent, so attachment is
-    preferential and a few nodes become hubs instead of parenthood spreading evenly.
-    """
     n = len(parents)
     depth = [0] * n
     for i in range(1, n):
@@ -248,17 +362,106 @@ def plot_dag(parents, acts, names, target, path):
     plt.close(fig)
 
 
+def plot_split(config, device, path, per_class=60):
+    counts = {}
+    for classes in range(config.min_num_classes, config.max_num_classes + 1):
+        cfg = replace(config, min_num_classes=classes, max_num_classes=classes)
+        prior = Prior(cfg, device)
+        train, test = [], []
+        for _ in range(per_class):
+            _, y_train, _, y_test = prior.batch(1)
+            train.append(np.bincount(y_train[0].numpy().astype(int), minlength=classes))
+            test.append(np.bincount(y_test[0].numpy().astype(int), minlength=classes))
+        counts[classes] = (np.array(train), np.array(test))
+
+    n_rows, n_test = config.max_num_rows, config.max_num_test_rows
+    n_train = n_rows - n_test
+    classes = sorted(counts)
+    cmap = plt.get_cmap("tab10")
+
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+    ax = axes.ravel()
+
+    show = classes[-1]
+    train, test = counts[show]
+    width = 0.4
+    ax[0].bar(np.arange(show) - width / 2, train[0], width, color="tab:blue", label="train")
+    ax[0].bar(np.arange(show) + width / 2, test[0], width, color="tab:orange", label="test")
+    ax[0].axhline(n_train / show, color="tab:blue", ls="--", lw=1)
+    ax[0].axhline(n_test / show, color="tab:orange", ls="--", lw=1)
+    ax[0].set_yscale("log")
+    ax[0].set_xticks(range(show))
+    ax[0].set_xlabel("class", fontsize=8)
+    ax[0].set_ylabel("rows", fontsize=8)
+    ax[0].set_title(f"one draw with {show} classes — dashed = perfectly even", fontsize=9)
+    ax[0].legend(fontsize=7, frameon=False)
+
+    ratios = []
+    for k, c in enumerate(classes):
+        _, test = counts[c]
+        expected = n_test / c
+        sd = np.sqrt(n_test * (1 / c) * (1 - 1 / c) * (n_rows - n_test) / (n_rows - 1))
+        v = np.sort((test.ravel() - expected) / sd)
+        ratios.append(float(v.std()))
+        ax[1].step(v, np.arange(1, len(v) + 1) / len(v), color=cmap(k), lw=1.1, label=f"{c} classes")
+    grid = np.linspace(-4, 4, 200)
+    ax[1].plot(
+        grid,
+        0.5 * (1 + torch.erf(torch.from_numpy(grid) / np.sqrt(2))).numpy(),
+        color="k",
+        ls="--",
+        lw=1.4,
+        label="N(0,1)",
+    )
+    ax[1].set_xlabel("(test count − expected) / hypergeometric sd", fontsize=8)
+    ax[1].set_ylabel("empirical CDF", fontsize=8)
+    ax[1].set_title(f"test split is a plain random subsample — sd ratio {np.mean(ratios):.2f}", fontsize=9)
+    ax[1].legend(fontsize=6, frameon=False, ncol=2)
+
+    ratios_test = [counts[c][1].max(axis=1) / np.maximum(counts[c][1].min(axis=1), 1) for c in classes]
+    ratios_train = [counts[c][0].max(axis=1) / np.maximum(counts[c][0].min(axis=1), 1) for c in classes]
+    pos = np.arange(len(classes))
+    b0 = ax[2].boxplot(ratios_train, positions=pos - 0.18, widths=0.3, patch_artist=True, showfliers=False)
+    b1 = ax[2].boxplot(ratios_test, positions=pos + 0.18, widths=0.3, patch_artist=True, showfliers=False)
+    for box, colour in ((b0, "tab:blue"), (b1, "tab:orange")):
+        for patch in box["boxes"]:
+            patch.set_facecolor(colour)
+        for median in box["medians"]:
+            median.set_color("k")
+    ax[2].set_xticks(pos)
+    ax[2].set_xticklabels(classes)
+    ax[2].set_xlabel("num_classes", fontsize=8)
+    ax[2].set_ylabel("largest class / smallest class", fontsize=8)
+    ax[2].set_title("imbalance ratio — blue train, orange test", fontsize=9)
+
+    missing = [(counts[c][1].min(axis=1) == 0).mean() for c in classes]
+    smallest = [counts[c][1].min(axis=1).mean() for c in classes]
+    ax[3].bar(pos, smallest, color="tab:orange", width=0.6)
+    ax[3].plot(pos, [n_test / c for c in classes], "k--", lw=1, label="expected if even")
+    for k, c in enumerate(classes):
+        ax[3].text(
+            k, smallest[k], f"{missing[k]:.0%} empty" if missing[k] else "", ha="center", va="bottom", fontsize=7
+        )
+    ax[3].set_xticks(pos)
+    ax[3].set_xticklabels(classes)
+    ax[3].set_xlabel("num_classes", fontsize=8)
+    ax[3].set_ylabel("rows in the rarest test class", fontsize=8)
+    ax[3].set_title(f"rarest class in the {n_test} test rows", fontsize=9)
+    ax[3].legend(fontsize=7, frameon=False)
+
+    for a in ax:
+        a.tick_params(labelsize=7)
+    fig.suptitle(
+        f"train / test split — {n_train} train + {n_test} test rows, "
+        f"{per_class} datasets per class count, balancing is over all {n_rows} rows",
+        fontsize=11,
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+
 def plot_diversity(draws, path, ncols=4):
-    """Many independent draws from the prior, one panel each, coloured by class.
-
-    Every panel re-samples the graph, the weights, the activations, the target node and the class
-    count, so the spread across panels is the thing the prior actually is. The single-dataset
-    figures show one sample; this shows the distribution those samples come from.
-
-    The feature pair is drawn at random per panel rather than fixed at (x0, x1): `gnr()` builds
-    node 1's parent with `randint(1)`, which can only return 0, so node 1 is *always* a direct
-    child of the root and a fixed (x0, x1) pair would show the most degenerate pair every time.
-    """
     cmap = plt.get_cmap("tab10")
     rows = int(np.ceil(len(draws) / ncols))
     fig, axes = plt.subplots(rows, ncols, figsize=(2.2 * ncols, 2.3 * rows), squeeze=False)
@@ -282,36 +485,32 @@ def plot_diversity(draws, path, ncols=4):
 
 
 def plot_weights(w, acts, names, target, path):
-    """The sampled weight matrix: row i holds the coefficients node i puts on its parents.
-
-    Strictly lower-triangular by construction -- `gnr()` only ever picks a parent with a lower
-    index than the child, which is what makes the graph acyclic and lets `propagate()` fill the
-    columns in one forward pass. Each row has at most `num_parent_attempts` non-zeros, so the
-    matrix is very sparse; the column sums are what the DAG figure draws as out-degree.
-    """
     n = w.shape[0]
     vmax = np.abs(w).max()
-    fig, ax = plt.subplots(figsize=(0.42 * n + 3.5, 0.42 * n + 2))
-    im = ax.imshow(w, cmap="RdBu_r", vmin=-vmax, vmax=vmax)
+    fig, ax = plt.subplots(figsize=(0.42 * n + 4.0, 0.42 * n + 3.0))
+    cmap = plt.get_cmap("RdBu_r").with_extremes(bad="black")
+    im = ax.imshow(np.ma.masked_where(w == 0, w), cmap=cmap, vmin=-vmax, vmax=vmax)
+    labels = [f"{i} · {'input' if i == 0 else names[acts[i]]}" for i in range(n)]
     ax.set_xticks(range(n))
-    ax.set_xticklabels(range(n), fontsize=6)
+    ax.set_xticklabels(labels, fontsize=6, rotation=90)
     ax.set_yticks(range(n))
-    ax.set_yticklabels([f"{i} · {'input' if i == 0 else names[acts[i]]}" for i in range(n)], fontsize=6)
-    for i, lbl in enumerate(ax.get_yticklabels()):
-        if i == target:
-            lbl.set_color("tab:red")
-            lbl.set_fontweight("bold")
+    ax.set_yticklabels(labels, fontsize=6)
+    for group in (ax.get_xticklabels(), ax.get_yticklabels()):
+        for i, lbl in enumerate(group):
+            if i == target:
+                lbl.set_color("tab:red")
+                lbl.set_fontweight("bold")
     ax.set_xticks(np.arange(-0.5, n, 1), minor=True)
     ax.set_yticks(np.arange(-0.5, n, 1), minor=True)
-    ax.grid(which="minor", color="w", lw=0.5)
+    ax.grid(which="minor", color="0.5", lw=0.5)
     ax.tick_params(which="minor", length=0)
-    ax.set_xlabel("parent node (column)", fontsize=8)
+    ax.set_xlabel("parent node (column) · its activation", fontsize=8)
     ax.set_ylabel("child node (row) · its activation", fontsize=8)
     fig.colorbar(im, ax=ax, fraction=0.045, pad=0.03).ax.tick_params(labelsize=6)
     density = (w != 0).sum() / (n * (n - 1) / 2)
     fig.suptitle(
         f"prior weights — {n}×{n}, strictly lower-triangular, "
-        f"{(w != 0).sum()} non-zeros ({density:.0%} of the triangle), red = target row",
+        f"{(w != 0).sum()} edges ({density:.0%} of the triangle), black = no edge, red = target",
         fontsize=9,
     )
     fig.tight_layout(rect=(0, 0, 1, 0.97))
@@ -319,37 +518,26 @@ def plot_weights(w, acts, names, target, path):
     plt.close(fig)
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--seed", type=int, default=11)
-    parser.add_argument("--features", type=int, default=3)
-    parser.add_argument("--rows", type=int, default=100)
-    parser.add_argument("--test-rows", type=int, default=20)
-    parser.add_argument("--draws", type=int, default=16)
-    parser.add_argument("--out", default=str(PLOTS))
-    args = parser.parse_args()
-
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
+def run(name, features, rows, test_rows, seed, draws, out):
+    np.random.seed(seed)
+    torch.manual_seed(seed)
 
     config = PriorConfig(
-        min_num_cols=args.features,
-        max_num_cols=args.features,
-        min_num_rows=args.rows,
-        max_num_rows=args.rows,
-        min_num_test_rows=args.test_rows,
-        max_num_test_rows=args.test_rows,
+        min_num_cols=features,
+        max_num_cols=features,
+        min_num_rows=rows,
+        max_num_rows=rows,
+        min_num_test_rows=test_rows,
+        max_num_test_rows=test_rows,
     )
     prior = Prior(config, device="cpu")
     x_train, y_train, x_test, y_test = prior.batch(1)
     x = torch.cat([x_train, x_test], dim=1)[0].numpy()
     y = torch.cat([y_train, y_test], dim=1)[0].numpy().astype(int)
 
-    out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
+    print(f"[{name}] {features} features, {rows} rows, {test_rows} test rows, seed {seed} -> {out}")
     plot_dataset(x, y, prior.sep, out / "prior_dataset.png", cols=x.shape[1])
-    print(f"wrote {out / 'prior_dataset.png'}")
-
     plot_latents(
         prior.z.numpy(),
         prior.acts,
@@ -358,20 +546,33 @@ def main():
         prior.cuts.numpy(),
         out / "prior_latents.png",
     )
-    print(f"wrote {out / 'prior_latents.png'}")
-
     plot_dag(prior.parents, prior.acts, prior.activation_names, prior.target_node, out / "prior_dag.png")
-    print(f"wrote {out / 'prior_dag.png'}")
-
     plot_weights(prior.w.numpy(), prior.acts, prior.activation_names, prior.target_node, out / "prior_weights.png")
-    print(f"wrote {out / 'prior_weights.png'}")
 
-    draws = []
-    for _ in range(args.draws):
+    batches = []
+    for _ in range(draws):
         x_train, y_train, x_test, y_test = prior.batch(1)
-        draws.append((torch.cat([x_train, x_test], dim=1)[0].numpy(), torch.cat([y_train, y_test], dim=1)[0].numpy()))
-    plot_diversity(draws, out / "prior_diversity.png")
-    print(f"wrote {out / 'prior_diversity.png'}")
+        batches.append((torch.cat([x_train, x_test], dim=1)[0].numpy(), torch.cat([y_train, y_test], dim=1)[0].numpy()))
+    plot_diversity(batches, out / "prior_diversity.png")
+    plot_hyperparameters(config, "cpu", out / "prior_hyperparameters.png")
+    plot_growth(config, "cpu", out / "prior_growth.png")
+    plot_split(config, "cpu", out / "prior_split.png")
+    for path in sorted(out.glob("prior_*.png")):
+        print(f"  wrote {path.name}")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--settings", nargs="+", default=list(SETTINGS), choices=list(SETTINGS))
+    parser.add_argument("--seed", type=int, default=11)
+    parser.add_argument("--draws", type=int, default=16)
+    parser.add_argument("--out", default=None, help="default: workdir/plots/prior/<setting>")
+    args = parser.parse_args()
+
+    assert args.out is None or len(args.settings) == 1, "--out only makes sense for a single setting"
+    for name in args.settings:
+        out = Path(args.out) if args.out else PLOTS / name
+        run(name, seed=args.seed, draws=args.draws, out=out, **SETTINGS[name])
 
 
 if __name__ == "__main__":
