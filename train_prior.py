@@ -173,12 +173,12 @@ class Prior:
         c = self.config
         self.num_cols = int(np.random.randint(c.min_num_cols, c.max_num_cols + 1))
         self.num_rows = int(np.random.randint(c.min_num_rows, c.max_num_rows + 1))
-        self.nodes = self.num_cols + 1
         self.num_test_rows = int(np.random.randint(c.min_num_test_rows, c.max_num_test_rows + 1))
-        self.sep = self.num_rows - self.num_test_rows
         self.redirection = np.random.uniform(c.min_redirection, c.max_redirection)
         self.num_classes = int(np.random.randint(c.min_num_classes, c.max_num_classes + 1))
         self.num_parent_attempts = int(np.random.randint(c.min_num_parent_attempts, c.max_num_parent_attempts + 1))
+        self.sep = self.num_rows - self.num_test_rows
+        self.nodes = self.num_cols + 1
 
     def gnr(self):
         parents = [[] for _ in range(self.nodes)]
