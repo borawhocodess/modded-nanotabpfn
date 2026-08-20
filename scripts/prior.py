@@ -35,7 +35,7 @@ class PriorConfig:
     max_num_test_rows: int = 128
 
 
-class Prior:
+class ModdedNanoPrior:
     activations = (lambda z: z, torch.tanh, torch.sin, torch.abs, torch.square, F.softplus)
     activation_names = ("identity", "tanh", "sin", "abs", "square", "softplus")
 
@@ -123,7 +123,7 @@ def plot_hyperparameters(config, device, path, samples=5000, ncols=4):
         ("num_classes", "sampled", "min_num_classes", "max_num_classes"),
         ("num_parent_attempts", "sampled", "min_num_parent_attempts", "max_num_parent_attempts"),
     )
-    prior = Prior(config, device)
+    prior = ModdedNanoPrior(config, device)
     drawn = {name: [] for name, *_ in fields}
     for _ in range(samples):
         prior.hyperparameters()
@@ -168,7 +168,7 @@ def plot_hyperparameters(config, device, path, samples=5000, ncols=4):
 
 
 def plot_growth(config, device, path, ncols=5):
-    prior = Prior(config, device)
+    prior = ModdedNanoPrior(config, device)
     prior.hyperparameters()
     parents = prior.gnr()
     n = len(parents)
@@ -366,7 +366,7 @@ def plot_split(config, device, path, per_class=60):
     counts = {}
     for classes in range(config.min_num_classes, config.max_num_classes + 1):
         cfg = replace(config, min_num_classes=classes, max_num_classes=classes)
-        prior = Prior(cfg, device)
+        prior = ModdedNanoPrior(cfg, device)
         train, test = [], []
         for _ in range(per_class):
             _, y_train, _, y_test = prior.batch(1)
@@ -530,7 +530,7 @@ def run(name, features, rows, test_rows, seed, draws, out):
         min_num_test_rows=test_rows,
         max_num_test_rows=test_rows,
     )
-    prior = Prior(config, device="cpu")
+    prior = ModdedNanoPrior(config, device="cpu")
     x_train, y_train, x_test, y_test = prior.batch(1)
     x = torch.cat([x_train, x_test], dim=1)[0].numpy()
     y = torch.cat([y_train, y_test], dim=1)[0].numpy().astype(int)

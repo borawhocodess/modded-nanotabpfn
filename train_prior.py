@@ -161,7 +161,7 @@ tabarena_classification_tasks = [
 ]
 
 
-class Prior:
+class ModdedNanoPrior:
     activations = (lambda z: z, torch.tanh, torch.sin, torch.abs, torch.square, F.softplus)
 
     def __init__(self, config, device):
@@ -578,7 +578,7 @@ def print0(s, console=False):
         print(s, file=f)
 
 
-prior = Prior(config=pc, device=device)
+prior = ModdedNanoPrior(config=pc, device=device)
 loader = PriorDataLoader(prior=prior, batch_size=sc.batch_size)
 batches = iter(loader)
 
