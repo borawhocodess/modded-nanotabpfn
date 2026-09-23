@@ -7,7 +7,7 @@ This repository hosts the *nanoTabPFN speedrun*, in which we (collaboratively|co
 The code is derived from [nanoTabPFN](https://github.com/automl/nanoTabPFN) with the inspiration of [modded-nanogpt](https://github.com/KellerJordan/modded-nanogpt).
 
 This repo now contains a training algorithm which attains the target performance in:
-* 0.92m minutes on 1xL40S (baseline needed 74.32)
+* 0.79m minutes on 1xL40S (baseline needed 74.32)
 * 3648 synthetic datasets (baseline needed 80576)
 
 This improvement in training speed has been brought about by the following techniques:
@@ -33,6 +33,11 @@ This improvement in training speed has been brought about by the following techn
 * Increase Muon momentum from 0.95 to 0.96
 * Increase gradient clip from 1.0 to 2.0
 * Feed mean of test feature embeddings into output decoder
+* Shape-grouped zeropower update across all Muon matrices
+* Multi-tensor momentum and weight update in Muon
+* Producer-thread dataloader with pinned memory
+* Move the NaN check to the CPU
+* Single SDPA call over all datapoint queries
 
 
 ## Running the current record
