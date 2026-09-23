@@ -75,7 +75,7 @@ Architecture: the datapoint attention runs a single SDPA over all query rows ins
 
 ## Ablation Study
 
-I ran 10 trials per knob in both directions, interleaved in one slurm array:
+ran multiple trials per knob in both directions:
 - adding the change to the autoresearch record (base)
 - removing the change from the systems record
 
@@ -99,4 +99,4 @@ Removing each change from the systems record:
 | `loader` | `+4%` | 49.53s (0.83m) | 2.45s  | 49.68s (0.83m) |
 | `sdpa`   | `+6%` | 53.41s (0.89m) | 10.94s | 50.73s (0.85m) |
 
-Percentage comparisons are based on median times and rounded to whole numbers (no decimals).
+percentages compare medians, rounded to whole numbers.
