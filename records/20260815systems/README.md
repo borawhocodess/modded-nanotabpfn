@@ -1,14 +1,12 @@
 # systems
 
-systems-level speedup by [@tjeong117](https://github.com/tjeong117) ([#19](https://github.com/borawhocodess/modded-nanotabpfn/pull/19)), the training algorithm is unchanged, only how the training steps are executed.
+systems-level speedup by [@tjeong117](https://github.com/tjeong117) ([#19](https://github.com/borawhocodess/modded-nanotabpfn/pull/19)), the training algorithm is unchanged, only how the training steps are executed. previous record 0.92m, this is -14% on our node.
 
-his paired protocol, methodology notes and integrity notes are in [#19](https://github.com/borawhocodess/modded-nanotabpfn/pull/19): 15 paired rounds on modal l40s, -17.7% median (conservative single-batch reading -15.9%), epochs-to-target unchanged (mwu p=0.615). he predicted 0.76-0.79 min on our node and did not claim a reproduction of the 0.92 min record, our re-timing lands at 0.79.
+his paired protocol and integrity notes are in the same pr: 15 paired rounds on modal l40s, -17.7% median, epochs-to-target unchanged (mwu p=0.615). he predicted 0.76-0.79 min on our node, our re-timing lands at 0.79.
 
 found and verified with an autonomous agent harness.
 
-note: all sub-minute timings here assume a warm `torch.compile` cache, a cold inductor cache costs 41-109 s in epoch 1 alone.
-
-only the median run's log is included at the top level, all 31 runs are in `logs/`. previous record 0.92m, this is -14% with the same training algorithm.
+only the median run's log is included at the top level, all 31 runs are in `logs/`.
 
 ```
 mean                         0.81m    58     0.84s      3726      10.57m
@@ -49,6 +47,8 @@ median                       0.79m    57     0.84s      3648      10.68m
 30  30  26-08-21  dlc2gpu08  0.88m    64     0.83s      4096      11.56m   bc218607-systems
 31  26  26-08-21  dlc2gpu16  0.95m    69     0.82s      4416      12.72m   e700f310-systems
 ```
+
+note: all sub-minute timings here assume a warm `torch.compile` cache, a cold inductor cache costs 41-109 s in epoch 1 alone.
 
 ## Changes
 
