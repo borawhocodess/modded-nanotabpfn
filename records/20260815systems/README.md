@@ -2,6 +2,14 @@
 
 systems-level speedup by [@tjeong117](https://github.com/tjeong117) ([#19](https://github.com/borawhocodess/modded-nanotabpfn/pull/19)), the training algorithm is unchanged, only how the training steps are executed.
 
+his paired protocol, methodology notes and integrity notes are in [#19](https://github.com/borawhocodess/modded-nanotabpfn/pull/19): 15 paired rounds on modal l40s, -17.7% median (conservative single-batch reading -15.9%), epochs-to-target unchanged (mwu p=0.615). he predicted 0.76-0.79 min on our node and did not claim a reproduction of the 0.92 min record, our re-timing lands at 0.79.
+
+found and verified with an autonomous agent harness.
+
+note: all sub-minute timings here assume a warm `torch.compile` cache, a cold inductor cache costs 41-109 s in epoch 1 alone.
+
+only the median run's log is included at the top level, all 31 runs are in `logs/`. previous record 0.92m, this is -14% with the same training algorithm.
+
 ```
 mean                         0.81m    58     0.84s      3726      10.57m
 std                          0.04m    3      0.01s      217       0.74m
