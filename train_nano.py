@@ -7,9 +7,11 @@ with open(sys.argv[0], "r") as f:
     code = f.read()
 
 import platform
+import queue
 import random
 import socket
 import subprocess
+import threading
 import time
 import tomllib
 import uuid
@@ -466,8 +468,6 @@ class TransformerEncoderLayer(nn.Module):
         k_train = k[:, :, :sep, :]
         v_train = v[:, :, :sep, :]
 
-        # single SDPA: q_left and q_right both attend to k_train/v_train, so the
-        # split+cat is mathematically identical to one call over all query rows
         x = F.scaled_dot_product_attention(q, k_train, v_train)
         x = x.transpose(1, 2).reshape(b * c, r, e)
 
@@ -514,10 +514,12 @@ class PriorDumpDataLoader(DataLoader):
         with h5py.File(self.filename, "r") as f:
             for _ in range(num_steps):
                 end = self.pointer + self.batch_size
+
                 num_features = f["num_features"][self.pointer : end].max()
                 x = torch.from_numpy(f["X"][self.pointer : end, :, :num_features])
                 y = torch.from_numpy(f["y"][self.pointer : end])
                 sep = f[self.sep_key][self.pointer : end]
+
                 self.pointer += self.batch_size
                 if self.pointer >= self.datasets:
                     print("pointer >= datasets, will reset!")
@@ -526,10 +528,8 @@ class PriorDumpDataLoader(DataLoader):
                 q.put((x.pin_memory(), y.pin_memory(), sep[0].item(), valid))
 
     def __iter__(self):
-        import queue as _queue
-        import threading as _threading
-        q = _queue.Queue(maxsize=4)
-        t = _threading.Thread(target=self._produce, args=(q, self.num_steps), daemon=True)
+        q = queue.Queue(maxsize=4)
+        t = threading.Thread(target=self._produce, args=(q, self.num_steps), daemon=True)
         t.start()
         for _ in range(self.num_steps):
             x, y, sep, valid = q.get()
