@@ -1,5 +1,7 @@
 # systems
 
+![Records and epoch time](260923-records-and-epoch.png)
+
 systems-level speedup by [@tjeong117](https://github.com/tjeong117) ([#19](https://github.com/borawhocodess/modded-nanotabpfn/pull/19)), the training algorithm is unchanged, only how the training steps are executed. previous record 0.92m, this is -14% on our node.
 
 his paired protocol and integrity notes are in the same pr: 15 paired rounds on modal l40s, -17.7% median, epochs-to-target unchanged (mwu p=0.615). he predicted 0.76-0.79 min on our node, our re-timing lands at 0.79.
