@@ -72,3 +72,31 @@ Architecture: the datapoint attention runs a single SDPA over all query rows ins
 # before cat([sdpa(q_left, k_train, v_train), sdpa(q_right, k_train, v_train)])
 # after  sdpa(q, k_train, v_train)
 ```
+
+## Ablation Study
+
+I ran 10 trials per knob in both directions, interleaved in one slurm array:
+- adding the change to the autoresearch record (base)
+- removing the change from the systems record
+
+Records:
+- base stats: mean: 55.45s (0.92m) std: 4.10s median: 53.84s (0.90m)
+- systems stats: mean: 48.63s (0.81m) std: 3.88s median: 47.88s (0.80m)
+
+Adding each change to the base record:
+
+| knob | base + knob | mean | std | median |
+| --- | --- | --- | --- | --- |
+| `muon`   | `-4%` | 51.90s (0.86m) | 2.46s | 51.59s (0.86m) |
+| `loader` | `-4%` | 52.19s (0.87m) | 2.07s | 51.80s (0.86m) |
+| `sdpa`   | `-5%` | 51.09s (0.85m) | 1.31s | 50.91s (0.85m) |
+
+Removing each change from the systems record:
+
+| knob | systems - knob | mean | std | median |
+| --- | --- | --- | --- | --- |
+| `muon`   | `+4%` | 52.02s (0.87m) | 5.66s  | 49.63s (0.83m) |
+| `loader` | `+4%` | 49.53s (0.83m) | 2.45s  | 49.68s (0.83m) |
+| `sdpa`   | `+6%` | 53.41s (0.89m) | 10.94s | 50.73s (0.85m) |
+
+Percentage comparisons are based on median times and rounded to whole numbers (no decimals).
