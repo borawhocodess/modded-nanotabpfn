@@ -507,21 +507,33 @@ class PriorDumpDataLoader(DataLoader):
             self.max_rows = f["X"].shape[1]
             self.max_cols = f["X"].shape[2]
             self.sep_key = "single_eval_pos" if "single_eval_pos" in f else "train_test_split_index"
+            nf = f["num_features"][:]
         self.device = device
         self.pointer = 0
+
+        window = num_steps * batch_size          # one epoch's worth of datasets
+        idx = np.arange(self.datasets, dtype=np.int64)
+        self.order = np.concatenate([
+            blk[np.argsort(nf[blk], kind="stable")]
+            for blk in (idx[i : i + window] for i in range(0, len(idx), window))
+        ])
 
     def _produce(self, q, num_steps):
         with h5py.File(self.filename, "r") as f:
             for _ in range(num_steps):
                 end = self.pointer + self.batch_size
+                # h5py fancy indexing needs increasing indices. Sorting the selection is safe:
+                # X, y and sep are gathered with the SAME selection so rows stay aligned, and
+                # order within a batch carries no meaning.
+                sel = np.sort(self.order[self.pointer : end])
 
-                num_features = f["num_features"][self.pointer : end].max()
-                x = torch.from_numpy(f["X"][self.pointer : end, :, :num_features])
-                y = torch.from_numpy(f["y"][self.pointer : end])
-                sep = f[self.sep_key][self.pointer : end]
+                num_features = f["num_features"][sel].max()
+                x = torch.from_numpy(f["X"][sel, :, :num_features])
+                y = torch.from_numpy(f["y"][sel])
+                sep = f[self.sep_key][sel]
 
                 self.pointer += self.batch_size
-                if self.pointer >= self.datasets:
+                if self.pointer >= len(self.order):
                     print("pointer >= datasets, will reset!")
                     self.pointer = 0
                 valid = not (torch.isnan(x).any().item() or torch.isnan(y).any().item())
