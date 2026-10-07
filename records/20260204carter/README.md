@@ -1,4 +1,4 @@
-# PR ([#2](https://github.com/borawhocodess/modded-nanotabpfn/pull/2))
+# PR ([#2](https://github.com/borawhocodess/modded-nanotabpfn/pull/2)) by [@carterprince](https://github.com/carterprince)
 
 Only one run's log is included here for reference. The median run is the one added to the general record table.
 
