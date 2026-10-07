@@ -1,6 +1,6 @@
 # widthsort
 
-feature width batch packing by [@shounakb1](https://github.com/shounakb1) ([#20](https://github.com/borawhocodess/modded-nanotabpfn/pull/20)), the model and optimizer are unchanged, only which datasets share a batch in an epoch.
+feature width sorted batching by [@shounakb1](https://github.com/shounakb1) ([#20](https://github.com/borawhocodess/modded-nanotabpfn/pull/20)), the model and optimizer are unchanged, only the order of the datasets within an epoch.
 
 every batch is sliced to the widest dataset in it, and feature width is uncorrelated with position in the prior dump, so at batch size 2 a narrow dataset is routinely padded to a wide one. his numbers: mean processed width 14.04 against a true mean of 11.08 over the 3648 datasets of a record run.
 
@@ -52,7 +52,7 @@ note: all sub-minute timings here assume a warm `torch.compile` cache.
 
 ## Changes
 
-Dataloader: datasets are sorted by feature count inside windows of `steps * batch_size`, which is exactly one epoch. every epoch still sees the same set of datasets, only the pairing inside the epoch changes.
+Dataloader: datasets are sorted by feature count inside windows of `steps * batch_size`, which is exactly one epoch. every epoch still sees the same set of datasets, but both the pairing and the batch order change: similar widths share a batch, and each epoch runs from the narrowest batches to the widest.
 
 ```python
 # before: walk the dump in file order
