@@ -7,8 +7,8 @@ This repository hosts the *nanoTabPFN speedrun*, in which we (collaboratively|co
 The code is derived from [nanoTabPFN](https://github.com/automl/nanoTabPFN) with the inspiration of [modded-nanogpt](https://github.com/KellerJordan/modded-nanogpt).
 
 This repo now contains a training algorithm which attains the target performance in:
-* 0.79m minutes on 1xL40S (baseline needed 74.32)
-* 3648 synthetic datasets (baseline needed 80576)
+* 0.76m minutes on 1xL40S (baseline needed 74.32)
+* 4096 synthetic datasets (baseline needed 80576)
 
 This improvement in training speed has been brought about by the following techniques:
 * Muon optimizer
@@ -38,6 +38,7 @@ This improvement in training speed has been brought about by the following techn
 * Producer-thread dataloader with pinned memory
 * Move the NaN check to the CPU
 * Single SDPA call over all datapoint queries
+* Sort datasets by increasing feature width within each epoch
 
 
 ## Running the current record
@@ -71,6 +72,7 @@ Note: The 0.8068462330697953 target was selected to match the performance of Ran
 | 8 | 2.15 minutes | 11/04/26 | Repeated feature grouping | [log](records/20260411featuregroup/260411-142657-1686dd83-featuregroup-s11-log.txt),[read](records/20260411featuregroup/README.md),[PR](https://github.com/borawhocodess/modded-nanotabpfn/pull/17),[X](https://x.com/boratwits/status/2043047953502290052) | @borawhocodess |
 | 9 | 0.92 minutes | 06/05/26 | autoresearch HPO, Muon weight decay, mean feature pooling | [log](records/20260506autohuman/260506-163637-589ea1cf-autohuman-log.txt),[read](records/20260506autohuman/README.md),[PR](https://github.com/borawhocodess/modded-nanotabpfn/pull/18),[X](https://x.com/boratwits/status/2052199021775647173) | @borawhocodess |
 | 10 | 0.79 minutes | 15/08/26 | Shape-grouped Newton-Schulz, producer-thread dataloader, single datapoint SDPA | [log](records/20260815systems/260821-020755-da187cba-systems-log.txt),[read](records/20260815systems/README.md),[PR](https://github.com/borawhocodess/modded-nanotabpfn/pull/21),[X](https://x.com/boratwits/status/2102855207675978023) | @tjeong117 |
+| 11 | 0.76 minutes | 26/08/26 | Feature width sorted batching | [log](records/20260826widthsort/260923-231224-59cb2d39-pr20-log.txt),[read](records/20260826widthsort/README.md),[PR](https://github.com/borawhocodess/modded-nanotabpfn/pull/23),[X]() | @shounakb1 |
 
 
 ## Rules
