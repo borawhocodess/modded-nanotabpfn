@@ -95,11 +95,14 @@ torch.set_float32_matmul_precision('high')
 import torch._dynamo
 torch._dynamo.config.cache_size_limit = 128
 # python floats as constants: otherwise dynamo tensorifies them and restarts the first layer compile (~1.2 s)
-torch._dynamo.config.specialize_float = True
+# ABLATION COPY of the submitted train_nano.py: ABL_<X>=0 turns one change off (all default on = the submission)
+ABL = {k: os.environ.get('ABL_' + k, '1') == '1' for k in ('ATTN', 'GRAPH', 'MUONF', 'BF16', 'COMPILE')}
+print('ablation switches:', ABL)
+torch._dynamo.config.specialize_float = ABL['COMPILE']
 # bf16 casts inside the layer would otherwise pin the column count through stride checks (one recompile per width)
-torch.fx.experimental._config.backed_size_oblivious = True
+torch.fx.experimental._config.backed_size_oblivious = ABL['COMPILE']
 # inductor options for the layer: autotuned matmuls; combo kernels fuse independent small kernels into one launch
-LAYER_OPTS = {"max_autotune": True, "combo_kernels": True}
+LAYER_OPTS = {"max_autotune": True, "combo_kernels": True} if ABL["COMPILE"] else {}
 
 assert torch.cuda.is_available()
 
@@ -603,7 +606,8 @@ class NanoTabPFNModel(nn.Module):
         y_src = self.target_encoder(y_src, num_rows)
         src = torch.cat([x_src, y_src], 2)
         src, sep = self.thinking_rows(src, sep)
-        src = src.to(torch.bfloat16)  # residual stream in bf16 inside the transformer
+        if ABL['BF16']:
+            src = src.to(torch.bfloat16)  # residual stream in bf16 inside the transformer
         output = self.transformer_encoder(src, sep)
         output = output[:, sep:, :-1, :].mean(dim=2)
         output = self.decoder(output)
@@ -685,7 +689,7 @@ class TransformerEncoderLayer(nn.Module):
         qkv = qkv.permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
 
-        x = feat_attn(q, k, v)
+        x = feat_attn(q, k, v) if ABL['ATTN'] else F.scaled_dot_product_attention(q, k, v)
         x = x.transpose(1, 2).reshape(b * r, c, e)
 
         src = res + x
@@ -742,33 +746,21 @@ class PriorDumpDataLoader(DataLoader):
             self.max_rows = f["X"].shape[1]
             self.max_cols = f["X"].shape[2]
             self.sep_key = "single_eval_pos" if "single_eval_pos" in f else "train_test_split_index"
-            nf = f["num_features"][:]
         self.device = device
         self.pointer = 0
-
-        window = num_steps * batch_size          # one epoch's worth of datasets
-        idx = np.arange(self.datasets, dtype=np.int64)
-        self.order = np.concatenate([
-            blk[np.argsort(nf[blk], kind="stable")]
-            for blk in (idx[i : i + window] for i in range(0, len(idx), window))
-        ])
 
     def _produce(self, q, num_steps):
         with h5py.File(self.filename, "r") as f:
             for _ in range(num_steps):
                 end = self.pointer + self.batch_size
-                # h5py fancy indexing needs increasing indices. Sorting the selection is safe:
-                # X, y and sep are gathered with the SAME selection so rows stay aligned, and
-                # order within a batch carries no meaning.
-                sel = np.sort(self.order[self.pointer : end])
 
-                num_features = f["num_features"][sel].max()
-                x = torch.from_numpy(f["X"][sel, :, :num_features])
-                y = torch.from_numpy(f["y"][sel])
-                sep = f[self.sep_key][sel]
+                num_features = f["num_features"][self.pointer : end].max()
+                x = torch.from_numpy(f["X"][self.pointer : end, :, :num_features])
+                y = torch.from_numpy(f["y"][self.pointer : end])
+                sep = f[self.sep_key][self.pointer : end]
 
                 self.pointer += self.batch_size
-                if self.pointer >= len(self.order):
+                if self.pointer >= self.datasets:
                     print("pointer >= datasets, will reset!")
                     self.pointer = 0
                 valid = not (torch.isnan(x).any().item() or torch.isnan(y).any().item())
@@ -930,7 +922,7 @@ for name, p in model.named_parameters():
     else:
         adam_params.append(p)
 
-optimizer_muon = MuonFused(muon_params, lr=c.muon_lr_scale*c.lr, momentum=c.muon_momentum, weight_decay=c.muon_wd)
+optimizer_muon = (MuonFused if ABL['MUONF'] else Muon)(muon_params, lr=c.muon_lr_scale*c.lr, momentum=c.muon_momentum, weight_decay=c.muon_wd)
 optimizer_adam = schedulefree.AdamWScheduleFree(adam_params, lr=c.lr, weight_decay=c.adam_wd, warmup_steps=1000)
 
 optimizers = [optimizer_muon, optimizer_adam]
@@ -940,7 +932,7 @@ criterion = nn.CrossEntropyLoss()
 lawa_queue = collections.deque(maxlen=c.lawa_k)
 
 # grad clip + Muon step replayed as one CUDA graph (captured after 3 eager steps)
-step_graph = StepGraph(model.parameters(), optimizer_muon, c.grad_clip)
+step_graph = StepGraph(model.parameters(), optimizer_muon, c.grad_clip, eager_steps=3 if ABL['GRAPH'] else 10**12)
 
 t_t = 0.0
 prev_muon = None
@@ -1007,6 +999,10 @@ for epoch in range(1, c.epochs + 1):
     if t_t > c.max_train_mins * 60:
         print0("exceeded max train time", console=True)
         sys.exit(0)
+
+    if os.environ.get('ABL_EVAL', '1') == '0':  # timing-only ablation runs: skip the untimed evaluation
+        print0(f"e:{epoch}/{c.epochs} e_t:{e_t:.2f}s μ_e_t:{mu_e_t:.2f}s t_t:{t_t:.2f}s", console=True)
+        continue
 
     model.eval()
     optimizer_adam.eval()

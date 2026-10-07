@@ -25,9 +25,6 @@ import pandas as pd
 import schedulefree
 import torch
 import torch.nn.functional as F
-import triton
-import triton.language as tl
-from torch.library import triton_op, wrap_triton
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import roc_auc_score
@@ -94,12 +91,6 @@ torch.manual_seed(c.seed)
 torch.set_float32_matmul_precision('high')
 import torch._dynamo
 torch._dynamo.config.cache_size_limit = 128
-# python floats as constants: otherwise dynamo tensorifies them and restarts the first layer compile (~1.2 s)
-torch._dynamo.config.specialize_float = True
-# bf16 casts inside the layer would otherwise pin the column count through stride checks (one recompile per width)
-torch.fx.experimental._config.backed_size_oblivious = True
-# inductor options for the layer: autotuned matmuls; combo kernels fuse independent small kernels into one launch
-LAYER_OPTS = {"max_autotune": True, "combo_kernels": True}
 
 assert torch.cuda.is_available()
 
@@ -303,231 +294,6 @@ class Muon(torch.optim.Optimizer):
                     torch._foreach_mul_(sel, 1 - lr * group['weight_decay'])
 
 
-# fused short-sequence feature attention (seq = columns + 1 <= 32, head_dim 64)
-
-@triton.jit
-def _fwd(Q, K, V, O, L, sqn, sqh, sqc, skn, skh, skc, svn, svh, svc, son, soh, soc,
-         H: tl.constexpr, C, scale, BC: tl.constexpr, D: tl.constexpr):
-    pid = tl.program_id(0)
-    n = pid // H
-    h = pid % H
-    c = tl.arange(0, BC)
-    d = tl.arange(0, D)
-    m = c[:, None] < C
-    q = tl.load(Q + n * sqn + h * sqh + c[:, None] * sqc + d[None, :], mask=m, other=0.0)
-    k = tl.load(K + n * skn + h * skh + c[:, None] * skc + d[None, :], mask=m, other=0.0)
-    v = tl.load(V + n * svn + h * svh + c[:, None] * svc + d[None, :], mask=m, other=0.0)
-    s = tl.dot(q, tl.trans(k)) * scale
-    s = tl.where(c[None, :] < C, s, float("-inf"))
-    mx = tl.max(s, axis=1)
-    p = tl.exp(s - mx[:, None])
-    den = tl.sum(p, axis=1)
-    p = p / den[:, None]
-    o = tl.dot(p.to(v.dtype), v)
-    tl.store(O + n * son + h * soh + c[:, None] * soc + d[None, :], o.to(O.dtype.element_ty), mask=m)
-    tl.store(L + pid * BC + c, mx + tl.log(den))
-
-
-@triton.jit
-def _bwd(Q, K, V, O, DO, L, DQ, DK, DV, sqn, sqh, sqc, skn, skh, skc, svn, svh, svc, son, soh, soc,
-         sdn, sdh, sdc, H: tl.constexpr, C, scale, BC: tl.constexpr, D: tl.constexpr):
-    pid = tl.program_id(0)
-    n = pid // H
-    h = pid % H
-    c = tl.arange(0, BC)
-    d = tl.arange(0, D)
-    m = c[:, None] < C
-    q = tl.load(Q + n * sqn + h * sqh + c[:, None] * sqc + d[None, :], mask=m, other=0.0)
-    k = tl.load(K + n * skn + h * skh + c[:, None] * skc + d[None, :], mask=m, other=0.0)
-    v = tl.load(V + n * svn + h * svh + c[:, None] * svc + d[None, :], mask=m, other=0.0)
-    o = tl.load(O + n * son + h * soh + c[:, None] * soc + d[None, :], mask=m, other=0.0)
-    do = tl.load(DO + n * sdn + h * sdh + c[:, None] * sdc + d[None, :], mask=m, other=0.0)
-    lse = tl.load(L + pid * BC + c)
-    s = tl.dot(q, tl.trans(k)) * scale
-    p = tl.exp(s - lse[:, None])
-    p = tl.where((c[None, :] < C) & (c[:, None] < C), p, 0.0)
-    dv = tl.dot(tl.trans(p.to(do.dtype)), do)
-    dp = tl.dot(do, tl.trans(v))
-    delta = tl.sum(do.to(tl.float32) * o.to(tl.float32), axis=1)
-    ds = (p * (dp - delta[:, None]) * scale).to(q.dtype)
-    dq = tl.dot(ds, k)
-    dk = tl.dot(tl.trans(ds), q)
-    # grads are allocated contiguous [N, H, C, D]
-    off = pid * C * D + c[:, None] * D + d[None, :]
-    tl.store(DQ + off, dq.to(DQ.dtype.element_ty), mask=m)
-    tl.store(DK + off, dk.to(DK.dtype.element_ty), mask=m)
-    tl.store(DV + off, dv.to(DV.dtype.element_ty), mask=m)
-
-
-def _bc(C):
-    # one tile size for every training width (C <= 21 < 32): a width-dependent choice made dynamo guard on
-    # C > 16 and recompile the layer mid-epoch (~0.6 s inside the timed first epoch)
-    return 32
-
-
-@triton_op("nanotab::feat_attn_fwd", mutates_args={})
-def feat_attn_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    N, H, C, D = q.shape
-    BC = _bc(C)
-    # returned as a plain contiguous [N, C, H, D] tensor (a strided output of a custom op makes dynamo pin C);
-    # feat_attn() transposes it to [N, H, C, D] as a view, so the caller's transpose(1, 2).reshape(N, C, H*D) is free
-    o = torch.empty(N, C, H, D, device=q.device, dtype=q.dtype)
-    lse = torch.empty(N * H * BC, device=q.device, dtype=torch.float32)
-    wrap_triton(_fwd)[(N * H,)](q, k, v, o, lse, q.stride(0), q.stride(1), q.stride(2), k.stride(0), k.stride(1),
-                                k.stride(2), v.stride(0), v.stride(1), v.stride(2), C * H * D, D, H * D,
-                                H, C, D**-0.5, BC=BC, D=D, num_warps=4)
-    return o, lse
-
-
-@triton_op("nanotab::feat_attn_bwd", mutates_args={})
-def feat_attn_bwd(do: torch.Tensor, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, o: torch.Tensor,
-                  lse: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    N, H, C, D = q.shape
-    dq = torch.empty(N, H, C, D, device=q.device, dtype=q.dtype)
-    dk = torch.empty_like(dq)
-    dv = torch.empty_like(dq)
-    wrap_triton(_bwd)[(N * H,)](q, k, v, o, do, lse, dq, dk, dv, q.stride(0), q.stride(1), q.stride(2),
-                                k.stride(0), k.stride(1), k.stride(2), v.stride(0), v.stride(1), v.stride(2),
-                                o.stride(0), o.stride(1), o.stride(2), do.stride(0), do.stride(1), do.stride(2),
-                                H, C, D**-0.5, BC=_bc(C), D=D, num_warps=4)
-    return dq, dk, dv
-
-
-def _setup(ctx, inputs, output):
-    q, k, v = inputs
-    o, lse = output
-    ctx.save_for_backward(q, k, v, o, lse)
-
-
-def _backward(ctx, do, dlse):
-    q, k, v, o, lse = ctx.saved_tensors
-    # o and do are [N, C, H, D]; the kernel indexes them as [N, H, C, D] views
-    return feat_attn_bwd(do.transpose(1, 2), q, k, v, o.transpose(1, 2), lse)
-
-
-feat_attn_fwd.register_autograd(_backward, setup_context=_setup)
-
-
-def feat_attn(q, k, v):
-    """drop-in for F.scaled_dot_product_attention(q, k, v), no mask. the fused kernel covers [N, H, C<=32, 64]
-    (every training batch: <= 20 features + target); wider inputs (evaluation datasets, up to 100 features) fall back
-    to SDPA"""
-    if q.shape[-2] > 32 or q.shape[-1] != 64 or q.stride(-1) != 1 or k.stride(-1) != 1 or v.stride(-1) != 1:
-        return torch.nn.functional.scaled_dot_product_attention(q, k, v)
-    return feat_attn_fwd(q, k, v)[0].transpose(1, 2)
-
-
-class MuonFused(torch.optim.Optimizer):
-    """
-    same update as Muon above (nesterov momentum, NS5 on the same buckets, update then decoupled wd), but each bucket
-    is one torch.compile'd static-shape graph: momentum + stack + Newton-Schulz + parameter update fused, a few kernels
-    instead of ~60 small ones and their Python dispatch.
-    """
-    def __init__(self, params, lr=3e-4, momentum=0.95, backend_steps=5, weight_decay=0.0):
-        super().__init__(params, dict(lr=lr, momentum=momentum, backend_steps=backend_steps, weight_decay=weight_decay))
-        self.buckets = None
-
-    def _build(self, group):
-        buckets = {}
-        for p in group['params']:
-            key = ('qkv', p.size(1)) if p.size(0) == 3 * p.size(1) else ('mat', p.size(0), p.size(1))
-            buckets.setdefault(key, []).append(p)
-        self.buckets = [(key, ps, [torch.zeros_like(p) for p in ps]) for key, ps in buckets.items()]
-
-    @staticmethod
-    @torch.compile(dynamic=False, fullgraph=True)
-    def _bucket_step(params, grads, bufs, lr, momentum, wd, steps: int, qkv_n: int, scale: float):
-        torch._foreach_mul_(bufs, momentum)
-        torch._foreach_add_(bufs, grads)
-        gs = torch._foreach_add(grads, bufs, alpha=momentum)
-        if qkv_n > 0:
-            G = torch.stack([g.view(3, qkv_n, qkv_n) for g in gs]).view(-1, qkv_n, qkv_n)
-        else:
-            G = torch.stack(gs)
-        a, b, c = (3.4445, -4.7750, 2.0315)
-        X = G.bfloat16()
-        X = X / (X.norm(dim=(1, 2), keepdim=True) + 1e-7)
-        tall = X.size(1) > X.size(2)
-        if tall:
-            X = X.transpose(1, 2)
-        for _ in range(steps):
-            A = X @ X.transpose(1, 2)
-            B = A @ X
-            X = a * X + b * B + c * A @ B
-        if tall:
-            X = X.transpose(1, 2)
-        X = X.to(G.dtype).view(len(params), *params[0].shape)
-        torch._foreach_add_(params, list(X.unbind(0)), alpha=-lr * scale)
-        if wd > 0:
-            torch._foreach_mul_(params, 1 - lr * wd)
-
-    @torch.no_grad()
-    def step(self):
-        group = self.param_groups[0]
-        if self.buckets is None:
-            self._build(group)
-        for key, ps, bufs in self.buckets:
-            n = key[1] if key[0] == 'qkv' else 0
-            scale = key[1] ** 0.5 if key[0] == 'qkv' else max(key[1], key[2]) ** 0.5
-            self._bucket_step(ps, [p.grad for p in ps], bufs, group['lr'], group['momentum'], group['weight_decay'],
-                              group['backend_steps'], n, scale)
-
-
-class StepGraph:
-    """
-    grad clip + Muon step as one CUDA graph replay (static shapes, constant hyperparameters).
-    AdamWScheduleFree stays eager: its scheduled scalars change every step.
-    backward still allocates fresh grads (set_to_none=True), they are copied into static buffers first.
-    """
-    def __init__(self, params, muon, max_norm, eager_steps=3):
-        self.params = list(params)
-        self.muon = muon
-        self.max_norm = max_norm
-        self.eager_steps = eager_steps
-        self.graph = None
-
-    def _body(self):
-        norm = torch.nn.utils.clip_grad_norm_(self.params, self.max_norm)
-        self.muon.step()
-        return norm
-
-    def __call__(self):
-        if self.graph is None and self.eager_steps > 0:
-            self.eager_steps -= 1
-            return self._body()
-        if self.graph is None:
-            self._capture()
-        torch._foreach_copy_(self.static_grads, [p.grad for p in self.params])
-        for p, g in zip(self.params, self.static_grads):
-            p.grad = g
-        self.graph.replay()
-        return self.norm.clone()
-
-    @torch.no_grad()
-    def _capture(self):
-        self.static_grads = [p.grad.detach().clone() for p in self.params]
-        for p, g in zip(self.params, self.static_grads):
-            p.grad = g
-        # one side-stream warmup so lazy inits happen outside capture, then undo its side effects
-        muon_params = [p for grp in self.muon.param_groups for p in grp["params"]]
-        if getattr(self.muon, "buckets", None) is not None:  # MuonFused keeps its momentum buffers per bucket
-            bufs = [b for _, _, bs in self.muon.buckets for b in bs]
-        else:
-            bufs = [self.muon.state[p]["momentum_buffer"] for p in muon_params]
-        snap = [t.clone() for t in muon_params + bufs + self.static_grads]
-        s = torch.cuda.Stream()
-        s.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(s):
-            self._body()
-        torch.cuda.current_stream().wait_stream(s)
-        torch._foreach_copy_(muon_params + bufs + self.static_grads, snap)
-        torch.cuda.synchronize()
-        self.graph = torch.cuda.CUDAGraph()
-        # thread_local: the producer thread keeps pinning host memory while we capture
-        with torch.cuda.graph(self.graph, capture_error_mode="thread_local"):
-            self.norm = self._body()
-
-
 class LowerPrecisionRMSNorm(nn.RMSNorm):
     """
     code adapted from: https://github.com/PriorLabs/TabPFN/blob/main/src/tabpfn/architectures/tabpfn_v2_6.py
@@ -603,7 +369,6 @@ class NanoTabPFNModel(nn.Module):
         y_src = self.target_encoder(y_src, num_rows)
         src = torch.cat([x_src, y_src], 2)
         src, sep = self.thinking_rows(src, sep)
-        src = src.to(torch.bfloat16)  # residual stream in bf16 inside the transformer
         output = self.transformer_encoder(src, sep)
         output = output[:, sep:, :-1, :].mean(dim=2)
         output = self.decoder(output)
@@ -672,7 +437,7 @@ class TransformerEncoderLayer(nn.Module):
         self.norm2 = LowerPrecisionRMSNorm(e, eps=eps)
         self.norm3 = LowerPrecisionRMSNorm(e, eps=eps)
 
-    @torch.compile(dynamic=True, options=LAYER_OPTS)
+    @torch.compile(dynamic=True)
     def forward(self, src, sep):
         b, r, c, e = src.shape
 
@@ -685,7 +450,7 @@ class TransformerEncoderLayer(nn.Module):
         qkv = qkv.permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
 
-        x = feat_attn(q, k, v)
+        x = F.scaled_dot_product_attention(q, k, v)
         x = x.transpose(1, 2).reshape(b * r, c, e)
 
         src = res + x
@@ -707,11 +472,11 @@ class TransformerEncoderLayer(nn.Module):
         x = x.transpose(1, 2).reshape(b * c, r, e)
 
         src = res + x
-        src = src.reshape(b, c, r, e).transpose(2, 1).contiguous()
+        src = src.reshape(b, c, r, e).transpose(2, 1)
 
         x = self.norm3(src)
         x = self.linear2(F.gelu(self.linear1(x)))
-        src = (src + x).contiguous()
+        src = src + x
 
         return src
 
@@ -742,33 +507,21 @@ class PriorDumpDataLoader(DataLoader):
             self.max_rows = f["X"].shape[1]
             self.max_cols = f["X"].shape[2]
             self.sep_key = "single_eval_pos" if "single_eval_pos" in f else "train_test_split_index"
-            nf = f["num_features"][:]
         self.device = device
         self.pointer = 0
-
-        window = num_steps * batch_size          # one epoch's worth of datasets
-        idx = np.arange(self.datasets, dtype=np.int64)
-        self.order = np.concatenate([
-            blk[np.argsort(nf[blk], kind="stable")]
-            for blk in (idx[i : i + window] for i in range(0, len(idx), window))
-        ])
 
     def _produce(self, q, num_steps):
         with h5py.File(self.filename, "r") as f:
             for _ in range(num_steps):
                 end = self.pointer + self.batch_size
-                # h5py fancy indexing needs increasing indices. Sorting the selection is safe:
-                # X, y and sep are gathered with the SAME selection so rows stay aligned, and
-                # order within a batch carries no meaning.
-                sel = np.sort(self.order[self.pointer : end])
 
-                num_features = f["num_features"][sel].max()
-                x = torch.from_numpy(f["X"][sel, :, :num_features])
-                y = torch.from_numpy(f["y"][sel])
-                sep = f[self.sep_key][sel]
+                num_features = f["num_features"][self.pointer : end].max()
+                x = torch.from_numpy(f["X"][self.pointer : end, :, :num_features])
+                y = torch.from_numpy(f["y"][self.pointer : end])
+                sep = f[self.sep_key][self.pointer : end]
 
                 self.pointer += self.batch_size
-                if self.pointer >= len(self.order):
+                if self.pointer >= self.datasets:
                     print("pointer >= datasets, will reset!")
                     self.pointer = 0
                 valid = not (torch.isnan(x).any().item() or torch.isnan(y).any().item())
@@ -930,7 +683,7 @@ for name, p in model.named_parameters():
     else:
         adam_params.append(p)
 
-optimizer_muon = MuonFused(muon_params, lr=c.muon_lr_scale*c.lr, momentum=c.muon_momentum, weight_decay=c.muon_wd)
+optimizer_muon = Muon(muon_params, lr=c.muon_lr_scale*c.lr, momentum=c.muon_momentum, weight_decay=c.muon_wd)
 optimizer_adam = schedulefree.AdamWScheduleFree(adam_params, lr=c.lr, weight_decay=c.adam_wd, warmup_steps=1000)
 
 optimizers = [optimizer_muon, optimizer_adam]
@@ -938,9 +691,6 @@ optimizers = [optimizer_muon, optimizer_adam]
 criterion = nn.CrossEntropyLoss()
 
 lawa_queue = collections.deque(maxlen=c.lawa_k)
-
-# grad clip + Muon step replayed as one CUDA graph (captured after 3 eager steps)
-step_graph = StepGraph(model.parameters(), optimizer_muon, c.grad_clip)
 
 t_t = 0.0
 prev_muon = None
@@ -980,8 +730,9 @@ for epoch in range(1, c.epochs + 1):
 
         total_loss += loss.detach()
 
-        gnorms.append(step_graph())
-        optimizer_adam.step()
+        gnorms.append(torch.nn.utils.clip_grad_norm_(model.parameters(), c.grad_clip))
+        for opt in optimizers:
+            opt.step()
 
     torch.cuda.synchronize()
     e_t = time.perf_counter() - t0
@@ -1133,3 +884,129 @@ end_ts = datetime.now()
 print0(f"end timestamp: {end_ts.strftime('%Y-%m-%d %H:%M:%S')}", console=True)
 print0(f"script runtime: {(end_ts - start_ts).total_seconds() / 60:.2f} mins")
 print0(f"experiment done: {e_id}", console=True)
+
+====================================================================================================
+start timestamp: 2026-09-28 21:03:58
+host: 11b1b09bc01c
+platform: Linux-6.8.0-52-generic-x86_64-with-glibc2.39
+python: 3.13.8 (main, Oct  8 2025, 08:53:25) [GCC 13.3.0]
+torch: 2.9.1+cu128
+cuda: 12.8
+Mon Sep 28 21:03:58 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 570.195.03             Driver Version: 570.195.03     CUDA Version: 12.8     |
+|-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA L40S                    On  |   00000000:84:00.0 Off |                    0 |
+| N/A   47C    P0             68W /  350W |       3MiB /  46068MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+                                                                                         
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+
+====================================================================================================
+e:1/4000 μ_l:1.47 g:8.21 g_max:14.15 clip:1.00 d_mu:nan d_ad:nan d0_mu:1.48 d0_ad:0.07 e_t:7.15s μ_e_t:7.15s t_t:7.15s avg_roc_auc:0.4606817645365412
+e:2/4000 μ_l:1.45 g:6.78 g_max:14.56 clip:0.97 d_mu:1.72 d_ad:0.10 d0_mu:2.87 d0_ad:0.12 e_t:0.92s μ_e_t:4.04s t_t:8.07s avg_roc_auc:0.47882298575469795
+e:3/4000 μ_l:1.26 g:7.44 g_max:13.82 clip:0.97 d_mu:2.04 d_ad:0.15 d0_mu:4.28 d0_ad:0.22 e_t:0.94s μ_e_t:3.00s t_t:9.01s avg_roc_auc:0.5189234202087863
+e:4/4000 μ_l:1.02 g:5.36 g_max:14.03 clip:0.84 d_mu:2.22 d_ad:0.13 d0_mu:5.62 d0_ad:0.31 e_t:0.93s μ_e_t:2.49s t_t:9.94s avg_roc_auc:0.48342953245747355
+e:5/4000 μ_l:1.08 g:4.68 g_max:10.20 clip:0.91 d_mu:2.24 d_ad:0.16 d0_mu:6.70 d0_ad:0.38 e_t:0.78s μ_e_t:2.14s t_t:10.72s avg_roc_auc:0.4971179744096772
+e:6/4000 μ_l:0.97 g:5.47 g_max:13.09 clip:0.90 d_mu:2.12 d_ad:0.13 d0_mu:7.68 d0_ad:0.45 e_t:0.85s μ_e_t:1.93s t_t:11.57s avg_roc_auc:0.5394501445284012
+e:7/4000 μ_l:1.14 g:4.69 g_max:17.77 clip:0.88 d_mu:2.18 d_ad:0.18 d0_mu:8.55 d0_ad:0.53 e_t:0.84s μ_e_t:1.77s t_t:12.41s avg_roc_auc:0.5705487409769504
+e:8/4000 μ_l:1.04 g:4.68 g_max:24.65 clip:0.78 d_mu:2.46 d_ad:0.19 d0_mu:9.44 d0_ad:0.62 e_t:0.81s μ_e_t:1.65s t_t:13.22s avg_roc_auc:0.5895176897303144
+e:9/4000 μ_l:0.91 g:4.03 g_max:9.59 clip:0.84 d_mu:2.35 d_ad:0.15 d0_mu:10.25 d0_ad:0.70 e_t:1.00s μ_e_t:1.58s t_t:14.22s avg_roc_auc:0.602361216922124
+e:10/4000 μ_l:1.04 g:3.20 g_max:6.32 clip:0.78 d_mu:2.46 d_ad:0.17 d0_mu:11.04 d0_ad:0.77 e_t:0.92s μ_e_t:1.51s t_t:15.14s avg_roc_auc:0.6139707248616926
+e:11/4000 μ_l:0.97 g:3.19 g_max:8.01 clip:0.69 d_mu:2.40 d_ad:0.18 d0_mu:11.79 d0_ad:0.85 e_t:0.82s μ_e_t:1.45s t_t:15.95s avg_roc_auc:0.6267855671846352
+e:12/4000 μ_l:1.09 g:3.65 g_max:8.27 clip:0.88 d_mu:2.30 d_ad:0.22 d0_mu:12.42 d0_ad:0.93 e_t:0.79s μ_e_t:1.40s t_t:16.74s avg_roc_auc:0.6492154345659478
+e:13/4000 μ_l:0.98 g:3.16 g_max:6.31 clip:0.84 d_mu:2.48 d_ad:0.22 d0_mu:13.07 d0_ad:1.02 e_t:1.05s μ_e_t:1.37s t_t:17.79s avg_roc_auc:0.6794306336462825
+e:14/4000 μ_l:0.97 g:2.47 g_max:6.28 clip:0.62 d_mu:2.56 d_ad:0.26 d0_mu:13.72 d0_ad:1.12 e_t:1.01s μ_e_t:1.34s t_t:18.80s avg_roc_auc:0.7003426785194576
+e:15/4000 μ_l:0.88 g:2.42 g_max:5.13 clip:0.59 d_mu:2.62 d_ad:0.27 d0_mu:14.43 d0_ad:1.23 e_t:0.83s μ_e_t:1.31s t_t:19.63s avg_roc_auc:0.7235254900308689
+e:16/4000 μ_l:0.90 g:3.34 g_max:8.23 clip:0.72 d_mu:2.46 d_ad:0.24 d0_mu:15.13 d0_ad:1.35 e_t:1.11s μ_e_t:1.30s t_t:20.74s avg_roc_auc:0.7419457608238799
+e:17/4000 μ_l:1.01 g:3.89 g_max:8.96 clip:0.81 d_mu:2.57 d_ad:0.25 d0_mu:15.71 d0_ad:1.46 e_t:0.96s μ_e_t:1.28s t_t:21.71s avg_roc_auc:0.7543688900683524
+e:18/4000 μ_l:0.83 g:2.47 g_max:5.21 clip:0.53 d_mu:2.56 d_ad:0.23 d0_mu:16.31 d0_ad:1.57 e_t:0.88s μ_e_t:1.25s t_t:22.59s avg_roc_auc:0.7628364145161611
+e:19/4000 μ_l:0.98 g:2.64 g_max:6.77 clip:0.66 d_mu:2.54 d_ad:0.23 d0_mu:16.88 d0_ad:1.68 e_t:1.17s μ_e_t:1.25s t_t:23.75s avg_roc_auc:0.7693724728533964
+e:20/4000 μ_l:0.85 g:2.75 g_max:7.43 clip:0.66 d_mu:2.58 d_ad:0.23 d0_mu:17.44 d0_ad:1.79 e_t:0.91s μ_e_t:1.23s t_t:24.66s avg_roc_auc:0.7741144773134652
+e:21/4000 μ_l:0.92 g:2.34 g_max:5.28 clip:0.59 d_mu:2.44 d_ad:0.23 d0_mu:17.94 d0_ad:1.90 e_t:0.85s μ_e_t:1.22s t_t:25.52s avg_roc_auc:0.7780938795102381
+e:22/4000 μ_l:0.91 g:2.42 g_max:6.55 clip:0.47 d_mu:2.88 d_ad:0.24 d0_mu:18.47 d0_ad:2.00 e_t:0.82s μ_e_t:1.20s t_t:26.33s avg_roc_auc:0.7816627901338562
+e:23/4000 μ_l:0.82 g:2.32 g_max:6.10 clip:0.53 d_mu:2.59 d_ad:0.25 d0_mu:19.02 d0_ad:2.11 e_t:0.77s μ_e_t:1.18s t_t:27.10s avg_roc_auc:0.7840663641002296
+e:24/4000 μ_l:0.95 g:2.32 g_max:9.26 clip:0.56 d_mu:2.69 d_ad:0.30 d0_mu:19.55 d0_ad:2.21 e_t:0.75s μ_e_t:1.16s t_t:27.85s avg_roc_auc:0.785660736733332
+e:25/4000 μ_l:0.96 g:2.24 g_max:6.21 clip:0.59 d_mu:2.55 d_ad:0.32 d0_mu:20.06 d0_ad:2.33 e_t:0.81s μ_e_t:1.15s t_t:28.66s avg_roc_auc:0.7872564705810037
+e:26/4000 μ_l:0.93 g:2.29 g_max:6.57 clip:0.53 d_mu:2.73 d_ad:0.29 d0_mu:20.56 d0_ad:2.45 e_t:0.83s μ_e_t:1.13s t_t:29.49s avg_roc_auc:0.7883702742102734
+e:27/4000 μ_l:0.89 g:2.28 g_max:8.06 clip:0.50 d_mu:2.79 d_ad:0.29 d0_mu:21.08 d0_ad:2.58 e_t:0.93s μ_e_t:1.13s t_t:30.42s avg_roc_auc:0.788819955734906
+e:28/4000 μ_l:0.89 g:2.11 g_max:5.34 clip:0.50 d_mu:2.62 d_ad:0.29 d0_mu:21.62 d0_ad:2.70 e_t:1.00s μ_e_t:1.12s t_t:31.42s avg_roc_auc:0.78905872283144
+e:29/4000 μ_l:0.69 g:1.91 g_max:4.83 clip:0.41 d_mu:2.62 d_ad:0.28 d0_mu:22.10 d0_ad:2.82 e_t:1.15s μ_e_t:1.12s t_t:32.57s avg_roc_auc:0.7903540705843701
+e:30/4000 μ_l:0.96 g:1.99 g_max:9.40 clip:0.41 d_mu:2.51 d_ad:0.28 d0_mu:22.56 d0_ad:2.94 e_t:0.92s μ_e_t:1.12s t_t:33.49s avg_roc_auc:0.7922151147962828
+e:31/4000 μ_l:0.93 g:2.19 g_max:5.43 clip:0.50 d_mu:2.77 d_ad:0.29 d0_mu:23.01 d0_ad:3.06 e_t:0.83s μ_e_t:1.11s t_t:34.33s avg_roc_auc:0.793255768875286
+e:32/4000 μ_l:0.91 g:2.03 g_max:4.55 clip:0.38 d_mu:2.66 d_ad:0.28 d0_mu:23.49 d0_ad:3.18 e_t:0.90s μ_e_t:1.10s t_t:35.22s avg_roc_auc:0.7949148098286297
+e:33/4000 μ_l:0.79 g:2.03 g_max:8.43 clip:0.44 d_mu:2.71 d_ad:0.27 d0_mu:23.93 d0_ad:3.29 e_t:0.88s μ_e_t:1.09s t_t:36.10s avg_roc_auc:0.7954351028270623
+e:34/4000 μ_l:0.89 g:1.90 g_max:5.13 clip:0.38 d_mu:2.66 d_ad:0.27 d0_mu:24.33 d0_ad:3.40 e_t:1.02s μ_e_t:1.09s t_t:37.12s avg_roc_auc:0.7968628445526866
+e:35/4000 μ_l:0.91 g:1.73 g_max:3.54 clip:0.34 d_mu:2.81 d_ad:0.28 d0_mu:24.79 d0_ad:3.51 e_t:0.77s μ_e_t:1.08s t_t:37.89s avg_roc_auc:0.7980549166986749
+e:36/4000 μ_l:0.64 g:1.69 g_max:3.87 clip:0.28 d_mu:2.83 d_ad:0.25 d0_mu:25.25 d0_ad:3.60 e_t:0.81s μ_e_t:1.08s t_t:38.70s avg_roc_auc:0.799186355698058
+e:37/4000 μ_l:0.72 g:1.76 g_max:7.32 clip:0.28 d_mu:2.86 d_ad:0.25 d0_mu:25.75 d0_ad:3.70 e_t:0.96s μ_e_t:1.07s t_t:39.66s avg_roc_auc:0.7998784693476743
+e:38/4000 μ_l:0.91 g:1.95 g_max:4.66 clip:0.44 d_mu:2.76 d_ad:0.26 d0_mu:26.09 d0_ad:3.79 e_t:0.98s μ_e_t:1.07s t_t:40.64s avg_roc_auc:0.8003835950025654
+e:39/4000 μ_l:0.90 g:2.34 g_max:6.59 clip:0.38 d_mu:2.71 d_ad:0.30 d0_mu:26.47 d0_ad:3.87 e_t:0.89s μ_e_t:1.06s t_t:41.53s avg_roc_auc:0.8007340770375083
+e:40/4000 μ_l:0.83 g:1.64 g_max:3.49 clip:0.28 d_mu:2.85 d_ad:0.30 d0_mu:26.83 d0_ad:3.95 e_t:0.89s μ_e_t:1.06s t_t:42.42s avg_roc_auc:0.8005512479153559
+e:41/4000 μ_l:0.86 g:1.50 g_max:7.11 clip:0.19 d_mu:2.76 d_ad:0.24 d0_mu:27.21 d0_ad:4.03 e_t:0.86s μ_e_t:1.06s t_t:43.28s avg_roc_auc:0.8008638259699694
+e:42/4000 μ_l:0.82 g:1.60 g_max:3.44 clip:0.31 d_mu:2.77 d_ad:0.26 d0_mu:27.63 d0_ad:4.11 e_t:0.79s μ_e_t:1.05s t_t:44.07s avg_roc_auc:0.8012474620904912
+e:43/4000 μ_l:0.84 g:1.67 g_max:3.50 clip:0.34 d_mu:2.79 d_ad:0.21 d0_mu:28.03 d0_ad:4.18 e_t:0.86s μ_e_t:1.04s t_t:44.93s avg_roc_auc:0.8019300605639154
+e:44/4000 μ_l:0.79 g:1.73 g_max:4.55 clip:0.34 d_mu:2.87 d_ad:0.21 d0_mu:28.41 d0_ad:4.26 e_t:0.77s μ_e_t:1.04s t_t:45.70s avg_roc_auc:0.802112521299485
+e:45/4000 μ_l:0.84 g:1.77 g_max:5.60 clip:0.25 d_mu:2.88 d_ad:0.25 d0_mu:28.75 d0_ad:4.33 e_t:0.80s μ_e_t:1.03s t_t:46.51s avg_roc_auc:0.8028124977629225
+e:46/4000 μ_l:0.83 g:1.71 g_max:3.76 clip:0.31 d_mu:2.59 d_ad:0.23 d0_mu:29.09 d0_ad:4.40 e_t:0.90s μ_e_t:1.03s t_t:47.40s avg_roc_auc:0.803281381786964
+e:47/4000 μ_l:0.97 g:1.49 g_max:3.39 clip:0.19 d_mu:2.92 d_ad:0.26 d0_mu:29.49 d0_ad:4.47 e_t:0.84s μ_e_t:1.03s t_t:48.25s avg_roc_auc:0.8034945360333753
+e:48/4000 μ_l:0.85 g:1.63 g_max:5.04 clip:0.31 d_mu:2.89 d_ad:0.24 d0_mu:29.87 d0_ad:4.55 e_t:0.73s μ_e_t:1.02s t_t:48.98s avg_roc_auc:0.8039703562025013
+e:49/4000 μ_l:0.92 g:1.73 g_max:4.15 clip:0.31 d_mu:2.90 d_ad:0.24 d0_mu:30.26 d0_ad:4.63 e_t:0.84s μ_e_t:1.02s t_t:49.82s avg_roc_auc:0.8047243148056342
+e:50/4000 μ_l:0.87 g:1.46 g_max:2.91 clip:0.22 d_mu:2.97 d_ad:0.23 d0_mu:30.65 d0_ad:4.69 e_t:0.78s μ_e_t:1.01s t_t:50.61s avg_roc_auc:0.8055277396579807
+e:51/4000 μ_l:0.79 g:1.52 g_max:8.54 clip:0.16 d_mu:3.00 d_ad:0.22 d0_mu:31.00 d0_ad:4.76 e_t:0.79s μ_e_t:1.01s t_t:51.40s avg_roc_auc:0.805671378262775
+e:52/4000 μ_l:0.80 g:1.64 g_max:5.55 clip:0.28 d_mu:2.86 d_ad:0.22 d0_mu:31.37 d0_ad:4.83 e_t:0.84s μ_e_t:1.00s t_t:52.24s avg_roc_auc:0.8059927162024575
+e:53/4000 μ_l:0.67 g:1.45 g_max:3.40 clip:0.22 d_mu:2.76 d_ad:0.24 d0_mu:31.72 d0_ad:4.91 e_t:0.91s μ_e_t:1.00s t_t:53.14s avg_roc_auc:0.8063134317852306
+e:54/4000 μ_l:0.69 g:1.44 g_max:5.44 clip:0.12 d_mu:2.91 d_ad:0.20 d0_mu:32.06 d0_ad:4.97 e_t:0.90s μ_e_t:1.00s t_t:54.04s avg_roc_auc:0.8068669601442612
+====================================================================================================
+datasets seen: 3456
+record time in mins: 0.90
+====================================================================================================
+config:
+  type: classification
+  experiments_dir: workdir/experiments
+  classification_dump: workdir/dumps/dump-d256000b1r1000c20-8.h5
+  seed: 11
+  batch_size: 2
+  lr: 0.001
+  steps: 32
+  epochs: 4000
+  a: 4
+  e: 256
+  h: 768
+  l: 5
+  o: 8
+  residual_decay: 0.95
+  thinking_rows: 24
+  feature_group_size: 5
+  adam_wd: 0.01
+  muon_wd: 0.1
+  muon_lr_scale: 0.1
+  muon_momentum: 0.96
+  grad_clip: 2.0
+  lawa_k: 10
+  lawa_freq: 1
+  eval_folds: 5
+  eval_subsample_samples: 1000
+  eval_subsample_features: 100
+  max_train_mins: 2
+  jackpot: 0.8068462330697953
+====================================================================================================
+params: 4,160,520 (trainable: 4,160,520)
+====================================================================================================
+peak memory allocated: 2760 MiB
+peak memory reserved: 4566 MiB
+====================================================================================================
+end timestamp: 2026-09-28 21:14:22
+script runtime: 10.39 mins
+experiment done: 260928-210358-ede78ba4-l40sv2-260928-184259-11b1b09bc01c-base-r7
