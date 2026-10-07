@@ -166,4 +166,14 @@ quoting [@karpathy](https://x.com/karpathy/status/2030371219518931079):
 
 ## 11 - 0.76 minutes - Feature width sorted batching
 
-not posted yet.
+[07/10/26](https://x.com/boratwits/status/2107816065136767260)
+
+New NanoTabPFN speedrun record: Beating RF in 0.76 minutes
+
+Previous record: 0.79 minutes
+Changelog:
+- Sort datasets by increasing feature width within each epoch
+
+This record is by @ShounakBanerj15
+
+![](https://pbs.twimg.com/media/HUB3WxKXAAA6aMu.png?name=orig)
