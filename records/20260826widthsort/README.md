@@ -1,5 +1,7 @@
 # widthsort
 
+![before and after](261007-before-after.png)
+
 feature width sorted batching by [@shounakb1](https://github.com/shounakb1) ([#20](https://github.com/borawhocodess/modded-nanotabpfn/pull/20)), the model and optimizer are unchanged, only the order of the datasets within an epoch.
 
 every batch is sliced to the widest dataset in it, and feature width is uncorrelated with position in the prior dump, so at batch size 2 a narrow dataset is routinely padded to a wide one. his numbers: mean processed width 14.04 against a true mean of 11.08 over the 3648 datasets of a record run.
