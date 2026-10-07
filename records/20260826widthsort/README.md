@@ -6,7 +6,7 @@ every batch is sliced to the widest dataset in it, and feature width is uncorrel
 
 epochs get faster (0.84s to 0.72s), though it needs more of them to reach the target (57 to 64).
 
-only the median run's log is included at the top level, all 31 runs are in `logs/`.
+only the median run's log is included here.
 
 ```
 mean                         0.75m    63     0.72s      4020      8.26m
