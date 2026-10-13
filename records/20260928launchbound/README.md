@@ -4,9 +4,9 @@ launch-bound speedup by [@XingyuQu](https://github.com/XingyuQu) ([#22](https://
 
 on the L40S the step is limited by kernel launch overhead and not by gpu compute: about 500 small kernels per step at roughly 45 µs of host time each (his numbers). every change below cuts launches or removes redundant work.
 
-his paired protocol is in the same pr: 23 paired rounds against record 10 on two runpod l40s hosts, -32.7% and -26.0% median, epochs-to-target unchanged. he estimated 0.53-0.58 min on our node, our re-timing lands at 0.46.
+his paired protocol is in the same pr, he estimated 0.53-0.58 min on our node, our re-timing lands at 0.46.
 
-the feature width sorting of record 11 is taken out again: on top of this record it needed more epochs without making them faster (0.50m with it, 0.46m without, 31 runs each).
+the feature width sorting of record 11 is taken out, on top of this record it does not help: epochs barely get faster and it needs more of them.
 
 only the median run's log is included at the top level, all 31 runs are in `logs/`.
 
@@ -54,7 +54,7 @@ note: all sub-minute timings here assume a warm `torch.compile` cache
 
 ## Changes
 
-Feature attention: the attention across the columns of a row uses a custom Triton kernel. the sequence is at most 21 tokens (20 features and the target), one program per (row, head) does the forward pass and another the backward pass. tables with more than 32 columns (evaluation) fall back to SDPA.
+Feature attention: a custom Triton kernel replaces SDPA for the attention across columns, wide evaluation tables fall back to SDPA.
 
 ```python
 # before
@@ -63,7 +63,7 @@ x = F.scaled_dot_product_attention(q, k, v)
 x = feat_attn(q, k, v)
 ```
 
-Precision: the residual stream stays in bf16 inside the transformer, before the thinking rows concat promoted it to fp32.
+Precision: the residual stream stays in bf16 inside the transformer.
 
 ```python
 src = src.to(torch.bfloat16)
@@ -77,7 +77,7 @@ torch.fx.experimental._config.backed_size_oblivious = True
 LAYER_OPTS = {"max_autotune": True, "combo_kernels": True}
 ```
 
-Optimizer: Muon does the same update, but each group of equally shaped matrices is one compiled graph (`MuonFused`), and gradient clipping plus the Muon step are recorded once as a CUDA graph and replayed every step (`StepGraph`). Adam stays eager.
+Optimizer: Muon does the same update, but each group of equally shaped matrices is one compiled graph (`MuonFused`). gradient clip and the Muon update are recorded once as a CUDA graph after 3 normal steps and replayed every step (`StepGraph`). Adam stays eager.
 
 ```python
 # before
@@ -94,11 +94,6 @@ optimizer_adam.step()
 ran multiple trials per knob in one direction:
 - removing the change from the launchbound record
 
-Record:
-- launchbound stats: mean: 28.86s (0.48m) std: 4.46s median: 27.58s (0.46m)
-
-Removing each change from the launchbound record:
-
 | knob | launchbound - knob | mean | std | median |
 | --- | --- | --- | --- | --- |
 | `attention` | `+42%` | 40.41s (0.67m) | 6.92s | 39.08s (0.65m) |
@@ -107,12 +102,11 @@ Removing each change from the launchbound record:
 | `muon`      | `+1%`  | 28.75s (0.48m) | 2.55s | 27.85s (0.46m) |
 | `graph`     | `-1%`  | 27.95s (0.47m) | 1.62s | 27.41s (0.46m) |
 
-percentages compare medians, rounded to whole numbers. 17 runs per knob, 31 for the record.
+percentages compare medians, rounded to whole numbers. 17 runs per knob, 31 for the record (median 27.58s).
 
-`muon` (`MuonFused`) and `graph` (`StepGraph`) show no effect on our nodes when removed one at a time. his own ablation in the pr agrees on `muon` and has a gain for `graph` that depends on the host cpu.
+`attention` and `bf16` make the epochs faster, `compile` mostly shortens the first epoch (2.83s with it, 5.04s without). `muon` and `graph` show no effect on our nodes when removed one at a time, his ablation in the pr agrees on `muon` and has a host-dependent gain for `graph`.
 
 ## Comparison
 
-31 runs each of record 10 (pr19), record 11 (pr19+pr20), this one (pr22) and this one with the feature width sorting kept (pr20+pr22), bars show 95% bootstrap confidence intervals. these are the first re-timing runs from 30/09, the table above is from a second set on 07/10.
 
 ![pr19, pr19+pr20, pr22 and pr20+pr22, 31 runs each](https://github.com/user-attachments/assets/7f346f8c-d77d-40bf-b980-1b025a15183c)
