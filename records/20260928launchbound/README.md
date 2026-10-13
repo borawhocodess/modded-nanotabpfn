@@ -1,56 +1,56 @@
 # launchbound
 
-launch-bound speedup by [@XingyuQu](https://github.com/XingyuQu) ([#22](https://github.com/borawhocodess/modded-nanotabpfn/pull/22)), the training algorithm is unchanged, only how the training step is executed. previous record 0.76m, this is -39% on our node.
+launch-bound speedup by [@XingyuQu](https://github.com/XingyuQu) ([#22](https://github.com/borawhocodess/modded-nanotabpfn/pull/22)) on top of record 10, the training algorithm is unchanged, only how the training step is executed. previous record 0.76m, this is -39% on our node.
 
-on the L40S the step is limited by kernel launch overhead and not by gpu compute: about 500 small kernels per step at roughly 45 µs of host time each (his numbers). every change below cuts launches or removes redundant work.
+on the L40S the step is limited by kernel launch overhead and not by gpu compute: about 500 small kernels per step at roughly 45 µs of host time each (numbers from the pr). every change below cuts launches or removes redundant work.
 
-his paired protocol is in the same pr, he estimated 0.53-0.58 min on our node, our re-timing lands at 0.46.
+the paired protocol is in the same pr, it estimated 0.53-0.58 min on our node, our re-timing lands at 0.46.
 
 the feature width sorting of record 11 is taken out, on top of this record it does not help: epochs barely get faster and it needs more of them.
 
 only the median run's log is included at the top level, all 31 runs are in `logs/`.
 
 ```
-mean                         0.48m    59     0.49s      3788      7.43m
-std                          0.07m    10     0.01s      617       1.33m
-median                       0.46m    56     0.49s      3584      7.11m
----------------------------  -------  -----  ---------  --------  -------  ----------------------
+mean                         0.47m    58     0.49s      3714      7.15m
+std                          0.03m    4      0.01s      276       0.52m
+median                       0.46m    56     0.49s      3584      6.99m
+---------------------------  -------  -----  ---------  --------  -------  -------------
 ##  #   date      hostname   in mins  epoch  μ epoch t  datasets  runtime  id-name
---  --  --------  ---------  -------  -----  ---------  --------  -------  ----------------------
-1   3   26-10-07  dlc2gpu37  0.44m    54     0.48s      3456      6.52m    f373f082-pr22minuspr20
-2   5   26-10-07  dlc2gpu37  0.44m    55     0.48s      3520      6.75m    3f93ec4b-pr22minuspr20
-3   1   26-10-07  dlc2gpu37  0.44m    55     0.48s      3520      6.76m    6b8b7746-pr22minuspr20
-4   8   26-10-07  dlc2gpu37  0.44m    55     0.49s      3520      6.65m    85ae4457-pr22minuspr20
-5   9   26-10-07  dlc2gpu37  0.45m    56     0.48s      3584      6.85m    0dcb6135-pr22minuspr20
-6   23  26-10-07  dlc2gpu11  0.45m    55     0.49s      3520      6.84m    649540a3-pr22minuspr20
-7   17  26-10-07  dlc2gpu11  0.45m    54     0.50s      3456      7.33m    53562b4f-pr22minuspr20
-8   12  26-10-07  dlc2gpu11  0.45m    55     0.49s      3520      6.74m    18ff1d05-pr22minuspr20
-9   14  26-10-07  dlc2gpu11  0.45m    56     0.48s      3584      6.86m    f5987d38-pr22minuspr20
-10  24  26-10-07  dlc2gpu11  0.46m    55     0.50s      3520      7.12m    201b14e1-pr22minuspr20
-11  29  26-10-07  dlc2gpu11  0.46m    57     0.48s      3648      6.94m    23214b1c-pr22minuspr20
-12  19  26-10-07  dlc2gpu11  0.46m    57     0.48s      3648      7.11m    bef7241f-pr22minuspr20
-13  25  26-10-07  dlc2gpu11  0.46m    56     0.49s      3584      7.02m    ca913528-pr22minuspr20
-14  30  26-10-07  dlc2gpu11  0.46m    56     0.49s      3584      7.03m    851a474a-pr22minuspr20
-15  28  26-10-07  dlc2gpu11  0.46m    55     0.50s      3520      7.11m    199e3a57-pr22minuspr20
-16  7   26-10-07  dlc2gpu37  0.46m    57     0.48s      3648      6.99m    1433cd61-pr22minuspr20
-17  26  26-10-07  dlc2gpu33  0.46m    55     0.50s      3520      7.51m    53a31123-pr22minuspr20
-18  15  26-10-07  dlc2gpu11  0.46m    56     0.50s      3584      6.99m    f960933d-pr22minuspr20
-19  20  26-10-07  dlc2gpu11  0.46m    55     0.51s      3520      7.15m    536ee893-pr22minuspr20
-20  27  26-10-07  dlc2gpu11  0.46m    57     0.49s      3648      6.96m    953ad497-pr22minuspr20
-21  11  26-10-07  dlc2gpu11  0.47m    57     0.49s      3648      7.10m    ec475637-pr22minuspr20
-22  16  26-10-07  dlc2gpu11  0.47m    56     0.51s      3584      7.24m    398e00af-pr22minuspr20
-23  22  26-10-07  dlc2gpu07  0.48m    59     0.48s      3776      7.21m    efd3fb1f-pr22minuspr20
-24  18  26-10-07  dlc2gpu11  0.48m    59     0.49s      3776      7.22m    61224b06-pr22minuspr20
-25  4   26-10-07  dlc2gpu37  0.48m    60     0.48s      3840      7.27m    b6124a02-pr22minuspr20
-26  2   26-10-07  dlc2gpu37  0.48m    60     0.48s      3840      7.32m    5dc0f50f-pr22minuspr20
-27  13  26-10-07  dlc2gpu11  0.48m    60     0.48s      3840      7.87m    b8e14fdd-pr22minuspr20
-28  21  26-10-07  dlc2gpu11  0.49m    60     0.49s      3840      7.36m    901d4a51-pr22minuspr20
-29  6   26-10-07  dlc2gpu37  0.51m    64     0.48s      4096      7.76m    02fe71b0-pr22minuspr20
-30  10  26-10-07  dlc2gpu11  0.72m    89     0.48s      5696      11.46m   ec7ac4e2-pr22minuspr20
-31  31  26-10-07  dlc2gpu33  0.79m    100    0.48s      6400      13.14m   f0b64c6c-pr22minuspr20
+--  --  --------  ---------  -------  -----  ---------  --------  -------  -------------
+1   6   26-09-30  dlc2gpu12  0.43m    54     0.48s      3456      6.58m    8fcf564d-pr22
+2   3   26-09-30  dlc2gpu12  0.44m    54     0.49s      3456      6.71m    5bc13613-pr22
+3   14  26-09-30  dlc2gpu12  0.44m    55     0.48s      3520      6.80m    06fd7942-pr22
+4   4   26-09-30  dlc2gpu12  0.45m    55     0.49s      3520      6.74m    d29e5f49-pr22
+5   20  26-09-30  dlc2gpu12  0.45m    55     0.49s      3520      6.78m    6e68bb4b-pr22
+6   18  26-09-30  dlc2gpu12  0.45m    55     0.49s      3520      6.81m    12872764-pr22
+7   12  26-09-30  dlc2gpu12  0.45m    55     0.49s      3520      6.77m    f6c9016c-pr22
+8   1   26-09-30  dlc2gpu04  0.45m    56     0.49s      3584      6.88m    41144530-pr22
+9   13  26-09-30  dlc2gpu12  0.46m    56     0.49s      3584      6.94m    1a1e624c-pr22
+10  25  26-09-30  dlc2gpu12  0.46m    56     0.49s      3584      6.82m    2736358c-pr22
+11  17  26-09-30  dlc2gpu12  0.46m    56     0.49s      3584      6.88m    37723255-pr22
+12  30  26-09-30  dlc2gpu30  0.46m    56     0.49s      3584      7.03m    821eb3e2-pr22
+13  11  26-09-30  dlc2gpu12  0.46m    56     0.49s      3584      6.89m    acae8a7e-pr22
+14  23  26-09-30  dlc2gpu12  0.46m    56     0.49s      3584      6.90m    4e2e594b-pr22
+15  9   26-09-30  dlc2gpu12  0.46m    56     0.49s      3584      7.01m    8be37ab5-pr22
+16  8   26-09-30  dlc2gpu07  0.46m    57     0.48s      3648      7.02m    caf9862e-pr22
+17  5   26-09-30  dlc2gpu12  0.46m    56     0.49s      3584      6.90m    6eb18d4c-pr22
+18  31  26-09-30  dlc2gpu12  0.46m    57     0.49s      3648      6.98m    0a2ee41c-pr22
+19  26  26-09-30  dlc2gpu12  0.47m    57     0.49s      3648      7.04m    a8d9235c-pr22
+20  2   26-09-30  dlc2gpu04  0.47m    57     0.49s      3648      7.01m    548bfa9d-pr22
+21  10  26-09-30  dlc2gpu12  0.47m    57     0.49s      3648      6.99m    1f774efa-pr22
+22  15  26-09-30  dlc2gpu12  0.47m    59     0.48s      3776      7.19m    0ac8ab86-pr22
+23  28  26-09-30  dlc2gpu30  0.47m    58     0.49s      3712      7.39m    9dc8c218-pr22
+24  21  26-09-30  dlc2gpu12  0.48m    59     0.49s      3776      7.23m    b714449b-pr22
+25  24  26-09-30  dlc2gpu12  0.48m    59     0.49s      3776      7.30m    2060df78-pr22
+26  19  26-09-30  dlc2gpu12  0.49m    60     0.49s      3840      7.31m    5bacfa35-pr22
+27  7   26-09-30  dlc2gpu07  0.49m    61     0.48s      3904      7.43m    51ec2876-pr22
+28  27  26-09-30  dlc2gpu12  0.49m    61     0.48s      3904      7.48m    c0c11aed-pr22
+29  22  26-09-30  dlc2gpu12  0.55m    69     0.48s      4416      8.50m    47d4709a-pr22
+30  29  26-09-30  dlc2gpu12  0.56m    70     0.48s      4480      8.56m    4219695e-pr22
+31  16  26-09-30  dlc2gpu12  0.56m    71     0.47s      4544      8.72m    1c97df6c-pr22
 ```
 
-note: all sub-minute timings here assume a warm `torch.compile` cache
+note: all sub-minute timings here assume a warm `torch.compile` cache.
 
 ## Changes
 
@@ -77,7 +77,7 @@ torch.fx.experimental._config.backed_size_oblivious = True
 LAYER_OPTS = {"max_autotune": True, "combo_kernels": True}
 ```
 
-Optimizer: Muon does the same update, but each group of equally shaped matrices is one compiled graph (`MuonFused`). gradient clip and the Muon update are recorded once as a CUDA graph after 3 normal steps and replayed every step (`StepGraph`). Adam stays eager.
+Optimizer: Muon does the same update, but each group of equally shaped matrices is one compiled graph (`MuonFused`). gradient clip and the Muon update are recorded once as a CUDA graph after 3 eager steps and replayed every step (`StepGraph`). Adam stays eager.
 
 ```python
 # before
@@ -102,9 +102,9 @@ ran multiple trials per knob in one direction:
 | `muon`      | `+1%`  | 28.75s (0.48m) | 2.55s | 27.85s (0.46m) |
 | `graph`     | `-1%`  | 27.95s (0.47m) | 1.62s | 27.41s (0.46m) |
 
-percentages compare medians, rounded to whole numbers. 17 runs per knob, 31 for the record (median 27.58s).
+percentages compare medians, rounded to whole numbers. 17 runs per knob on 07/10, against 31 runs of the record script from the same day (median 27.58s).
 
-`attention` and `bf16` make the epochs faster, `compile` mostly shortens the first epoch (2.83s with it, 5.04s without). `muon` and `graph` show no effect on our nodes when removed one at a time, his ablation in the pr agrees on `muon` and has a host-dependent gain for `graph`.
+`attention` and `bf16` make the epochs faster, `compile` mostly shortens the first epoch (2.83s with it, 5.04s without). `muon` and `graph` are within noise on our node when removed one at a time (+1%, -1%). the pr's ablation agrees on `muon` for epoch time and measures a gain for `graph` on both hosts. both stay in.
 
 ## Comparison
 

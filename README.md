@@ -77,7 +77,7 @@ Note: The 0.8068462330697953 target was selected to match the performance of Ran
 | 9 | 0.92 minutes | 06/05/26 | autoresearch HPO, Muon weight decay, mean feature pooling | [log](records/20260506autohuman/260506-163637-589ea1cf-autohuman-log.txt),[read](records/20260506autohuman/README.md),[PR](https://github.com/borawhocodess/modded-nanotabpfn/pull/18),[X](https://x.com/boratwits/status/2052199021775647173) | @borawhocodess |
 | 10 | 0.79 minutes | 15/08/26 | Shape-grouped Newton-Schulz, producer-thread dataloader, single datapoint SDPA | [log](records/20260815systems/260821-020755-da187cba-systems-log.txt),[read](records/20260815systems/README.md),[PR](https://github.com/borawhocodess/modded-nanotabpfn/pull/21),[X](https://x.com/boratwits/status/2102855207675978023) | @tjeong117 |
 | 11 | 0.76 minutes | 26/08/26 | Feature width sorted batching | [log](records/20260826widthsort/260923-231224-59cb2d39-pr20-log.txt),[read](records/20260826widthsort/README.md),[PR](https://github.com/borawhocodess/modded-nanotabpfn/pull/23),[X](https://x.com/boratwits/status/2107816065136767260) | @shounakb1 |
-| 12 | 0.46 minutes | 28/09/26 | Triton feature attention, bf16 residual stream, CUDA graph optimizer step | [log](records/20260928launchbound/261007-172712-1433cd61-pr22minuspr20-log.txt),[read](records/20260928launchbound/README.md) | @XingyuQu |
+| 12 | 0.46 minutes | 28/09/26 | Triton feature attention, bf16 residual stream, CUDA graph optimizer step | [log](records/20260928launchbound/260930-131726-caf9862e-pr22-log.txt),[read](records/20260928launchbound/README.md),[PR](https://github.com/borawhocodess/modded-nanotabpfn/pull/24),[X]() | @XingyuQu |
 
 
 ## Rules
