@@ -1,106 +1,118 @@
 # launchbound
 
-This record is a systems-level speedup of record #10 ([#21](https://github.com/borawhocodess/modded-nanotabpfn/pull/21)). The training algorithm, the data and the evaluation are unchanged; only the execution of the training step differs.
+launch-bound speedup by [@XingyuQu](https://github.com/XingyuQu) ([#22](https://github.com/borawhocodess/modded-nanotabpfn/pull/22)), the training algorithm is unchanged, only how the training step is executed. previous record 0.76m, this is -39% on our node.
 
-On the L40S, the training step of #10 is limited by kernel launch overhead rather than by GPU compute: each step issues about 500 small kernels, and each launch costs roughly 45 µs of host time. The changes below therefore either reduce the number of launches or remove redundant work.
+on the L40S the step is limited by kernel launch overhead and not by gpu compute: about 500 small kernels per step at roughly 45 µs of host time each (his numbers). every change below cuts launches or removes redundant work.
 
-## Results
+his paired protocol is in the same pr: 23 paired rounds against record 10 on two runpod l40s hosts, -32.7% and -26.0% median, epochs-to-target unchanged. he estimated 0.53-0.58 min on our node, our re-timing lands at 0.46.
 
-I compare against #10 (`ace9230`, unmodified) on the same machine with seed 11 and a warm `torch.compile` cache for both versions. The two versions alternate within each round, and every run is a full run with the standard evaluation. Measurements were taken on two Runpod L40S hosts with different CPUs, which I report separately.
+the feature width sorting of record 11 is taken out again: on top of this record it needed more epochs without making them faster (0.50m with it, 0.46m without, 31 runs each).
 
-| host | rounds | #10 median | this median | paired Δ | wins |
-| --- | --- | --- | --- | --- | --- |
-| A, EPYC 9374F | 8 | 0.865m | 0.574m | -32.7% | 8/8 |
-| B, EPYC 9354 | 15 | 0.915m | 0.676m | -26.0% | 15/15 |
-
-The number of epochs to reach the target is unchanged (median 59 vs. 56 on host A, 57 vs. 58 on host B), so the gain comes entirely from faster steps. The gain is larger on the host with the faster CPU, which is consistent with a host-bound step.
-
-Both hosts I used run #10 more slowly than the reference node (0.865m and 0.915m, compared with 0.79m). I therefore do not claim an absolute time. Applying the paired differences to 0.79m gives an estimate of 0.53-0.58m on the reference node, which a re-timing there would confirm.
-
-The table below lists every round. `first` indicates which version ran first in the round.
+only the median run's log is included at the top level, all 31 runs are in `logs/`.
 
 ```
-host A (EPYC 9374F, driver 580)                      host B (EPYC 9354, driver 570)
-round  first  #10    epoch  this   epoch  Δ          round  first  #10    epoch  this   epoch  Δ
-1      #10    0.90m  61     0.52m  55     -41.7%     1      #10    1.19m  77     0.79m  61     -33.4%
-2      this   0.83m  59     0.62m  63     -25.8%     2      this   0.90m  56     0.64m  54     -29.5%
-3      #10    0.91m  64     0.52m  56     -43.1%     3      #10    0.95m  60     0.70m  60     -26.2%
-4      this   0.81m  56     0.55m  60     -32.0%     4      this   0.90m  57     0.80m  59     -11.6%
-5      #10    0.83m  57     0.59m  56     -28.7%     5      #10    0.93m  56     0.67m  56     -27.8%
-6      this   0.87m  58     0.59m  56     -31.8%     6      this   0.91m  56     0.66m  55     -27.8%
-7      #10    0.87m  59     0.58m  59     -33.5%     7      #10    0.90m  54     0.68m  55     -24.0%
-8      this   0.86m  60     0.57m  56     -34.2%     8      #10    0.93m  59     0.73m  60     -21.2%
-                                                     9      this   0.90m  57     0.70m  56     -22.3%
-median        0.865m 59     0.574m 56     -32.7%     10     #10    0.92m  58     0.69m  58     -25.2%
-                                                     11     this   0.87m  56     0.67m  59     -23.9%
-                                                     12     #10    1.10m  71     0.67m  59     -38.8%
-                                                     13     this   0.90m  57     0.67m  57     -26.0%
-                                                     14     #10    0.93m  59     0.68m  59     -27.7%
-                                                     15     this   0.88m  55     0.67m  57     -23.3%
-
-                                                     median        0.915m 57     0.676m 58     -26.0%
+mean                         0.48m    59     0.49s      3788      7.43m
+std                          0.07m    10     0.01s      617       1.33m
+median                       0.46m    56     0.49s      3584      7.11m
+---------------------------  -------  -----  ---------  --------  -------  ----------------------
+##  #   date      hostname   in mins  epoch  μ epoch t  datasets  runtime  id-name
+--  --  --------  ---------  -------  -----  ---------  --------  -------  ----------------------
+1   3   26-10-07  dlc2gpu37  0.44m    54     0.48s      3456      6.52m    f373f082-pr22minuspr20
+2   5   26-10-07  dlc2gpu37  0.44m    55     0.48s      3520      6.75m    3f93ec4b-pr22minuspr20
+3   1   26-10-07  dlc2gpu37  0.44m    55     0.48s      3520      6.76m    6b8b7746-pr22minuspr20
+4   8   26-10-07  dlc2gpu37  0.44m    55     0.49s      3520      6.65m    85ae4457-pr22minuspr20
+5   9   26-10-07  dlc2gpu37  0.45m    56     0.48s      3584      6.85m    0dcb6135-pr22minuspr20
+6   23  26-10-07  dlc2gpu11  0.45m    55     0.49s      3520      6.84m    649540a3-pr22minuspr20
+7   17  26-10-07  dlc2gpu11  0.45m    54     0.50s      3456      7.33m    53562b4f-pr22minuspr20
+8   12  26-10-07  dlc2gpu11  0.45m    55     0.49s      3520      6.74m    18ff1d05-pr22minuspr20
+9   14  26-10-07  dlc2gpu11  0.45m    56     0.48s      3584      6.86m    f5987d38-pr22minuspr20
+10  24  26-10-07  dlc2gpu11  0.46m    55     0.50s      3520      7.12m    201b14e1-pr22minuspr20
+11  29  26-10-07  dlc2gpu11  0.46m    57     0.48s      3648      6.94m    23214b1c-pr22minuspr20
+12  19  26-10-07  dlc2gpu11  0.46m    57     0.48s      3648      7.11m    bef7241f-pr22minuspr20
+13  25  26-10-07  dlc2gpu11  0.46m    56     0.49s      3584      7.02m    ca913528-pr22minuspr20
+14  30  26-10-07  dlc2gpu11  0.46m    56     0.49s      3584      7.03m    851a474a-pr22minuspr20
+15  28  26-10-07  dlc2gpu11  0.46m    55     0.50s      3520      7.11m    199e3a57-pr22minuspr20
+16  7   26-10-07  dlc2gpu37  0.46m    57     0.48s      3648      6.99m    1433cd61-pr22minuspr20
+17  26  26-10-07  dlc2gpu33  0.46m    55     0.50s      3520      7.51m    53a31123-pr22minuspr20
+18  15  26-10-07  dlc2gpu11  0.46m    56     0.50s      3584      6.99m    f960933d-pr22minuspr20
+19  20  26-10-07  dlc2gpu11  0.46m    55     0.51s      3520      7.15m    536ee893-pr22minuspr20
+20  27  26-10-07  dlc2gpu11  0.46m    57     0.49s      3648      6.96m    953ad497-pr22minuspr20
+21  11  26-10-07  dlc2gpu11  0.47m    57     0.49s      3648      7.10m    ec475637-pr22minuspr20
+22  16  26-10-07  dlc2gpu11  0.47m    56     0.51s      3584      7.24m    398e00af-pr22minuspr20
+23  22  26-10-07  dlc2gpu07  0.48m    59     0.48s      3776      7.21m    efd3fb1f-pr22minuspr20
+24  18  26-10-07  dlc2gpu11  0.48m    59     0.49s      3776      7.22m    61224b06-pr22minuspr20
+25  4   26-10-07  dlc2gpu37  0.48m    60     0.48s      3840      7.27m    b6124a02-pr22minuspr20
+26  2   26-10-07  dlc2gpu37  0.48m    60     0.48s      3840      7.32m    5dc0f50f-pr22minuspr20
+27  13  26-10-07  dlc2gpu11  0.48m    60     0.48s      3840      7.87m    b8e14fdd-pr22minuspr20
+28  21  26-10-07  dlc2gpu11  0.49m    60     0.49s      3840      7.36m    901d4a51-pr22minuspr20
+29  6   26-10-07  dlc2gpu37  0.51m    64     0.48s      4096      7.76m    02fe71b0-pr22minuspr20
+30  10  26-10-07  dlc2gpu11  0.72m    89     0.48s      5696      11.46m   ec7ac4e2-pr22minuspr20
+31  31  26-10-07  dlc2gpu33  0.79m    100    0.48s      6400      13.14m   f0b64c6c-pr22minuspr20
 ```
 
-Host B was noisier than host A. In two rounds #10 needed 71 and 77 epochs, and in round 4 every epoch of this version was about 15% slower than usual. The rounds on host B were run as two consecutive batches (rounds 1-7 and 8-15), so the alternation restarts at round 8.
-
-All 46 runs reached the target. The log at the top level of this folder is the host A run closest to the median (round 8); all logs are in `logs/hostA/` and `logs/hostB/`.
-
-As with the other sub-minute records, these timings assume a warm compile cache. A cold cache adds 12-25 s to the first epoch.
+note: all sub-minute timings here assume a warm `torch.compile` cache
 
 ## Changes
 
-**Feature attention.** The attention across the columns of each row now uses a custom Triton kernel. This sequence has at most 21 tokens (20 features and the target), but FlashAttention pads it to tiles of 128 and launches two additional helper kernels. In the new kernel, one program per (row, head) computes the forward pass and another computes the backward pass. The kernel is registered as a `triton_op` with autograd, so it is compiled together with the rest of the layer. Evaluation datasets with more than 32 columns fall back to SDPA.
+Feature attention: the attention across the columns of a row uses a custom Triton kernel. the sequence is at most 21 tokens (20 features and the target), one program per (row, head) does the forward pass and another the backward pass. tables with more than 32 columns (evaluation) fall back to SDPA.
 
 ```python
-# before x = F.scaled_dot_product_attention(q, k, v)
-# after  x = feat_attn(q, k, v)
+# before
+x = F.scaled_dot_product_attention(q, k, v)
+# after
+x = feat_attn(q, k, v)
 ```
 
-**Optimizer.** Gradient clipping and the Muon step are captured once as a CUDA graph and replayed at every step, which replaces about 60 launches with a single one. Muon performs the same update as in #10, but each group of equally shaped matrices is now a single compiled graph (`MuonFused`). Adam remains eager because its scheduled values change at every step.
+Precision: the residual stream stays in bf16 inside the transformer, before the thinking rows concat promoted it to fp32.
 
 ```python
-# before gnorms.append(clip_grad_norm_(model.parameters(), c.grad_clip)); for opt in optimizers: opt.step()
-# after  gnorms.append(step_graph()); optimizer_adam.step()
+src = src.to(torch.bfloat16)
 ```
 
-**Precision.** The residual stream is kept in bf16 inside the transformer. Previously, concatenating the thinking rows promoted it to fp32.
+Compilation: two settings stop the layer from recompiling, and the layer is compiled with autotuned matmuls and combined kernels.
 
 ```python
-# src = src.to(torch.bfloat16)
+torch._dynamo.config.specialize_float = True
+torch.fx.experimental._config.backed_size_oblivious = True
+LAYER_OPTS = {"max_autotune": True, "combo_kernels": True}
 ```
 
-**Compilation.** Three settings reduce the first epoch from 5.2 s to 2.9 s on host A. `specialize_float` prevents dynamo from restarting the compilation of the first layer, and `backed_size_oblivious` prevents the bf16 casts from triggering a recompilation for every input width. The layer is also compiled with `max_autotune` and `combo_kernels`.
+Optimizer: Muon does the same update, but each group of equally shaped matrices is one compiled graph (`MuonFused`), and gradient clipping plus the Muon step are recorded once as a CUDA graph and replayed every step (`StepGraph`). Adam stays eager.
 
 ```python
-# torch._dynamo.config.specialize_float = True
-# torch.fx.experimental._config.backed_size_oblivious = True
-# @torch.compile(dynamic=True, options={"max_autotune": True, "combo_kernels": True})
+# before
+gnorms.append(torch.nn.utils.clip_grad_norm_(model.parameters(), c.grad_clip))
+for opt in optimizers:
+    opt.step()
+# after
+gnorms.append(step_graph())
+optimizer_adam.step()
 ```
 
-## Ablation
+## Ablation Study
 
-The ablation measures timing only, on host B: each configuration trains for 10 epochs without evaluation, three times, and I report medians. "Epoch t" is the median time of epochs 2-10. `train_nano_abl.py` is the submitted file with one switch per change, `ablate_l40s.sh` runs all configurations, and the logs are in `logs/ablation_hostB/`.
+ran multiple trials per knob in one direction:
+- removing the change from the launchbound record
 
-| configuration | epoch 1 | epoch t |
-| --- | --- | --- |
-| #10 | 7.08 s | 0.82 s |
-| all changes disabled | 6.01 s | 0.80 s |
-| this record | 3.77 s | 0.57 s |
+Record:
+- launchbound stats: mean: 28.86s (0.48m) std: 4.46s median: 27.58s (0.46m)
 
-The table below gives the relative change when one component is removed from this record, and when it is added alone to the configuration with all changes disabled.
+Removing each change from the launchbound record:
 
-| change | removed (epoch 1 / epoch t) | added alone (epoch 1 / epoch t) |
-| --- | --- | --- |
-| `attention` | `-1%` / `+21%` | `+5%` / `-14%` |
-| `bf16`      | `+1%` / `+16%` | `+3%` / `-8%`  |
-| `graph`     | `+1%` / `+9%`  | `+7%` / `-1%`  |
-| `compile`   | `+69%` / `+5%` | `-35%` / `+1%` |
-| `muon`      | `+8%` / `0%`   | `-1%` / `0%`   |
+| knob | launchbound - knob | mean | std | median |
+| --- | --- | --- | --- | --- |
+| `attention` | `+42%` | 40.41s (0.67m) | 6.92s | 39.08s (0.65m) |
+| `bf16`      | `+22%` | 34.49s (0.57m) | 2.94s | 33.62s (0.56m) |
+| `compile`   | `+12%` | 31.14s (0.52m) | 1.34s | 30.82s (0.51m) |
+| `muon`      | `+1%`  | 28.75s (0.48m) | 2.55s | 27.85s (0.46m) |
+| `graph`     | `-1%`  | 27.95s (0.47m) | 1.62s | 27.41s (0.46m) |
 
-The attention kernel and the bf16 stream account for most of the per-epoch gain, while the compilation settings account for the shorter first epoch. The CUDA graph has little effect on its own and helps only once the layer itself is fast; on host A it was the largest single gain. Because the components interact, the individual effects do not sum to the total. The configuration with all changes disabled still contains two `.contiguous()` calls, which explains why its first epoch is about 1 s shorter than that of #10.
+percentages compare medians, rounded to whole numbers. 17 runs per knob, 31 for the record.
 
-## Notes
+`muon` (`MuonFused`) and `graph` (`StepGraph`) show no effect on our nodes when removed one at a time. his own ablation in the pr agrees on `muon` and has a gain for `graph` that depends on the host cpu.
 
-- Apart from the training step, the file is unchanged: the data loader, the preprocessing, the classifier and everything from `model.eval()` to the end of the file are identical to #10.
-- I initially tuned on a workstation RTX 5000 Ada, where kernel launches are about three times cheaper. There, a batch size of 1 with 64 steps was about 50% faster, but on the L40S it was twice as slow per epoch. All tuning and timing reported here were therefore done on the L40S.
-- The following did not help on the L40S: the packing from PR #20, `cpp_wrapper` (+3.4 s in the first epoch), compiling the whole model, other compilation modes, forcing SDPA backends, variants of Muon and of the learning-rate schedule, a sweep over 19 hyperparameter variants and a sweep over 12 architecture variants.
+## Comparison
+
+31 runs each of record 10 (pr19), record 11 (pr19+pr20), this one (pr22) and this one with the feature width sorting kept (pr20+pr22), bars show 95% bootstrap confidence intervals. these are the first re-timing runs from 30/09, the table above is from a second set on 07/10.
+
+![pr19, pr19+pr20, pr22 and pr20+pr22, 31 runs each](https://github.com/user-attachments/assets/7f346f8c-d77d-40bf-b980-1b025a15183c)
