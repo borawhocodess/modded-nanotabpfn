@@ -180,17 +180,16 @@ This record is by @ShounakBanerj15
 
 ## 12 - 0.46 minutes - Triton feature attention, bf16 residual stream, CUDA graph optimizer step
 
-[]()
+[13/10/26](https://x.com/boratwits/status/2110046696956887309)
 
 New NanoTabPFN speedrun record: Beating RF in 0.46 minutes
 
 Previous record: 0.76 minutes
 Changelog:
-- Custom Triton kernel for feature attention
-- bfloat16 residual stream
+- Triton kernel for feature attention
+- bf16 residual stream
 - Autotuned matmuls and combined kernels
-- Compile Muon update per shape group
-- CUDA graph replay of gradient clip and Muon update
+- Fused Muon update replayed as CUDA graph
 
 This record is by @Xingyu_9
 
