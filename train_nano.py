@@ -359,6 +359,104 @@ def _bwd(Q, K, V, O, DO, L, DQ, DK, DV, sqn, sqh, sqc, skn, skh, skc, svn, svh, 
     tl.store(DV + off, dv.to(DV.dtype.element_ty), mask=m)
 
 
+@triton.jit
+def _packed_fwd(Q, K, V, O, L, sqn, sqh, sqc, skn, skh, skc, svn, svh, svc, son, soh, soc,
+         H: tl.constexpr, C, SPLIT, scale, BC: tl.constexpr, D: tl.constexpr):
+    pid = tl.program_id(0)
+    n = pid // (2 * H)
+    h = (pid // 2) % H
+    group = pid % 2
+    start = tl.where(group == 0, 0, SPLIT)
+    length = tl.where(group == 0, SPLIT, C - SPLIT)
+    local_c = tl.arange(0, BC)
+    c = start + local_c
+    d = tl.arange(0, D)
+    m = local_c[:, None] < length
+    q = tl.load(Q + n * sqn + h * sqh + c[:, None] * sqc + d[None, :], mask=m, other=0.0)
+    k = tl.load(K + n * skn + h * skh + c[:, None] * skc + d[None, :], mask=m, other=0.0)
+    v = tl.load(V + n * svn + h * svh + c[:, None] * svc + d[None, :], mask=m, other=0.0)
+    s = tl.dot(q, tl.trans(k)) * scale
+    s = tl.where(local_c[None, :] < length, s, float("-inf"))
+    mx = tl.max(s, axis=1)
+    p = tl.exp(s - mx[:, None])
+    den = tl.sum(p, axis=1)
+    p = p / den[:, None]
+    o = tl.dot(p.to(v.dtype), v)
+    tl.store(O + n * son + h * soh + c[:, None] * soc + d[None, :], o.to(O.dtype.element_ty), mask=m)
+    tl.store(L + pid * BC + local_c, mx + tl.log(den))
+
+
+@triton.jit
+def _packed_bwd(Q, K, V, O, DO, L, DQ, DK, DV, sqn, sqh, sqc, skn, skh, skc, svn, svh, svc, son, soh, soc,
+         sdn, sdh, sdc, H: tl.constexpr, C, SPLIT, scale, BC: tl.constexpr, D: tl.constexpr):
+    pid = tl.program_id(0)
+    n = pid // (2 * H)
+    h = (pid // 2) % H
+    group = pid % 2
+    start = tl.where(group == 0, 0, SPLIT)
+    length = tl.where(group == 0, SPLIT, C - SPLIT)
+    local_c = tl.arange(0, BC)
+    c = start + local_c
+    d = tl.arange(0, D)
+    m = local_c[:, None] < length
+    q = tl.load(Q + n * sqn + h * sqh + c[:, None] * sqc + d[None, :], mask=m, other=0.0)
+    k = tl.load(K + n * skn + h * skh + c[:, None] * skc + d[None, :], mask=m, other=0.0)
+    v = tl.load(V + n * svn + h * svh + c[:, None] * svc + d[None, :], mask=m, other=0.0)
+    o = tl.load(O + n * son + h * soh + c[:, None] * soc + d[None, :], mask=m, other=0.0)
+    do = tl.load(DO + n * sdn + h * sdh + c[:, None] * sdc + d[None, :], mask=m, other=0.0)
+    lse = tl.load(L + pid * BC + local_c)
+    s = tl.dot(q, tl.trans(k)) * scale
+    p = tl.exp(s - lse[:, None])
+    p = tl.where((local_c[None, :] < length) & (local_c[:, None] < length), p, 0.0)
+    dv = tl.dot(tl.trans(p.to(do.dtype)), do)
+    dp = tl.dot(do, tl.trans(v))
+    delta = tl.sum(do.to(tl.float32) * o.to(tl.float32), axis=1)
+    ds = (p * (dp - delta[:, None]) * scale).to(q.dtype)
+    dq = tl.dot(ds, k)
+    dk = tl.dot(tl.trans(ds), q)
+    # grads are allocated contiguous [N, H, C, D]
+    off = (n * H + h) * C * D + c[:, None] * D + d[None, :]
+    tl.store(DQ + off, dq.to(DQ.dtype.element_ty), mask=m)
+    tl.store(DK + off, dk.to(DK.dtype.element_ty), mask=m)
+    tl.store(DV + off, dv.to(DV.dtype.element_ty), mask=m)
+
+
+@triton_op("nanotab::packed_attn_fwd", mutates_args={})
+def packed_attn_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, split: int) -> tuple[torch.Tensor, torch.Tensor]:
+    N, H, C, D = q.shape
+    o = torch.empty(N, C, H, D, device=q.device, dtype=q.dtype)
+    lse = torch.empty(N * H * 2 * 32, device=q.device, dtype=torch.float32)
+    wrap_triton(_packed_fwd)[(N * H * 2,)](q, k, v, o, lse, q.stride(0), q.stride(1), q.stride(2),
+        k.stride(0), k.stride(1), k.stride(2), v.stride(0), v.stride(1), v.stride(2),
+        C * H * D, D, H * D, H, C, split, D**-0.5, BC=32, D=D, num_warps=4)
+    return o, lse
+
+@triton_op("nanotab::packed_attn_bwd", mutates_args={})
+def packed_attn_bwd(do: torch.Tensor, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, o: torch.Tensor,
+                    lse: torch.Tensor, split: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    N, H, C, D = q.shape
+    dq = torch.empty(N, H, C, D, device=q.device, dtype=q.dtype)
+    dk = torch.empty_like(dq)
+    dv = torch.empty_like(dq)
+    wrap_triton(_packed_bwd)[(N * H * 2,)](q, k, v, o, do, lse, dq, dk, dv, q.stride(0), q.stride(1), q.stride(2),
+        k.stride(0), k.stride(1), k.stride(2), v.stride(0), v.stride(1), v.stride(2),
+        o.stride(0), o.stride(1), o.stride(2), do.stride(0), do.stride(1), do.stride(2),
+        H, C, split, D**-0.5, BC=32, D=D, num_warps=4)
+    return dq, dk, dv
+
+def _packed_setup(ctx, inputs, output):
+    q, k, v, split = inputs
+    o, lse = output
+    ctx.save_for_backward(q, k, v, o, lse)
+    ctx.split = split
+
+def _packed_backward(ctx, do, dlse):
+    q, k, v, o, lse = ctx.saved_tensors
+    return (*packed_attn_bwd(do.transpose(1, 2), q, k, v, o.transpose(1, 2), lse, ctx.split), None)
+
+packed_attn_fwd.register_autograd(_packed_backward, setup_context=_packed_setup)
+
+
 def _bc(C):
     # one tile size for every training width (C <= 21 < 32): a width-dependent choice made dynamo guard on
     # C > 16 and recompile the layer mid-epoch (~0.6 s inside the timed first epoch)
@@ -594,18 +692,31 @@ class NanoTabPFNModel(nn.Module):
         elif len(args) == 1 and isinstance(args[0], tuple):
             return self._forward(*args, **kwargs)
 
-    def _forward(self, src, sep):
+    def _forward(self, src, sep, feature_sizes=None):
         x_src, y_src = src
         if len(y_src.shape) < len(x_src.shape):
             y_src = y_src.unsqueeze(-1)
-        x_src = self.feature_encoder(x_src, sep)
-        num_rows = x_src.shape[1]
-        y_src = self.target_encoder(y_src, num_rows)
-        src = torch.cat([x_src, y_src], 2)
+        split = None
+        if feature_sizes is None:
+            x_src = self.feature_encoder(x_src, sep)
+            y_src = self.target_encoder(y_src, x_src.shape[1])
+            src = torch.cat([x_src, y_src], 2)
+        else:
+            # the two tables of a batch side by side along the columns, without padding columns;
+            # feature attention stays within each table (block diagonal), row attention is per column anyway
+            n0, n1 = feature_sizes
+            f0 = self.feature_encoder(x_src[:1, :, :n0], sep)
+            f1 = self.feature_encoder(x_src[1:2, :, :n1], sep)
+            ys = self.target_encoder(y_src, x_src.shape[1])
+            src = torch.cat([f0, ys[:1], f1, ys[1:2]], 2)
+            split = n0 + 1
         src, sep = self.thinking_rows(src, sep)
         src = src.to(torch.bfloat16)  # residual stream in bf16 inside the transformer
-        output = self.transformer_encoder(src, sep)
-        output = output[:, sep:, :-1, :].mean(dim=2)
+        output = self.transformer_encoder(src, sep, split=split)
+        if split is None:
+            output = output[:, :, :-1, :].mean(dim=2)
+        else:
+            output = torch.cat([output[:, :, :split - 1].mean(2), output[:, :, split:-1].mean(2)], 0)
         output = self.decoder(output)
         return output
 
@@ -648,10 +759,10 @@ class TransformerEncoderStack(nn.Module):
         for _ in range(l):
             self.transformer_blocks.append(TransformerEncoderLayer(a, e, h))
 
-    def forward(self, x, sep):
+    def forward(self, x, sep, split=None):
         for i, block in enumerate(self.transformer_blocks):
             x = x * (self.residual_decay ** i)
-            x = block(x, sep=sep)
+            x = block(x, sep=sep, query_only=(i == len(self.transformer_blocks) - 1), split=split)
         return x
 
 
@@ -673,7 +784,7 @@ class TransformerEncoderLayer(nn.Module):
         self.norm3 = LowerPrecisionRMSNorm(e, eps=eps)
 
     @torch.compile(dynamic=True, options=LAYER_OPTS)
-    def forward(self, src, sep):
+    def forward(self, src, sep, query_only=False, split=None):
         b, r, c, e = src.shape
 
         x = src.reshape(b * r, c, e)
@@ -685,7 +796,7 @@ class TransformerEncoderLayer(nn.Module):
         qkv = qkv.permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
 
-        x = feat_attn(q, k, v)
+        x = feat_attn(q, k, v) if split is None else packed_attn_fwd(q, k, v, split)[0].transpose(1, 2)
         x = x.transpose(1, 2).reshape(b * r, c, e)
 
         src = res + x
@@ -703,6 +814,10 @@ class TransformerEncoderLayer(nn.Module):
         k_train = k[:, :, :sep, :]
         v_train = v[:, :, :sep, :]
 
+        if query_only:
+            q = q[:, :, sep:, :]
+            res = res[:, sep:, :]
+            r = r - sep
         x = F.scaled_dot_product_attention(q, k_train, v_train)
         x = x.transpose(1, 2).reshape(b * c, r, e)
 
@@ -744,13 +859,15 @@ class PriorDumpDataLoader(DataLoader):
             self.sep_key = "single_eval_pos" if "single_eval_pos" in f else "train_test_split_index"
         self.device = device
         self.pointer = 0
+        self.q = None
 
     def _produce(self, q, num_steps):
         with h5py.File(self.filename, "r") as f:
             for _ in range(num_steps):
                 end = self.pointer + self.batch_size
 
-                num_features = f["num_features"][self.pointer : end].max()
+                feature_sizes = tuple(int(n) for n in f["num_features"][self.pointer : end])
+                num_features = max(feature_sizes)
                 x = torch.from_numpy(f["X"][self.pointer : end, :, :num_features])
                 y = torch.from_numpy(f["y"][self.pointer : end])
                 sep = f[self.sep_key][self.pointer : end]
@@ -760,14 +877,15 @@ class PriorDumpDataLoader(DataLoader):
                     print("pointer >= datasets, will reset!")
                     self.pointer = 0
                 valid = not (torch.isnan(x).any().item() or torch.isnan(y).any().item())
-                q.put((x.pin_memory(), y.pin_memory(), sep[0].item(), valid))
+                q.put((x.pin_memory(), y.pin_memory(), sep[0].item(), valid, feature_sizes))
 
     def __iter__(self):
-        q = queue.Queue(maxsize=4)
-        t = threading.Thread(target=self._produce, args=(q, self.num_steps), daemon=True)
-        t.start()
+        # one producer for the whole run: it keeps reading the next epoch's batches (same order) while we evaluate
+        if self.q is None:
+            self.q = queue.Queue(maxsize=2 * self.num_steps)
+            threading.Thread(target=self._produce, args=(self.q, 1 << 40), daemon=True).start()
         for _ in range(self.num_steps):
-            x, y, sep, valid = q.get()
+            x, y, sep, valid, feature_sizes = self.q.get()
             xg = x.to(self.device, non_blocking=True)
             yg = y.to(self.device, non_blocking=True)
             yield dict(
@@ -776,6 +894,7 @@ class PriorDumpDataLoader(DataLoader):
                 target_y=yg,
                 sep=sep,
                 valid=valid,
+                feature_sizes=feature_sizes,
             )
 
     def __len__(self):
@@ -930,6 +1049,48 @@ lawa_queue = collections.deque(maxlen=c.lawa_k)
 # grad clip + Muon step replayed as one CUDA graph (captured after 3 eager steps)
 step_graph = StepGraph(model.parameters(), optimizer_muon, c.grad_clip)
 
+
+@torch.no_grad()
+def reset_training_state(init_state):
+    model.load_state_dict(init_state)  # in place, so captured graphs keep pointing at the parameters
+    for _, _, bufs in optimizer_muon.buckets:
+        torch._foreach_zero_(bufs)
+    optimizer_adam.state.clear()
+    optimizer_adam.param_groups[0].update(k=0, train_mode=False, weight_sum=0.0, lr_max=-1.0, scheduled_lr=0.0)
+    for p in model.parameters():
+        p.grad = None
+
+
+def warmup_kernels():
+    """
+    kernel warmup outside the timer (as in modded-nanogpt): train steps on random tables of every width load the
+    compiled kernels and capture the optimizer graph, then weights and optimizer state go back to their initial
+    values. no training data is touched and nothing learned here survives.
+    """
+    init_state = {k: v.clone() for k, v in model.state_dict().items()}
+    gen = torch.Generator(device=device).manual_seed(0)
+    model.train()
+    optimizer_adam.train()
+    for nf in range(1, prior.max_cols + 1):
+        sep = 100 + (37 * nf) % 800
+        x = torch.randn(c.batch_size, prior.max_rows, nf, device=device, generator=gen)
+        y = torch.randint(0, c.o, (c.batch_size, prior.max_rows), device=device, generator=gen).float()
+        for opt in optimizers:
+            opt.zero_grad(set_to_none=True)
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            # packed pair of a width-nf table and a 1-feature table, the wide one alternating sides
+            sizes = (nf, 1) if nf % 2 else (1, nf)
+            output = model((x, y[:, :sep]), sep=sep, feature_sizes=sizes)
+            loss = criterion(output.reshape(-1, output.shape[-1]), y[:, sep:].reshape(-1).long())
+        loss.backward()
+        step_graph()
+        optimizer_adam.step()
+    torch.cuda.synchronize()
+    reset_training_state(init_state)
+
+
+warmup_kernels()
+
 t_t = 0.0
 prev_muon = None
 prev_adam = None
@@ -959,7 +1120,7 @@ for epoch in range(1, c.epochs + 1):
             opt.zero_grad(set_to_none=True)
 
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            output = model((x, y), sep=sep)
+            output = model((x, y), sep=sep, feature_sizes=full_data["feature_sizes"])
             output = output.reshape(-1, output.shape[-1])
             targets = targets.reshape((-1,)).to(torch.long)
             loss = criterion(output, targets)
