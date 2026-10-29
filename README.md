@@ -99,6 +99,18 @@ Please include the log `train_nano.py` writes for the median run.
 Every PR is re-timed on our nodes, so timings from other hardware are welcome.
 
 
+## Timing details
+
+All records since record 9 (autohuman) are timed with a warm `torch.compile` cache.
+
+The timer includes the first epoch, and the first epoch includes compilation. Runs that happened to land on a node with a warm cache were faster by luck. To level this, every timed run is preceded by a throwaway one-epoch run on the same node:
+
+```bash
+uv run python train_nano.py --name test --epochs 1  # discarded
+uv run python train_nano.py --name runname
+```
+
+
 ## Evaluation details
 
 Evaluation is on all of 38 TabArena classification tasks.
