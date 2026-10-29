@@ -213,93 +213,6 @@ TABPFN_PAPER_CLASSIFICATION_TASKS = [
 # techniques
 
 
-def zeropower_via_svd(G, steps=None):
-    U, S, V = G.svd()
-    return U @ V.T
-
-@torch.compile
-def zeropower_via_newtonschulz5(G, steps=10, eps=1e-7):
-    assert len(G.shape) == 2
-    a, b, c = (3.4445, -4.7750,  2.0315)
-    X = G.bfloat16()
-    X /= (X.norm() + eps)
-    if G.size(0) > G.size(1):
-        X = X.T
-    for _ in range(steps):
-        A = X @ X.T
-        B = A @ X
-        X = a * X + b * B + c * A @ B
-    if G.size(0) > G.size(1):
-        X = X.T
-    return X.to(G.dtype)
-
-@torch.compile
-def zeropower_via_newtonschulz5_batched(G, steps=10, eps=1e-7):
-    a, b, c = (3.4445, -4.7750,  2.0315)
-    X = G.bfloat16()
-    X /= (X.norm(dim=(1, 2), keepdim=True) + eps)
-    if X.size(1) > X.size(2):
-        X = X.transpose(1, 2)
-    for _ in range(steps):
-        A = X @ X.transpose(1, 2)
-        B = A @ X
-        X = a * X + b * B + c * A @ B
-    if G.size(1) > G.size(2):
-        X = X.transpose(1, 2)
-    return X.to(G.dtype)
-
-zeropower_backends = dict(svd=zeropower_via_svd, newtonschulz5=zeropower_via_newtonschulz5)
-
-class Muon(torch.optim.Optimizer):
-    """
-    code adapted from: https://github.com/KellerJordan/modded-nanogpt/commit/b356a1f
-    """
-    def __init__(self, params, lr=3e-4, momentum=0.95, nesterov=True, backend='newtonschulz5', backend_steps=5, weight_decay=0.0):
-        defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, backend=backend, backend_steps=backend_steps, weight_decay=weight_decay)
-        super().__init__(params, defaults)
-
-    def step(self):
-        for group in self.param_groups:
-            lr = group['lr']
-            momentum = group['momentum']
-            params = [p for p in group['params'] if p.grad is not None]
-            grads = [p.grad for p in params]
-            bufs = []
-            for p, g in zip(params, grads):
-                state = self.state[p]
-                if 'momentum_buffer' not in state:
-                    state['momentum_buffer'] = torch.zeros_like(g)
-                bufs.append(state['momentum_buffer'])
-            torch._foreach_mul_(bufs, momentum)
-            torch._foreach_add_(bufs, grads)
-            if group['nesterov']:
-                gs = torch._foreach_add(grads, bufs, alpha=momentum)
-            else:
-                gs = list(bufs)
-            buckets = {}
-            for idx, g in enumerate(gs):
-                if g.size(0) == 3 * g.size(1):
-                    key = ('qkv', g.size(1))
-                else:
-                    key = ('mat', g.size(0), g.size(1))
-                buckets.setdefault(key, []).append(idx)
-            for key, idxs in buckets.items():
-                if key[0] == 'qkv':
-                    n = key[1]
-                    stack = torch.stack([gs[i].view(3, n, n) for i in idxs]).view(-1, n, n)
-                    ortho = zeropower_via_newtonschulz5_batched(stack, steps=group['backend_steps'])
-                    ortho = ortho.view(len(idxs), 3 * n, n)
-                    scale = n**0.5
-                else:
-                    stack = torch.stack([gs[i] for i in idxs])
-                    ortho = zeropower_via_newtonschulz5_batched(stack, steps=group['backend_steps'])
-                    scale = max(key[1], key[2])**0.5
-                sel = [params[i].data for i in idxs]
-                torch._foreach_add_(sel, list(ortho.unbind(0)), alpha=-lr * scale)
-                if group['weight_decay'] > 0:
-                    torch._foreach_mul_(sel, 1 - lr * group['weight_decay'])
-
-
 @triton.jit
 def _fwd(Q, K, V, O, L, sqn, sqh, sqc, skn, skh, skc, svn, svh, svc, son, soh, soc,
          H: tl.constexpr, C, scale, BC: tl.constexpr, D: tl.constexpr):
@@ -408,9 +321,7 @@ def feat_attn(q, k, v):
 
 class MuonFused(torch.optim.Optimizer):
     """
-    same update as Muon above (nesterov momentum, NS5 on the same buckets, update then decoupled wd), but each bucket
-    is one torch.compile'd static-shape graph: momentum + stack + Newton-Schulz + parameter update fused, a few kernels
-    instead of ~60 small ones and their Python dispatch.
+    code adapted from: https://github.com/KellerJordan/modded-nanogpt/commit/b356a1f
     """
     def __init__(self, params, lr=3e-4, momentum=0.95, backend_steps=5, weight_decay=0.0):
         super().__init__(params, dict(lr=lr, momentum=momentum, backend_steps=backend_steps, weight_decay=weight_decay))
