@@ -129,11 +129,12 @@ print0("=" * 100)
 print0(f"start timestamp: {start_ts.strftime('%Y-%m-%d %H:%M:%S')}", console=True)
 print0(f"host: {socket.gethostname()}")
 print0(f"platform: {platform.platform()}")
-print0(f"cpu: {next(l.split(':')[1].strip() for l in open('/proc/cpuinfo') if l.startswith('model name'))} ({len(os.sched_getaffinity(0))} cores)")
 print0(f"python: {sys.version}")
 print0(f"torch: {torch.version.__version__}")
 print0(f"cuda: {torch.version.cuda}")
 print0(subprocess.run(["nvidia-smi"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True).stdout)
+cpu = next(l.split(":")[1].strip() for l in open("/proc/cpuinfo") if l.startswith("model name"))
+print0(f"cpu: {cpu} ({len(os.sched_getaffinity(0))} cores)")
 print0("=" * 100)
 
 TABARENA_CLASSIFICATION_TASKS = [
