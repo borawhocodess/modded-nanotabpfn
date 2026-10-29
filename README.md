@@ -90,6 +90,15 @@ New records must:
 Other than that, anything and everything is fair game!
 
 
+## Submitting a record
+
+Open a PR titled `[RECORD SUBMISSION] <recordtitle>` and follow the [template](.github/pull_request_template.md).
+
+Please include the log `train_nano.py` writes for the median run.
+
+Every PR is re-timed on our nodes, so timings from other hardware are welcome.
+
+
 ## Evaluation details
 
 Evaluation is on all of 38 TabArena classification tasks.
