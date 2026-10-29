@@ -94,11 +94,8 @@ torch.manual_seed(c.seed)
 torch.set_float32_matmul_precision('high')
 import torch._dynamo
 torch._dynamo.config.cache_size_limit = 128
-# python floats as constants: otherwise dynamo tensorifies them and restarts the first layer compile (~1.2 s)
 torch._dynamo.config.specialize_float = True
-# bf16 casts inside the layer would otherwise pin the column count through stride checks (one recompile per width)
 torch.fx.experimental._config.backed_size_oblivious = True
-# inductor options for the layer: autotuned matmuls; combo kernels fuse independent small kernels into one launch
 LAYER_OPTS = {"max_autotune": True, "combo_kernels": True}
 
 assert torch.cuda.is_available()
@@ -303,8 +300,6 @@ class Muon(torch.optim.Optimizer):
                     torch._foreach_mul_(sel, 1 - lr * group['weight_decay'])
 
 
-# fused short-sequence feature attention (seq = columns + 1 <= 32, head_dim 64)
-
 @triton.jit
 def _fwd(Q, K, V, O, L, sqn, sqh, sqc, skn, skh, skc, svn, svh, svc, son, soh, soc,
          H: tl.constexpr, C, scale, BC: tl.constexpr, D: tl.constexpr):
@@ -352,7 +347,6 @@ def _bwd(Q, K, V, O, DO, L, DQ, DK, DV, sqn, sqh, sqc, skn, skh, skc, svn, svh, 
     ds = (p * (dp - delta[:, None]) * scale).to(q.dtype)
     dq = tl.dot(ds, k)
     dk = tl.dot(tl.trans(ds), q)
-    # grads are allocated contiguous [N, H, C, D]
     off = pid * C * D + c[:, None] * D + d[None, :]
     tl.store(DQ + off, dq.to(DQ.dtype.element_ty), mask=m)
     tl.store(DK + off, dk.to(DK.dtype.element_ty), mask=m)
@@ -360,8 +354,6 @@ def _bwd(Q, K, V, O, DO, L, DQ, DK, DV, sqn, sqh, sqc, skn, skh, skc, svn, svh, 
 
 
 def _bc(C):
-    # one tile size for every training width (C <= 21 < 32): a width-dependent choice made dynamo guard on
-    # C > 16 and recompile the layer mid-epoch (~0.6 s inside the timed first epoch)
     return 32
 
 
@@ -369,8 +361,6 @@ def _bc(C):
 def feat_attn_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     N, H, C, D = q.shape
     BC = _bc(C)
-    # returned as a plain contiguous [N, C, H, D] tensor (a strided output of a custom op makes dynamo pin C);
-    # feat_attn() transposes it to [N, H, C, D] as a view, so the caller's transpose(1, 2).reshape(N, C, H*D) is free
     o = torch.empty(N, C, H, D, device=q.device, dtype=q.dtype)
     lse = torch.empty(N * H * BC, device=q.device, dtype=torch.float32)
     wrap_triton(_fwd)[(N * H,)](q, k, v, o, lse, q.stride(0), q.stride(1), q.stride(2), k.stride(0), k.stride(1),
@@ -401,7 +391,6 @@ def _setup(ctx, inputs, output):
 
 def _backward(ctx, do, dlse):
     q, k, v, o, lse = ctx.saved_tensors
-    # o and do are [N, C, H, D]; the kernel indexes them as [N, H, C, D] views
     return feat_attn_bwd(do.transpose(1, 2), q, k, v, o.transpose(1, 2), lse)
 
 
@@ -508,9 +497,8 @@ class StepGraph:
         self.static_grads = [p.grad.detach().clone() for p in self.params]
         for p, g in zip(self.params, self.static_grads):
             p.grad = g
-        # one side-stream warmup so lazy inits happen outside capture, then undo its side effects
         muon_params = [p for grp in self.muon.param_groups for p in grp["params"]]
-        if getattr(self.muon, "buckets", None) is not None:  # MuonFused keeps its momentum buffers per bucket
+        if getattr(self.muon, "buckets", None) is not None:
             bufs = [b for _, _, bs in self.muon.buckets for b in bs]
         else:
             bufs = [self.muon.state[p]["momentum_buffer"] for p in muon_params]
@@ -523,7 +511,6 @@ class StepGraph:
         torch._foreach_copy_(muon_params + bufs + self.static_grads, snap)
         torch.cuda.synchronize()
         self.graph = torch.cuda.CUDAGraph()
-        # thread_local: the producer thread keeps pinning host memory while we capture
         with torch.cuda.graph(self.graph, capture_error_mode="thread_local"):
             self.norm = self._body()
 
@@ -603,7 +590,7 @@ class NanoTabPFNModel(nn.Module):
         y_src = self.target_encoder(y_src, num_rows)
         src = torch.cat([x_src, y_src], 2)
         src, sep = self.thinking_rows(src, sep)
-        src = src.to(torch.bfloat16)  # residual stream in bf16 inside the transformer
+        src = src.to(torch.bfloat16)
         output = self.transformer_encoder(src, sep)
         output = output[:, sep:, :-1, :].mean(dim=2)
         output = self.decoder(output)
@@ -927,7 +914,6 @@ criterion = nn.CrossEntropyLoss()
 
 lawa_queue = collections.deque(maxlen=c.lawa_k)
 
-# grad clip + Muon step replayed as one CUDA graph (captured after 3 eager steps)
 step_graph = StepGraph(model.parameters(), optimizer_muon, c.grad_clip)
 
 t_t = 0.0
