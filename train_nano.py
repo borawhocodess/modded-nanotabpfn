@@ -548,7 +548,7 @@ class ThinkingRows(nn.Module):
 # model
 
 
-class NanoTabPFNModel(nn.Module):
+class ModdedNanoTabPFN(nn.Module):
     def __init__(self, l, a, e, h, o, residual_decay=1.0, thinking_rows=16, feature_group_size=3):
         """
         l : num layers
@@ -775,7 +775,7 @@ class PriorDumpDataLoader(DataLoader):
 
 def init_model_from_ckpt_file(file_path):
     ckpt = torch.load(file_path, map_location="cpu")
-    model = NanoTabPFNModel(
+    model = ModdedNanoTabPFN(
         l=ckpt["arch"]["l"],
         a=ckpt["arch"]["a"],
         e=ckpt["arch"]["e"],
@@ -837,7 +837,7 @@ def get_feature_preprocessor(X):
     return preprocessor
 
 
-class NanoTabPFNClassifier:
+class ModdedNanoTabPFNClassifier:
     def __init__(self, model=None):
         device = "cuda"
         if model is None:
@@ -884,7 +884,7 @@ prior = PriorDumpDataLoader(
 )
 c.o = prior.max_num_classes
 
-model = NanoTabPFNModel(
+model = ModdedNanoTabPFN(
     l=c.l,
     a=c.a,
     e=c.e,
@@ -995,10 +995,10 @@ for epoch in range(1, c.epochs + 1):
             avg_state[key] = avg_state[key].to(dtype=lawa_queue[0][key].dtype).to(device)
         saved_state = {k: v.clone() for k, v in model.state_dict().items()}
         model.load_state_dict(avg_state)
-        clf = NanoTabPFNClassifier(model)
+        clf = ModdedNanoTabPFNClassifier(model)
     else:
         saved_state = None
-        clf = NanoTabPFNClassifier(model)
+        clf = ModdedNanoTabPFNClassifier(model)
     aucs = []
 
     for task_id in TABARENA_CLASSIFICATION_TASKS:

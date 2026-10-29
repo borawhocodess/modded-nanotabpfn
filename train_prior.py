@@ -242,7 +242,7 @@ class PriorDataLoader:
             yield self.prior.batch(self.batch_size)
 
 
-class ModdedNanoTabPFNModel(nn.Module):
+class ModdedNanoTabPFN(nn.Module):
     def __init__(self, config):
         super().__init__()
         c = config
@@ -582,7 +582,7 @@ prior = ModdedNanoPrior(config=pc, device=device)
 loader = PriorDataLoader(prior=prior, batch_size=sc.batch_size)
 batches = iter(loader)
 
-model = ModdedNanoTabPFNModel(config=mc).to(device)
+model = ModdedNanoTabPFN(config=mc).to(device)
 
 muon_p = []
 adam_p = []
