@@ -68,6 +68,11 @@ class Config:
     grad_clip: float = 2.0
     lawa_k: int = 10
     lawa_freq: int = 1
+    tta_members: int = 8
+    ttft_steps: int = 8
+    ttft_lr: float = 3e-6
+    ttft_context: float = 0.7
+    ttft_grad_clip: float = 1.0
     eval_folds: int = 5
     eval_subsample_samples: int | None = 1000
     eval_subsample_features: int | None = 100
@@ -759,12 +764,45 @@ class ModdedNanoTabPFNClassifier:
             model = init_model_from_ckpt_file(model)
         self.model = model.to(device)
         self.device = device
+        self.base_state = None
 
     def fit(self, X_train, y_train):
         self.feature_preprocessor = get_feature_preprocessor(X_train)
         self.X_train = self.feature_preprocessor.fit_transform(X_train)
         self.y_train = y_train
         self.num_classes = max(set(y_train)) + 1
+        self.finetune()
+
+    def restore(self):
+        if self.base_state is not None:
+            self.model.load_state_dict(self.base_state)
+            self.base_state = None
+
+    def finetune(self):
+        """
+        test-time fine-tuning on the training rows of this fit only: every step splits them at random into context
+        and query rows. the weights are put back after predict_proba, nothing carries over to the next fit.
+        """
+        self.restore()
+        self.base_state = {k: v.clone() for k, v in self.model.state_dict().items()}
+        x = torch.from_numpy(self.X_train).to(torch.float).to(self.device)
+        y = torch.from_numpy(self.y_train).to(torch.float).to(self.device)
+        sep = int(len(x) * c.ttft_context)
+        params = list(self.model.parameters())
+        optimizer = torch.optim.AdamW(params, lr=c.ttft_lr, weight_decay=0.0)
+        generator = torch.Generator().manual_seed(0)
+        for _ in range(c.ttft_steps):
+            perm = torch.randperm(len(x), generator=generator).to(self.device)
+            xp, yp = x[perm], y[perm]
+            # set_to_none: after training p.grad is a static buffer of the StepGraph
+            optimizer.zero_grad(set_to_none=True)
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                out = self.model((xp.unsqueeze(0), yp[:sep].unsqueeze(0)), sep=sep).squeeze(0)
+                loss = F.cross_entropy(out[:, : self.num_classes], yp[sep:].long())
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(params, c.ttft_grad_clip)
+            optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
 
     def predict(self, X_test):
         predicted_probabilities = self.predict_proba(X_test)
@@ -773,16 +811,23 @@ class ModdedNanoTabPFNClassifier:
     def predict_proba(self, X_test):
         x = np.concatenate((self.X_train, self.feature_preprocessor.transform(X_test)))
         y = self.y_train
+        rng = np.random.default_rng(0)
         with torch.no_grad():
             x = torch.from_numpy(x).unsqueeze(0).to(torch.float).to(self.device)
             y = torch.from_numpy(y).unsqueeze(0).to(torch.float).to(self.device)
 
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                out = self.model((x, y), sep=len(self.X_train)).squeeze(0)
-                out = out[:, : self.num_classes]
-                probabilities = F.softmax(out, dim=1)
+            probabilities = 0
+            for member in range(c.tta_members):
+                # member 0 keeps the feature order, the others see a random feature permutation
+                cols = rng.permutation(x.shape[-1]) if member else np.arange(x.shape[-1])
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    out = self.model((x[:, :, cols], y), sep=len(self.X_train)).squeeze(0)
+                    out = out[:, : self.num_classes]
+                    probabilities = probabilities + F.softmax(out, dim=1)
+            probabilities = probabilities / c.tta_members
 
-            return probabilities.to("cpu").numpy()
+        self.restore()
+        return probabilities.to("cpu").numpy()
 
 
 # -----------------------------------------------------------------------------
