@@ -8,7 +8,7 @@ The code is derived from [nanoTabPFN](https://github.com/automl/nanoTabPFN) with
 
 This repo now contains a training algorithm which attains the target performance in:
 * X.XX minutes on 1xL40S (baseline needed 74.32)
-* 3392 synthetic datasets (baseline needed 80576)
+* 2560 synthetic datasets (baseline needed 80576)
 
 This improvement in training speed has been brought about by the following techniques:
 * Muon optimizer
@@ -45,6 +45,11 @@ This improvement in training speed has been brought about by the following techn
 * CUDA graph replay of gradient clip and Muon update
 * Feature-permutation ensembling of 8 members at inference
 * Per-fold test-time fine-tuning of 8 AdamW steps at inference
+* Increase Muon weight decay from 0.1 to 0.5 and Muon learning rate scale from 0.1 to 0.14
+* Shorten AdamWScheduleFree warmup from 1000 to 50 steps, set r=2 and raise its learning rate from 0.001 to 0.0015
+* Reduce gradient clip from 2.0 to 1.0
+* Trilinear feature attention from partner keys and values: query cascade in layer 3, product of two attentions in layer 4
+* Muon learning rate multiplier 0.56 for the partner projections
 
 
 ## Running the current record
@@ -81,6 +86,7 @@ Note: The 0.8068462330697953 target was selected to match the performance of Ran
 | 11 | 0.76 minutes | 26/08/26 | Feature width sorted batching | [log](records/20260826widthsort/260923-231224-59cb2d39-pr20-log.txt),[read](records/20260826widthsort/README.md),[PR](https://github.com/borawhocodess/modded-nanotabpfn/pull/23),[X](https://x.com/boratwits/status/2107816065136767260) | [@shounakb1](https://github.com/shounakb1) |
 | 12 | 0.46 minutes | 28/09/26 | Triton feature attention, bf16 residual stream, CUDA graph optimizer step | [log](records/20260928launchbound/260930-131726-caf9862e-pr22-log.txt),[read](records/20260928launchbound/README.md),[PR](https://github.com/borawhocodess/modded-nanotabpfn/pull/24),[X](https://x.com/boratwits/status/2110046696956887309) | [@XingyuQu](https://github.com/XingyuQu) |
 | 13 | X.XX minutes | 24/11/26 | Test-time adaptation: feature-permutation ensembling, per-fold fine-tuning | [log](records/20261124testtime/261124-004835-2d56a2ac-testtime-log.txt),[read](records/20261124testtime/README.md),[PR](https://github.com/borawhocodess/modded-nanotabpfn/pull/26) | [@KeinNiemand](https://github.com/KeinNiemand) |
+| 14 | X.XX minutes | 28/11/26 | Trilinear feature attention, retuned Muon and AdamWScheduleFree, gradient clip 1 | [log](records/20261128trilinear/261128-175239-b5e6af4c-trilinear-log.txt),[read](records/20261128trilinear/README.md),[PR](https://github.com/borawhocodess/modded-nanotabpfn/pull/27) | [@KeinNiemand](https://github.com/KeinNiemand) |
 
 
 ## Rules

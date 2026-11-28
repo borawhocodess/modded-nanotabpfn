@@ -61,11 +61,15 @@ class Config:
     residual_decay: float = 0.95
     thinking_rows: int = 24
     feature_group_size: int = 5
+    cascade_layers: tuple[int, ...] = (2,)
+    product_layers: tuple[int, ...] = (3,)
+    partner_lr_scale: float = 0.56
+    adam_lr: float = 0.0015
     adam_wd: float = 0.01
-    muon_wd: float = 0.1
-    muon_lr_scale: float = 0.1
+    muon_wd: float = 0.5
+    muon_lr_scale: float = 0.14
     muon_momentum: float = 0.96
-    grad_clip: float = 2.0
+    grad_clip: float = 1.0
     lawa_k: int = 10
     lawa_freq: int = 1
     tta_members: int = 8
@@ -326,6 +330,145 @@ def feat_attn(q, k, v):
     return feat_attn_fwd(q, k, v)[0].transpose(1, 2)
 
 
+@triton.jit
+def _cascade_fwd(Q, K, V, K2, V2, O, L1, L2, sqn, sqh, sqc, skn, skh, skc, svn, svh, svc, s2n, s2h, s2c,
+                 t2n, t2h, t2c, son, soh, soc, H: tl.constexpr, C, scale, BC: tl.constexpr, D: tl.constexpr):
+    pid = tl.program_id(0)
+    n = pid // H
+    h = pid % H
+    c = tl.arange(0, BC)
+    d = tl.arange(0, D)
+    m = c[:, None] < C
+    q = tl.load(Q + n * sqn + h * sqh + c[:, None] * sqc + d[None, :], mask=m, other=0.0)
+    k = tl.load(K + n * skn + h * skh + c[:, None] * skc + d[None, :], mask=m, other=0.0)
+    v = tl.load(V + n * svn + h * svh + c[:, None] * svc + d[None, :], mask=m, other=0.0)
+    k2 = tl.load(K2 + n * s2n + h * s2h + c[:, None] * s2c + d[None, :], mask=m, other=0.0)
+    v2 = tl.load(V2 + n * t2n + h * t2h + c[:, None] * t2c + d[None, :], mask=m, other=0.0)
+    s = tl.dot(q, tl.trans(k2)) * scale
+    s = tl.where(c[None, :] < C, s, float("-inf"))
+    mx2 = tl.max(s, axis=1)
+    p = tl.exp(s - mx2[:, None])
+    den2 = tl.sum(p, axis=1)
+    p = p / den2[:, None]
+    u = tl.dot(p.to(v2.dtype), v2).to(tl.float32)
+    qm = (q.to(tl.float32) * u).to(q.dtype)
+    s = tl.dot(qm, tl.trans(k)) * scale
+    s = tl.where(c[None, :] < C, s, float("-inf"))
+    mx1 = tl.max(s, axis=1)
+    p = tl.exp(s - mx1[:, None])
+    den1 = tl.sum(p, axis=1)
+    p = p / den1[:, None]
+    o = tl.dot(p.to(v.dtype), v).to(tl.float32)
+    tl.store(O + n * son + h * soh + c[:, None] * soc + d[None, :], o.to(O.dtype.element_ty), mask=m)
+    tl.store(L1 + pid * BC + c, mx1 + tl.log(den1))
+    tl.store(L2 + pid * BC + c, mx2 + tl.log(den2))
+
+
+@triton.jit
+def _cascade_bwd(Q, K, V, K2, V2, DO, L1, L2, DQ, DK, DV, DK2, DV2, sqn, sqh, sqc, skn, skh, skc, svn, svh, svc,
+                 s2n, s2h, s2c, t2n, t2h, t2c, sdn, sdh, sdc, H: tl.constexpr, C, scale,
+                 BC: tl.constexpr, D: tl.constexpr):
+    pid = tl.program_id(0)
+    n = pid // H
+    h = pid % H
+    c = tl.arange(0, BC)
+    d = tl.arange(0, D)
+    m = c[:, None] < C
+    q = tl.load(Q + n * sqn + h * sqh + c[:, None] * sqc + d[None, :], mask=m, other=0.0)
+    k = tl.load(K + n * skn + h * skh + c[:, None] * skc + d[None, :], mask=m, other=0.0)
+    v = tl.load(V + n * svn + h * svh + c[:, None] * svc + d[None, :], mask=m, other=0.0)
+    k2 = tl.load(K2 + n * s2n + h * s2h + c[:, None] * s2c + d[None, :], mask=m, other=0.0)
+    v2 = tl.load(V2 + n * t2n + h * t2h + c[:, None] * t2c + d[None, :], mask=m, other=0.0)
+    do = tl.load(DO + n * sdn + h * sdh + c[:, None] * sdc + d[None, :], mask=m, other=0.0).to(tl.float32)
+    lse1 = tl.load(L1 + pid * BC + c)
+    lse2 = tl.load(L2 + pid * BC + c)
+    valid = (c[None, :] < C) & (c[:, None] < C)
+    bt = q.dtype
+    # recompute the forward
+    p2 = tl.where(valid, tl.exp(tl.dot(q, tl.trans(k2)) * scale - lse2[:, None]), 0.0)
+    u = tl.dot(p2.to(bt), v2).to(tl.float32)
+    qm = (q.to(tl.float32) * u).to(bt)
+    p1 = tl.where(valid, tl.exp(tl.dot(qm, tl.trans(k)) * scale - lse1[:, None]), 0.0)
+    a = tl.dot(p1.to(bt), v).to(tl.float32)
+    # attention over (qm, k, v)
+    dob = do.to(bt)
+    dv = tl.dot(tl.trans(p1.to(bt)), dob)
+    ds = (p1 * (tl.dot(dob, tl.trans(v)) - tl.sum(do * a, axis=1)[:, None]) * scale).to(bt)
+    dqm = tl.dot(ds, k).to(tl.float32)
+    dk = tl.dot(tl.trans(ds), qm)
+    dq = dqm * u
+    du = dqm * q.to(tl.float32)
+    # attention over (q, k2, v2), upstream gradient du
+    dub = du.to(bt)
+    dv2 = tl.dot(tl.trans(p2.to(bt)), dub)
+    ds = (p2 * (tl.dot(dub, tl.trans(v2)) - tl.sum(du * u, axis=1)[:, None]) * scale).to(bt)
+    dq += tl.dot(ds, k2).to(tl.float32)
+    dk2 = tl.dot(tl.trans(ds), q)
+    off = pid * C * D + c[:, None] * D + d[None, :]
+    tl.store(DQ + off, dq.to(DQ.dtype.element_ty), mask=m)
+    tl.store(DK + off, dk.to(DK.dtype.element_ty), mask=m)
+    tl.store(DV + off, dv.to(DV.dtype.element_ty), mask=m)
+    tl.store(DK2 + off, dk2.to(DK2.dtype.element_ty), mask=m)
+    tl.store(DV2 + off, dv2.to(DV2.dtype.element_ty), mask=m)
+
+
+@triton_op("nanotab::cascade_attn_fwd", mutates_args={})
+def cascade_attn_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, k2: torch.Tensor,
+                     v2: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    N, H, C, D = q.shape
+    o = torch.empty(N, C, H, D, device=q.device, dtype=q.dtype)
+    l1 = torch.empty(N * H * 32, device=q.device, dtype=torch.float32)
+    l2 = torch.empty(N * H * 32, device=q.device, dtype=torch.float32)
+    wrap_triton(_cascade_fwd)[(N * H,)](
+        q, k, v, k2, v2, o, l1, l2, q.stride(0), q.stride(1), q.stride(2), k.stride(0), k.stride(1), k.stride(2),
+        v.stride(0), v.stride(1), v.stride(2), k2.stride(0), k2.stride(1), k2.stride(2),
+        v2.stride(0), v2.stride(1), v2.stride(2), C * H * D, D, H * D, H, C, D**-0.5, BC=32, D=D, num_warps=4)
+    return o, l1, l2
+
+
+@triton_op("nanotab::cascade_attn_bwd", mutates_args={})
+def cascade_attn_bwd(do: torch.Tensor, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, k2: torch.Tensor,
+                     v2: torch.Tensor, l1: torch.Tensor, l2: torch.Tensor
+                     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    N, H, C, D = q.shape
+    dq = torch.empty(N, H, C, D, device=q.device, dtype=q.dtype)
+    dk = torch.empty_like(dq)
+    dv = torch.empty_like(dq)
+    dk2 = torch.empty_like(dq)
+    dv2 = torch.empty_like(dq)
+    wrap_triton(_cascade_bwd)[(N * H,)](
+        q, k, v, k2, v2, do, l1, l2, dq, dk, dv, dk2, dv2, q.stride(0), q.stride(1), q.stride(2),
+        k.stride(0), k.stride(1), k.stride(2), v.stride(0), v.stride(1), v.stride(2),
+        k2.stride(0), k2.stride(1), k2.stride(2), v2.stride(0), v2.stride(1), v2.stride(2),
+        do.stride(0), do.stride(1), do.stride(2), H, C, D**-0.5, BC=32, D=D, num_warps=4)
+    return dq, dk, dv, dk2, dv2
+
+
+def _cascade_setup(ctx, inputs, output):
+    ctx.save_for_backward(*inputs, output[1], output[2])
+
+
+def _cascade_backward(ctx, do, dl1, dl2):
+    q, k, v, k2, v2, l1, l2 = ctx.saved_tensors
+    if do.stride(-1) != 1:  # the kernel reads rows of D contiguous values
+        do = do.contiguous()
+    return cascade_attn_bwd(do.transpose(1, 2), q, k, v, k2, v2, l1, l2)
+
+
+cascade_attn_fwd.register_autograd(_cascade_backward, setup_context=_cascade_setup)
+
+
+def cascade_attn(q, k, v, k2, v2):
+    """feature attention whose query is first modulated by a second attention over partner keys and values:
+    u = attn(q, k2, v2), out = attn(q * u, k, v). the score of key j is then trilinear, <q, u, k_j>. one kernel
+    launch for [N, H, C<=32, 64] (every training batch), two SDPA calls for wider inputs"""
+    if (q.shape[-2] > 32 or q.shape[-1] != 64 or q.stride(-1) != 1 or k.stride(-1) != 1 or v.stride(-1) != 1
+            or k2.stride(-1) != 1 or v2.stride(-1) != 1):
+        u = F.scaled_dot_product_attention(q, k2, v2)
+        return F.scaled_dot_product_attention(q * u, k, v)
+    return cascade_attn_fwd(q, k, v, k2, v2)[0].transpose(1, 2)
+
+
 class MuonFused(torch.optim.Optimizer):
     """
     code adapted from: https://github.com/KellerJordan/modded-nanogpt/commit/b356a1f
@@ -338,6 +481,7 @@ class MuonFused(torch.optim.Optimizer):
         buckets = {}
         for p in group['params']:
             key = ('qkv', p.size(1)) if p.size(0) == 3 * p.size(1) else ('mat', p.size(0), p.size(1))
+            key = key + (getattr(p, "lr_mult", 1.0),)
             buckets.setdefault(key, []).append(p)
         self.buckets = [(key, ps, [torch.zeros_like(p) for p in ps]) for key, ps in buckets.items()]
 
@@ -376,8 +520,8 @@ class MuonFused(torch.optim.Optimizer):
         for key, ps, bufs in self.buckets:
             n = key[1] if key[0] == 'qkv' else 0
             scale = key[1] ** 0.5 if key[0] == 'qkv' else max(key[1], key[2]) ** 0.5
-            self._bucket_step(ps, [p.grad for p in ps], bufs, group['lr'], group['momentum'], group['weight_decay'],
-                              group['backend_steps'], n, scale)
+            self._bucket_step(ps, [p.grad for p in ps], bufs, group['lr'] * key[-1], group['momentum'],
+                              group['weight_decay'], group['backend_steps'], n, scale)
 
 
 class StepGraph:
@@ -467,7 +611,8 @@ class ThinkingRows(nn.Module):
 
 
 class ModdedNanoTabPFN(nn.Module):
-    def __init__(self, l, a, e, h, o, residual_decay=1.0, thinking_rows=16, feature_group_size=3):
+    def __init__(self, l, a, e, h, o, residual_decay=1.0, thinking_rows=16, feature_group_size=3, cascade_layers=(),
+                 product_layers=()):
         """
         l : num layers
         a : num attention heads
@@ -475,6 +620,7 @@ class ModdedNanoTabPFN(nn.Module):
         h : mlp hidden size
         o : num outputs
         residual_decay : exponential decay of residual stream per layer (1.0 = no decay)
+        cascade_layers, product_layers : layers whose feature attention uses partner keys and values
         """
         super().__init__()
         self.l = l
@@ -484,7 +630,8 @@ class ModdedNanoTabPFN(nn.Module):
         self.o = o
         self.feature_encoder = FeatureEncoder(e, feature_group_size=feature_group_size)
         self.target_encoder = TargetEncoder(e)
-        self.transformer_encoder = TransformerEncoderStack(l, a, e, h, residual_decay=residual_decay)
+        self.transformer_encoder = TransformerEncoderStack(l, a, e, h, residual_decay=residual_decay,
+                                                           cascade_layers=cascade_layers, product_layers=product_layers)
         self.decoder = Decoder(e, h, o)
         self.thinking_rows = ThinkingRows(num_thinking_rows=thinking_rows, e=e)
 
@@ -546,12 +693,17 @@ class TargetEncoder(nn.Module):
 
 
 class TransformerEncoderStack(nn.Module):
-    def __init__(self, l, a, e, h, residual_decay=1.0):
+    def __init__(self, l, a, e, h, residual_decay=1.0, cascade_layers=(), product_layers=()):
         super().__init__()
         self.residual_decay = residual_decay
+        self.cascade_layers = tuple(cascade_layers)
+        self.product_layers = tuple(product_layers)
         self.transformer_blocks = nn.ModuleList()
-        for _ in range(l):
-            self.transformer_blocks.append(TransformerEncoderLayer(a, e, h))
+        partner_seed = 1001
+        for i in range(l):
+            form = "cascade" if i in self.cascade_layers else "product" if i in self.product_layers else "plain"
+            self.transformer_blocks.append(TransformerEncoderLayer(a, e, h, form=form, partner_seed=partner_seed))
+            partner_seed += 2 if form != "plain" else 0
 
     def forward(self, x, sep):
         for i, block in enumerate(self.transformer_blocks):
@@ -561,11 +713,18 @@ class TransformerEncoderStack(nn.Module):
 
 
 class TransformerEncoderLayer(nn.Module):
-    def __init__(self, a, e, h, eps=1e-5):
+    def __init__(self, a, e, h, eps=1e-5, form="plain", partner_seed=0):
+        """
+        form : feature attention. "plain": attn(q, k, v). with partner keys k2 and values v2 of the same features,
+               "cascade": attn(q * attn(q, k2, v2), k, v), "product": attn(q, k, v) * attn(q, k2, v2)
+        partner_seed : the partner projections draw their default init from their own generator, so every other
+                       parameter starts as it does in the plain model
+        """
         super().__init__()
         self.num_heads = a
         self.head_dim = e // a
         assert e % a == 0, "Embedding size must be divisible by heads"
+        self.form = form
 
         self.qkv_datapoints = nn.Linear(e, 3 * e)
         self.qkv_features = nn.Linear(e, 3 * e)
@@ -576,6 +735,15 @@ class TransformerEncoderLayer(nn.Module):
         self.norm1 = LowerPrecisionRMSNorm(e, eps=eps)
         self.norm2 = LowerPrecisionRMSNorm(e, eps=eps)
         self.norm3 = LowerPrecisionRMSNorm(e, eps=eps)
+
+        if form != "plain":
+            for name, seed in (("k2_features", partner_seed), ("v2_features", partner_seed + 1)):
+                lin = torch.nn.utils.skip_init(nn.Linear, e, e)
+                gen = torch.Generator().manual_seed(seed)
+                with torch.no_grad():
+                    lin.weight.uniform_(-e ** -0.5, e ** -0.5, generator=gen)
+                    lin.bias.uniform_(-e ** -0.5, e ** -0.5, generator=gen)
+                setattr(self, name, lin)
 
     @torch.compile(dynamic=True, options=LAYER_OPTS)
     def forward(self, src, sep):
@@ -590,7 +758,16 @@ class TransformerEncoderLayer(nn.Module):
         qkv = qkv.permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
 
-        x = feat_attn(q, k, v)
+        if self.form == "plain":
+            x = feat_attn(q, k, v)
+        else:
+            k2 = self.k2_features(x).reshape(b * r, c, self.num_heads, self.head_dim).transpose(1, 2)
+            v2 = self.v2_features(x).reshape(b * r, c, self.num_heads, self.head_dim).transpose(1, 2)
+            if self.form == "cascade":
+                x = cascade_attn(q, k, v, k2, v2)
+            else:
+                u = feat_attn(q, k2, v2)
+                x = feat_attn(q, k, v) * u
         x = x.transpose(1, 2).reshape(b * r, c, e)
 
         src = res + x
@@ -702,6 +879,8 @@ def init_model_from_ckpt_file(file_path):
         residual_decay=ckpt["arch"]["residual_decay"],
         thinking_rows=ckpt["arch"]["thinking_rows"],
         feature_group_size=ckpt["arch"]["feature_group_size"],
+        cascade_layers=ckpt["arch"]["cascade_layers"],
+        product_layers=ckpt["arch"]["product_layers"],
     )
     if "borders" in ckpt["model"]:
         model.borders = ckpt["model"]["borders"]
@@ -851,6 +1030,8 @@ model = ModdedNanoTabPFN(
     residual_decay=c.residual_decay,
     thinking_rows=c.thinking_rows,
     feature_group_size=c.feature_group_size,
+    cascade_layers=c.cascade_layers,
+    product_layers=c.product_layers,
 ).to(device)
 
 muon_params = []
@@ -859,12 +1040,14 @@ for name, p in model.named_parameters():
     if p.ndim != 2:
         adam_params.append(p)
     elif "transformer_encoder" in name:
+        if "2_features" in name:
+            p.lr_mult = c.partner_lr_scale
         muon_params.append(p)
     else:
         adam_params.append(p)
 
 optimizer_muon = MuonFused(muon_params, lr=c.muon_lr_scale*c.lr, momentum=c.muon_momentum, weight_decay=c.muon_wd)
-optimizer_adam = schedulefree.AdamWScheduleFree(adam_params, lr=c.lr, weight_decay=c.adam_wd, warmup_steps=1000)
+optimizer_adam = schedulefree.AdamWScheduleFree(adam_params, lr=c.adam_lr, weight_decay=c.adam_wd, warmup_steps=50, r=2)
 
 optimizers = [optimizer_muon, optimizer_adam]
 
@@ -1018,6 +1201,8 @@ for epoch in range(1, c.epochs + 1):
                 "residual_decay": model.transformer_encoder.residual_decay,
                 "thinking_rows": model.thinking_rows.num_thinking_rows,
                 "feature_group_size": model.feature_encoder.feature_group_size,
+                "cascade_layers": model.transformer_encoder.cascade_layers,
+                "product_layers": model.transformer_encoder.product_layers,
             },
             "model": model.state_dict(),
         }
